@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from aegis import scm_verifier
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
@@ -26,6 +27,7 @@ from aegis.operator import (
     execution_policy_projection,
     finding_lifecycle_projection,
     finding_projection,
+    nuclei_summary,
     project_event,
     scan_projection,
 )
@@ -36,6 +38,7 @@ from aegis.service import ScanService
 from aegis.settings import get_settings
 from aegis.storage import ScanStore
 from aegis.verifier import DeterministicVerifier
+from aegis_nuclei.manifest import load_manifest, manifest_digest
 
 PACKAGE_DIR = Path(__file__).parent
 settings = get_settings()
@@ -217,7 +220,8 @@ async def console_config() -> dict[str, object]:
         "execution_policy_version": EXECUTION_POLICY_VERSION,
         "scope_badges": ["SYNTHETIC LAB", "LOCAL LLM", "READ-ONLY", "AUTHORIZED TARGET"],
         "screenshots_enabled": screenshot_store.enabled,
-        "operational_engines": [Engine.AEGIS_NATIVE],
+        "operational_engines": [Engine.AEGIS_NATIVE]
+        + ([Engine.NUCLEI] if service.nuclei.enabled else []),
         "engine_contract": [item.value for item in Engine],
         "actor_contract": [item.value for item in ActorType],
         "engine_kernel_version": ENGINE_KERNEL_VERSION,
@@ -374,11 +378,28 @@ async def console_event_stream(
     )
 
 
+def _nuclei_finding_verified(scan: ScanResult) -> bool:
+    """Re-evaluate a Nuclei scan's persisted, body-free verifier facts. Only a verifier CONFIRMED
+    conclusion backed by a VERIFIED lifecycle record is ever displayed as a finding."""
+
+    try:
+        facts = [scm_verifier.ScmProbeFacts.model_validate(f) for f in scan.verifier_evidence]
+    except ValueError:
+        return False
+    return scm_verifier.evaluate(facts).status == "CONFIRMED" and any(
+        n.get("lifecycle_state") == "VERIFIED" for n in scan.normalized_findings
+    )
+
+
 def _verified_findings() -> list[tuple[ScanResult, int, list[ScanResult]]]:
     scans = store.list_all()
     verifier = DeterministicVerifier()
     output: list[tuple[ScanResult, int, list[ScanResult]]] = []
     for scan in scans:
+        if scan.engine == SecurityEngine.NUCLEI.value:
+            if scan.findings and _nuclei_finding_verified(scan):
+                output.append((scan, 0, _linked_retests(scans, scan.id)))
+            continue
         verified_ids = {
             item.id
             for item in verifier.verify(
@@ -396,7 +417,10 @@ async def console_findings(limit: int = Query(default=50, ge=1, le=100)) -> dict
     findings = _verified_findings()[:limit]
     return {
         "items": [finding_projection(scan, index, retests) for scan, index, retests in findings],
-        "provenance_policy": "Only deterministic verifier-generated records are displayed.",
+        "provenance_policy": (
+            "Only deterministic verifier-generated records are displayed. Nuclei results are "
+            "tool-reported until the independent Aegis verifier confirms them."
+        ),
     }
 
 
@@ -423,6 +447,74 @@ async def _check_json(url: str) -> tuple[str, dict[str, object] | None]:
         return "UNAVAILABLE", None
 
 
+async def _nuclei_integration_state() -> str:
+    if not service.nuclei.enabled:
+        return "DISABLED"
+    await service.nuclei.attest()
+    health = service.nuclei.health()
+    return "CONNECTED" if health.authorized else health.state
+
+
+def _nuclei_readiness_extras() -> dict[str, object]:
+    """Pinned provenance + the latest execution for the Nuclei readiness card. No URL, no output."""
+
+    manifest = load_manifest()
+    attestation = service.nuclei.last_attestation
+    latest = next(
+        (
+            scan
+            for scan in store.list_all(100)
+            if scan.engine == SecurityEngine.NUCLEI.value and scan.nuclei_provenance
+        ),
+        None,
+    )
+    summary = nuclei_summary(latest) if latest else None
+    return {
+        "pinned_engine_version": manifest.engine.version,
+        "pinned_binary_sha256": {
+            arch: artifact.binary_sha256 for arch, artifact in manifest.engine.artifacts.items()
+        },
+        "attested_engine_version": attestation.engine.nuclei_version if attestation else None,
+        "attested_binary_sha256": attestation.engine.binary_sha256 if attestation else None,
+        "template_set_id": manifest.template_set_id,
+        "manifest_version": manifest.manifest_version,
+        "manifest_digest": manifest_digest(),
+        "attested_manifest_digest": attestation.manifest_digest if attestation else None,
+        "admitted_template_count": len(manifest.templates),
+        "upstream_templates": f"{manifest.upstream_templates.release} "
+        f"({manifest.upstream_templates.commit[:12]})",
+        "signature_probe": attestation.signature_probe if attestation else None,
+        "last_health_check": (
+            service.nuclei.last_checked_at.isoformat() if service.nuclei.last_checked_at else None
+        ),
+        "latest_execution": (
+            {
+                "scan_id": latest.id,
+                "status": latest.status.value,
+                "terminal_reason": latest.terminal_reason,
+                "http_connections": summary.get("http_connections") if summary else None,
+                "request_budget": summary.get("request_budget") if summary else None,
+                "matched": summary.get("matched") if summary else None,
+                "records": summary.get("records") if summary else None,
+                "lifecycle_states": [
+                    str(n.get("lifecycle_state")) for n in latest.normalized_findings
+                ],
+                "tool_reported": len(latest.normalized_findings),
+                "verifier_confirmed": sum(
+                    n.get("lifecycle_state") == "VERIFIED" for n in latest.normalized_findings
+                ),
+                "completed_at": latest.completed_at.isoformat() if latest.completed_at else None,
+            }
+            if latest
+            else None
+        ),
+        "responsibility": (
+            "Nuclei is an Aegis-controlled detection engine. Its results are independently "
+            "correlated and verified; Nuclei does not directly confirm Aegis findings."
+        ),
+    }
+
+
 @app.get("/api/console/integrations")
 async def console_integrations() -> dict[str, object]:
     gateway_status, gateway = await _check_json(f"{settings.llm_gateway_url}/health")
@@ -439,7 +531,7 @@ async def console_integrations() -> dict[str, object]:
                 "digest": gateway.get("model_digest") if gateway else None,
                 "provider": gateway.get("provider") if gateway else None,
             },
-            {"name": "Nuclei", "engine": "NUCLEI", "state": "PLANNED_NOT_CONNECTED"},
+            {"name": "Nuclei", "engine": "NUCLEI", "state": await _nuclei_integration_state()},
             {"name": "ZAP", "engine": "ZAP", "state": "PLANNED_NOT_CONNECTED"},
             {"name": "Burp DAST", "engine": "BURP_DAST", "state": "PLANNED_NOT_CONNECTED"},
         ]
@@ -448,18 +540,23 @@ async def console_integrations() -> dict[str, object]:
 
 @app.get("/api/console/engines")
 async def console_engines() -> dict[str, object]:
-    # Honest, four-state engine readiness. Only AEGIS_NATIVE is enabled; the three planned engines
-    # are DISABLED and fail closed. The native engine's `reachable` reflects the real lab health.
+    # Honest, four-state engine readiness. Nuclei is operational only when its fresh runner
+    # attestation is authorized; ZAP and Burp stay disabled. Native reachability reflects the lab.
     lab_status, _ = await _check_json(f"{settings.lab_base_url}/health")
+    if service.nuclei.enabled:
+        await service.nuclei.attest()
     healths = []
     for health in service.dispatcher.health():
         if health.engine is SecurityEngine.AEGIS_NATIVE:
             health = health.model_copy(update={"reachable": lab_status == "HEALTHY"})
         healths.append(health)
+    operational = [SecurityEngine.AEGIS_NATIVE.value]
+    if service.nuclei.enabled and service.nuclei.health().authorized:
+        operational.append(SecurityEngine.NUCLEI.value)
     return {
-        "items": engine_readiness(healths),
+        "items": engine_readiness(healths, {SecurityEngine.NUCLEI: _nuclei_readiness_extras()}),
         "kernel_version": ENGINE_KERNEL_VERSION,
-        "operational_engines": [SecurityEngine.AEGIS_NATIVE.value],
+        "operational_engines": operational,
     }
 
 
