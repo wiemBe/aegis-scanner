@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -6,6 +7,7 @@ from uuid import uuid4
 
 import httpx
 
+from aegis import scm_verifier
 from aegis.budget import BudgetExceeded, ScanBudget
 from aegis.candidates import (
     build_context,
@@ -19,13 +21,20 @@ from aegis.candidates import (
     validate_candidates,
 )
 from aegis.engine.adapters import AdapterResult, build_dispatcher
+from aegis.engine.catalog import get_engine_capability
 from aegis.engine.contracts import (
     ENGINE_KERNEL_VERSION,
     EngineEnvironment,
+    EngineExecution,
     EngineExecutionStatus,
     EngineJob,
     EngineJobRequest,
+    EngineObservation,
+    EngineReportedFinding,
+    EvidenceSourceClass,
     FindingLifecycleState,
+    NormalizedEvidence,
+    RetentionClass,
     SecurityEngine,
     TargetReference,
     VerifierConclusion,
@@ -37,6 +46,12 @@ from aegis.engine.lifecycle import (
     normalize_observation_evidence,
     record_verifier_conclusion,
 )
+from aegis.engine.nuclei import (
+    NucleiAdapter,
+    NucleiAdapterResult,
+    NucleiEngineJob,
+    build_nuclei_job,
+)
 from aegis.engine.policy import EnginePolicyRejection, build_engine_job
 from aegis.executor import TestExecutor, redact
 from aegis.http import bounded_body
@@ -46,6 +61,7 @@ from aegis.models import (
     BlockingReason,
     CandidateStageRecord,
     ExecuteDecision,
+    Finding,
     Hypothesis,
     HypothesisDecision,
     RetestObjective,
@@ -53,6 +69,7 @@ from aegis.models import (
     ScanResult,
     ScanStatus,
     ScenarioClass,
+    Verification,
 )
 from aegis.planner import Planner, PlannerFailure
 from aegis.safety import SafetyController, SafetyViolation
@@ -61,6 +78,12 @@ from aegis.settings import Settings
 from aegis.storage import ScanStore
 from aegis.surface import OBJECTS, account_path
 from aegis.verifier import DeterministicVerifier
+from aegis_nuclei.contracts import NucleiRunResponse
+from aegis_nuclei.manifest import load_manifest
+from aegis_nuclei.parser import PARSER_VERSION as NUCLEI_PARSER_VERSION
+from aegis_nuclei.profile import PROFILE_ID as NUCLEI_PROFILE_ID
+from aegis_nuclei.profile import PROFILE_VERSION as NUCLEI_PROFILE_VERSION
+from aegis_nuclei.targets import NUCLEI_TARGETS, target_for_variant
 
 # The one enabled engine profile in Phase 1.1. The controller selects it deterministically from the
 # capability the validated candidate names; the model never chooses an engine or profile.
@@ -75,6 +98,8 @@ class ScanService:
         planner: Planner,
         safety: SafetyController,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        nuclei_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -83,13 +108,31 @@ class ScanService:
         self.transport = transport
         self.executor = TestExecutor(settings, safety, transport)
         self.verifier = DeterministicVerifier()
-        # The security-tool integration kernel dispatcher: one enabled native adapter (wired to the
-        # exact same executor/safety) plus three fail-closed disabled skeletons. The controller
-        # constructs every EngineJob; the dispatcher never widens scope.
-        self.dispatcher = build_dispatcher(self.executor, self.safety)
+        # Phase 1.2: the controller-side RPC client for the isolated nuclei-runner. Disabled unless
+        # the operator sets NUCLEI_ENABLED; even then every job requires a READY runner attestation.
+        self.nuclei = NucleiAdapter(
+            settings.nuclei_runner_url,
+            enabled=settings.nuclei_enabled,
+            timeout_seconds=settings.nuclei_rpc_timeout_seconds,
+            transport=nuclei_transport,
+        )
+        # The security-tool integration kernel dispatcher: the enabled native adapter (wired to the
+        # exact same executor/safety), the Nuclei adapter when enabled (otherwise its fail-closed
+        # skeleton), and the ZAP/Burp skeletons. The controller constructs every job; the
+        # dispatcher never widens scope.
+        self.dispatcher = build_dispatcher(
+            self.executor,
+            self.safety,
+            nuclei=self.nuclei if settings.nuclei_enabled else None,
+        )
 
     def create(self, request: ScanCreate | None = None) -> ScanResult:
         request = request or ScanCreate()
+        if request.capability is not None:
+            # Phase 1.2: an operator-requested engine capability. The native flow is untouched.
+            return self._create_capability_scan(request)
+        if request.target_ref is not None:
+            raise ValueError("A target reference is only valid with an engine capability request")
         scenario = request.scenario
         if request.retest_of or request.variant == "patched":
             scenario = ScenarioClass.PATCHED_NEGATIVE
@@ -869,6 +912,9 @@ class ScanService:
         result = self.store.get(scan_id)
         if result is None or result.status != ScanStatus.QUEUED:
             return
+        if result.engine == SecurityEngine.NUCLEI.value:
+            await self._run_nuclei_scan(result)
+            return
         result.status = ScanStatus.RUNNING
         self._audit(result, "SCAN_STARTED", {})
         budget = ScanBudget(self.settings, result.usage)
@@ -926,3 +972,673 @@ class ScanService:
                     "usage": result.usage.model_dump(),
                 },
             )
+
+    # --- Phase 1.2: controlled Nuclei integration ----------------------------------------------
+
+    def _create_capability_scan(self, request: ScanCreate) -> ScanResult:
+        """Create a scan for an operator-requested engine capability.
+
+        The request names only a catalog capability and (optionally) an inventory target
+        reference. It cannot name a tool, template, flag, URL, header or credential — ScanCreate has
+        no such field. The AI planner is not involved in this flow."""
+
+        capability = get_engine_capability(request.capability or "")
+        if capability is None or capability.engine is not SecurityEngine.NUCLEI:
+            raise ValueError("Unknown or unsupported engine capability")
+        target_ref = request.target_ref or target_for_variant(request.variant).target_ref
+        known = NUCLEI_TARGETS.get(target_ref)
+        variant: Literal["vulnerable", "patched"] = known.variant if known else request.variant
+        if request.retest_of:
+            original = self.store.get(request.retest_of)
+            if (
+                original is None
+                or original.engine != SecurityEngine.NUCLEI.value
+                or original.status != ScanStatus.FAIL
+                or not original.findings
+                or variant != "patched"
+            ):
+                raise ValueError("Retest requires a confirmed Nuclei scan and the patched variant")
+        result = ScanResult(
+            id=f"scan-{uuid4().hex[:12]}",
+            target_name="Synthetic Lab — SCM metadata route",
+            target_base_url=self.settings.lab_base_url,
+            status=ScanStatus.QUEUED,
+            planner="NONE",
+            mode="OPERATOR_CAPABILITY",
+            model=None,
+            variant=variant,
+            scenario=(
+                ScenarioClass.PATCHED_NEGATIVE
+                if variant == "patched"
+                else ScenarioClass.POSITIVE_VULNERABLE
+            ),
+            retest_of=request.retest_of,
+            engine=SecurityEngine.NUCLEI.value,
+            adapter_version=self.nuclei.adapter_version,
+            engine_kernel_version=ENGINE_KERNEL_VERSION,
+            capability_id=capability.capability_id,
+            target_ref=target_ref,
+        )
+        self.store.save(result)
+        self.store.add_audit(
+            result.id,
+            "SCAN_CREATED",
+            {
+                "planner": "NONE",
+                "variant": result.variant,
+                "scenario": result.scenario,
+                "retest_of": result.retest_of,
+                "engine": SecurityEngine.NUCLEI.value,
+                "capability": capability.capability_id,
+                "target_ref": target_ref,
+                "limits": {
+                    "requests_including_import": self.settings.max_requests_per_scan,
+                    "seconds": self.settings.scan_timeout_seconds,
+                },
+            },
+        )
+        return result
+
+    async def _run_nuclei_scan(self, result: ScanResult) -> None:
+        result.status = ScanStatus.RUNNING
+        self._audit(result, "SCAN_STARTED", {"engine": SecurityEngine.NUCLEI.value})
+        budget = ScanBudget(self.settings, result.usage)
+        try:
+            async with asyncio.timeout(self.settings.scan_timeout_seconds):
+                await self._nuclei_flow(result, budget)
+        except SafetyViolation as exc:
+            result.status = ScanStatus.REVIEW
+            result.stop_reason = result.terminal_reason = "SAFETY_REJECTED"
+            result.safety_events.append(str(exc))
+            self._audit(result, "SAFETY_REJECTED", {"reason": str(exc)})
+        except (BudgetExceeded, TimeoutError) as exc:
+            result.status = ScanStatus.INCOMPLETE
+            result.stop_reason = str(exc) if isinstance(exc, BudgetExceeded) else "TIME_BUDGET"
+            result.terminal_reason = result.stop_reason
+            self._audit(result, "BUDGET_EXHAUSTED", {"reason": result.stop_reason})
+        except asyncio.CancelledError:
+            result.status = ScanStatus.INCOMPLETE
+            result.stop_reason = result.terminal_reason = "CANCELLED"
+            self._audit(result, "SCAN_CANCELLED", {})
+            raise
+        except Exception as exc:
+            result.status = ScanStatus.INCOMPLETE
+            result.error = type(exc).__name__
+            result.stop_reason = "SCAN_ERROR"
+            result.terminal_reason = f"SCAN_ERROR_{type(exc).__name__}"
+            self._audit(result, "SCAN_FAILED", {"reason": result.error})
+        finally:
+            # Nuclei scans never fall through to PASS: an unfinished flow is INCOMPLETE. Findings
+            # exist only if the independent verifier promoted them inside the flow.
+            if result.status is ScanStatus.RUNNING:
+                result.status = ScanStatus.INCOMPLETE
+                result.terminal_reason = result.terminal_reason or "NUCLEI_FLOW_INCOMPLETE"
+            result.completed_at = datetime.now(UTC)
+            self._audit(
+                result,
+                "SCAN_COMPLETED",
+                {
+                    "status": result.status,
+                    "stop_reason": result.stop_reason,
+                    "usage": result.usage.model_dump(),
+                },
+            )
+
+    def _nuclei_provenance(
+        self,
+        job: NucleiEngineJob,
+        outcome: NucleiAdapterResult | None,
+    ) -> dict[str, Any]:
+        manifest = load_manifest()
+        response: NucleiRunResponse | None = outcome.response if outcome else None
+        attestation = outcome.attestation if outcome else None
+        engine = response.engine if response else attestation.engine if attestation else None
+        templates = response.templates if response else attestation.templates if attestation else ()
+        return {
+            "profile_id": job.profile_id,
+            "profile_version": NUCLEI_PROFILE_VERSION,
+            "adapter_version": job.adapter_version,
+            "parser_version": NUCLEI_PARSER_VERSION,
+            "runner_version": (
+                response.runner_version
+                if response
+                else attestation.runner_version
+                if attestation
+                else None
+            ),
+            "verifier_version": scm_verifier.VERIFIER_VERSION,
+            "kernel_version": ENGINE_KERNEL_VERSION,
+            "engine": {
+                "name": "nuclei",
+                "version": engine.nuclei_version if engine else None,
+                "binary_sha256": engine.binary_sha256 if engine else None,
+                "arch": engine.arch if engine else None,
+                "pinned": engine.pinned if engine else False,
+            },
+            "template_set_id": job.template_set_id,
+            "manifest_version": job.manifest_version,
+            "manifest_digest": job.manifest_digest,
+            "upstream_templates": {
+                "release": manifest.upstream_templates.release,
+                "commit": manifest.upstream_templates.commit,
+            },
+            "templates": [
+                {
+                    "template_id": t.template_id,
+                    "sha256": t.sha256,
+                    "signature_status": t.signature_status,
+                    "admitted": t.admitted,
+                }
+                for t in templates
+            ],
+            "job_id": job.job_id,
+            "execution_id": outcome.execution.execution_id if outcome else None,
+            "target_ref": job.target_ref,
+            "operation_id": job.target.operation_id,
+            "budgets": {
+                "requests": job.budget.max_requests,
+                "time_ms": job.budget.time_budget_ms,
+                "results": job.max_results,
+                "output_bytes": job.max_output_bytes,
+            },
+            "counts": {
+                "http_connections": response.http_connections if response else None,
+                "signed_templates_executed": (
+                    response.signed_templates_executed if response else None
+                ),
+                "records": response.parse.records if response else 0,
+                "matched": response.parse.matched if response else 0,
+                "unmatched": response.parse.unmatched if response else 0,
+                "errored": response.parse.errored if response else 0,
+                "duplicates_collapsed": response.parse.duplicates_collapsed if response else 0,
+            },
+            "timing": {
+                "started_at": response.started_at.isoformat() if response else None,
+                "completed_at": response.completed_at.isoformat() if response else None,
+                "duration_ms": response.duration_ms if response else None,
+            },
+            "exit": {
+                "status": response.status if response else "NOT_RUN",
+                "exit_class": response.exit_class if response else "NOT_RUN",
+                "exit_code": response.exit_code if response else None,
+                "error_code": (
+                    response.error_code.value if response and response.error_code else None
+                ),
+                "adapter_error": (
+                    outcome.execution.error.code.value
+                    if outcome and outcome.execution.error
+                    else None
+                ),
+                "validation_code": outcome.validation_code if outcome else None,
+            },
+            "output": {
+                "bytes": response.output_bytes if response else 0,
+                "sha256": response.output_sha256 if response else None,
+                "stderr_bytes": response.stderr_bytes if response else 0,
+                "stderr_sha256": response.stderr_sha256 if response else None,
+                "parse_status": response.parse.status if response else "NOT_PARSED",
+                "stripped_fields": list(response.parse.stripped_fields) if response else [],
+            },
+            "coverage_complete": bool(response and response.coverage_complete),
+            "redaction_status": "REDACTED",
+        }
+
+    def _nuclei_terminal(self, result: ScanResult, reason: str, status: ScanStatus) -> None:
+        summaries = {
+            ScanStatus.FAIL: "Independent verifier confirmed the Nuclei-reported condition.",
+            ScanStatus.PASS: "Complete coverage; independent verifier confirmed the patched state.",
+            ScanStatus.REVIEW: "Nuclei result needs review; nothing was auto-confirmed or passed.",
+            ScanStatus.INCOMPLETE: "Nuclei execution or verification incomplete; never a PASS.",
+        }
+        self._terminal(result, reason, status, summaries.get(status, "Recorded."))
+
+    async def _nuclei_flow(self, result: ScanResult, budget: ScanBudget) -> None:
+        # 1) The controller constructs the typed job from controller-owned inputs only.
+        try:
+            job = build_nuclei_job(
+                profile_id=NUCLEI_PROFILE_ID,
+                capability_id=result.capability_id or "",
+                run_id=result.id,
+                environment=EngineEnvironment.SYNTHETIC_LAB,
+                target_ref=result.target_ref or "",
+                remaining_requests=self.settings.max_requests_per_scan - result.usage.requests,
+                allowed_origins=[self.settings.lab_base_url],
+                adapter_enabled=self.nuclei.enabled,
+            )
+        except EnginePolicyRejection as rejection:
+            error = rejection.error.model_dump(mode="json")
+            result.engine_job_rejections.append(error)
+            self._audit(
+                result,
+                "NUCLEI_JOB_REJECTED",
+                {
+                    **error,
+                    "capability": result.capability_id,
+                    "target_ref": result.target_ref,
+                    "runner_contacted": False,
+                    "target_requests": 0,
+                },
+            )
+            self._nuclei_terminal(
+                result, f"NUCLEI_JOB_REJECTED_{rejection.error.code.value}", ScanStatus.REVIEW
+            )
+            return
+        self._audit(
+            result,
+            "NUCLEI_JOB_ADMITTED",
+            {
+                "engine": job.engine.value,
+                "profile_id": job.profile_id,
+                "capability": job.capability_id,
+                "job_id": job.job_id,
+                "target_ref": job.target_ref,
+                "operation_id": job.target.operation_id,
+                "template_set_id": job.template_set_id,
+                "manifest_version": job.manifest_version,
+                "manifest_digest": job.manifest_digest,
+                "template_ids": list(job.template_ids),
+                "adapter_version": job.adapter_version,
+                "budgets": {
+                    "requests": job.budget.max_requests,
+                    "time_ms": job.budget.time_budget_ms,
+                    "results": job.max_results,
+                    "output_bytes": job.max_output_bytes,
+                },
+            },
+        )
+
+        # 2) Attest the isolated runner BEFORE any execution: pinned engine, verified manifest.
+        attestation = await self.nuclei.attest()
+        self._audit(
+            result,
+            "NUCLEI_RUNNER_STARTED",
+            {
+                "reachable": attestation is not None,
+                "ready": bool(attestation and attestation.ready),
+                "runner_version": attestation.runner_version if attestation else None,
+                "nuclei_version": attestation.engine.nuclei_version if attestation else None,
+                "binary_sha256": attestation.engine.binary_sha256 if attestation else None,
+                "arch": attestation.engine.arch if attestation else None,
+                "pinned": bool(attestation and attestation.engine.pinned),
+                "failure_codes": list(attestation.failure_codes) if attestation else [],
+            },
+        )
+        execution_id = f"exec-{uuid4().hex[:12]}"
+        problem = self.nuclei.attestation_problem(attestation, job)
+        if problem is not None:
+            outcome = await self.nuclei.run(
+                job, result.id, execution_id=execution_id, attestation=attestation
+            )
+            self._record_nuclei_failure(result, job, outcome, "RUNNER_NOT_ATTESTED")
+            return
+        assert attestation is not None
+        self._audit(
+            result,
+            "NUCLEI_TEMPLATE_MANIFEST_VERIFIED",
+            {
+                "template_set_id": attestation.template_set_id,
+                "manifest_version": attestation.manifest_version,
+                "manifest_digest": attestation.manifest_digest,
+                "controller_manifest_match": attestation.manifest_digest == job.manifest_digest,
+                "signature_probe": attestation.signature_probe,
+                "unexpected_template_files": attestation.unexpected_template_files,
+                "templates": [
+                    {
+                        "template_id": t.template_id,
+                        "sha256": t.sha256,
+                        "signature_status": t.signature_status,
+                    }
+                    for t in attestation.templates
+                ],
+            },
+        )
+
+        # 3) Execute on the runner. Reserve the target-request budget first (fail closed).
+        for _ in range(job.budget.max_requests):
+            budget.request()
+        self._audit(
+            result,
+            "NUCLEI_EXECUTION_STARTED",
+            {
+                "engine": job.engine.value,
+                "job_id": job.job_id,
+                "execution_id": execution_id,
+                "profile_id": job.profile_id,
+                "target_ref": job.target_ref,
+                "budgets": {
+                    "requests": job.budget.max_requests,
+                    "time_ms": job.budget.time_budget_ms,
+                },
+            },
+        )
+        outcome = await self.nuclei.run(
+            job, result.id, execution_id=execution_id, attestation=attestation
+        )
+        if outcome.execution.status is EngineExecutionStatus.FAILED or outcome.response is None:
+            self._record_nuclei_failure(result, job, outcome, "EXECUTION")
+            return
+        response = outcome.response
+        result.nuclei_provenance = self._nuclei_provenance(job, outcome)
+        self._audit(
+            result,
+            "NUCLEI_EXECUTION_COMPLETED",
+            {
+                "execution_id": execution_id,
+                "job_id": job.job_id,
+                "exit_class": response.exit_class,
+                "exit_code": response.exit_code,
+                "duration_ms": response.duration_ms,
+                "http_connections": response.http_connections,
+                "signed_templates_executed": response.signed_templates_executed,
+                "output_bytes": response.output_bytes,
+                "output_sha256": response.output_sha256,
+                "coverage_complete": response.coverage_complete,
+            },
+        )
+        self._audit(result, "NUCLEI_RESULT_PARSED", self._parse_event(response))
+
+        # 4) Tool results enter as TOOL_REPORTED observations; correlate them deterministically.
+        execution, evidence, correlated = self._nuclei_observations(result, job, outcome)
+        result.engine_executions.append(execution.model_dump(mode="json"))
+        result.engine_evidence.extend(item.model_dump(mode="json") for item in evidence)
+
+        # 5) Independent deterministic verification from fresh, controller-constructed requests.
+        target = NUCLEI_TARGETS[job.target_ref]
+        plan = scm_verifier.probe_plan(target, result.id)
+        self._audit(
+            result,
+            "NUCLEI_VERIFICATION_STARTED",
+            {
+                "verifier_version": scm_verifier.VERIFIER_VERSION,
+                "requests": [
+                    {"name": name, "method": "GET", "path": path} for name, _, path in plan
+                ],
+                "independent": True,
+                "nuclei_inputs_used": [],
+            },
+        )
+        for _ in plan:
+            budget.request()
+        facts = await scm_verifier.collect(
+            target=target,
+            scan_id=result.id,
+            safety=self.safety,
+            transport=self.transport,
+            timeout_seconds=self.settings.request_timeout_seconds,
+        )
+        verdict = scm_verifier.evaluate(facts)
+        result.verifier_evidence = [f.model_dump(mode="json") for f in facts]
+        result.engine_evidence.extend(
+            item.model_dump(mode="json")
+            for item in self._verifier_evidence(result, job, execution.execution_id, facts)
+        )
+        result.verification = Verification(
+            status=verdict.status,
+            summary=verdict.summary,
+            evidence_names=verdict.evidence_names,
+        )
+
+        finding: Finding | None = None
+        capability = get_engine_capability(job.capability_id)
+        for normalized in correlated:
+            if normalized.lifecycle_state is not FindingLifecycleState.AEGIS_CORRELATED:
+                result.normalized_findings.append(normalized.model_dump(mode="json"))
+                continue
+            if verdict.status == "CONFIRMED" and finding is None and capability:
+                template_id = (normalized.engine_report_key or "::").split(":")[1] or "template"
+                finding = Finding(
+                    id=f"finding-{result.id}-nuclei-{template_id}",
+                    title="Source-control metadata exposed on a synthetic route",
+                    severity=capability.verified_severity,
+                    category="Security misconfiguration: source-control metadata exposure",
+                    confidence="CONFIRMED",
+                    description=(
+                        "An anonymous read-only GET of the synthetic route returned git "
+                        "repository metadata (core config section). Confirmed by the independent "
+                        "Aegis verifier from fresh evidence, not by Nuclei."
+                    ),
+                    remediation="Never serve VCS metadata from the web root; deny /.git/ paths.",
+                    evidence_names=list(verdict.evidence_names),
+                )
+            conclusion = VerifierConclusion(
+                status=verdict.status,
+                summary=verdict.summary,
+                aegis_finding_id=finding.id if finding and verdict.status == "CONFIRMED" else None,
+                evidence_ids=[f"{result.id}:{name}" for name in verdict.evidence_names],
+            )
+            normalized = record_verifier_conclusion(
+                normalized,
+                conclusion,
+                inconclusive_state=FindingLifecycleState.REVIEW_REQUIRED,
+            )
+            result.normalized_findings.append(normalized.model_dump(mode="json"))
+        if finding is not None:
+            result.findings = [finding]
+
+        lifecycle = [str(n.get("lifecycle_state")) for n in result.normalized_findings]
+        self._audit(
+            result,
+            "NUCLEI_VERIFICATION_COMPLETED",
+            {
+                "verifier_version": scm_verifier.VERIFIER_VERSION,
+                "status": verdict.status,
+                "verification_status": verdict.status,
+                "evidence_ids": [f"{result.id}:{name}" for name in verdict.evidence_names],
+                "lifecycle_states": lifecycle,
+                "finding_id": finding.id if finding else None,
+                "tool_reported": len(correlated),
+            },
+        )
+
+        # 6) Terminal decision. Absence of a Nuclei result is never PASS on its own.
+        reported = bool(correlated)
+        if reported and finding is not None:
+            self._nuclei_terminal(result, "DETERMINISTIC_CONFIRMED", ScanStatus.FAIL)
+        elif reported and verdict.status == "PASS":
+            self._nuclei_terminal(result, "TOOL_FINDING_REJECTED_BY_VERIFIER", ScanStatus.REVIEW)
+        elif reported:
+            self._nuclei_terminal(result, "VERIFICATION_INCONCLUSIVE", ScanStatus.REVIEW)
+        elif verdict.status == "PASS" and response.coverage_complete:
+            self._nuclei_terminal(result, "COVERAGE_COMPLETE", ScanStatus.PASS)
+        elif verdict.status == "CONFIRMED":
+            self._nuclei_terminal(result, "ENGINE_VERIFIER_DISAGREEMENT", ScanStatus.REVIEW)
+        else:
+            self._nuclei_terminal(result, "VERIFICATION_INCONCLUSIVE", ScanStatus.INCOMPLETE)
+
+    @staticmethod
+    def _parse_event(response: NucleiRunResponse) -> dict[str, Any]:
+        parse = response.parse
+        return {
+            "parser_version": parse.parser_version,
+            "parse_status": parse.status,
+            "code": parse.failure_code.value if parse.failure_code else None,
+            "lines": parse.lines,
+            "records": parse.records,
+            "matched": parse.matched,
+            "unmatched": parse.unmatched,
+            "errored": parse.errored,
+            "duplicates_collapsed": parse.duplicates_collapsed,
+            "stripped_fields": list(parse.stripped_fields),
+            "redaction_status": "REDACTED",
+        }
+
+    def _record_nuclei_failure(
+        self,
+        result: ScanResult,
+        job: NucleiEngineJob,
+        outcome: NucleiAdapterResult,
+        stage: str,
+    ) -> None:
+        """A failed/rejected/incomplete execution is recorded and ends INCOMPLETE — never PASS."""
+
+        result.nuclei_provenance = self._nuclei_provenance(job, outcome)
+        result.engine_executions.append(outcome.execution.model_dump(mode="json"))
+        error = outcome.execution.error
+        response = outcome.response
+        self._audit(
+            result,
+            "NUCLEI_EXECUTION_FAILED",
+            {
+                "stage": stage,
+                "job_id": job.job_id,
+                "execution_id": outcome.execution.execution_id,
+                "code": error.code.value if error else "UNKNOWN",
+                "detail": error.detail if error else "",
+                "error_code": (
+                    response.error_code.value if response and response.error_code else None
+                ),
+                "exit_class": response.exit_class if response else "NOT_RUN",
+                "exit_code": response.exit_code if response else None,
+                "runner_contacted_for_execution": outcome.request is not None,
+            },
+        )
+        if response is not None and response.parse.status != "NOT_PARSED":
+            self._audit(result, "NUCLEI_RESULT_PARSED", self._parse_event(response))
+        code = (error.detail or error.code.value) if error else "UNKNOWN"
+        self._nuclei_terminal(
+            result, f"NUCLEI_EXECUTION_INCOMPLETE_{code}"[:120], ScanStatus.INCOMPLETE
+        )
+
+    def _nuclei_observations(
+        self,
+        result: ScanResult,
+        job: NucleiEngineJob,
+        outcome: NucleiAdapterResult,
+    ) -> tuple[EngineExecution, list[NormalizedEvidence], list[Any]]:
+        """Turn parsed runner records into kernel observations, provenance-complete evidence and
+        correlated normalized findings (TOOL_REPORTED -> AEGIS_CORRELATED or REJECTED)."""
+
+        response = outcome.response
+        assert response is not None
+        target = NUCLEI_TARGETS[job.target_ref]
+        observations: list[EngineObservation] = []
+        reported: list[EngineReportedFinding] = []
+        evidence: list[NormalizedEvidence] = []
+        for record in response.results:
+            name = f"nuclei-{record.template_id}-{record.record_digest[:12]}"
+            observations.append(
+                EngineObservation(
+                    request_name=name,
+                    method="GET",
+                    path=record.checked_path,
+                    credential_profile="anonymous",
+                    status_code=None,  # Nuclei does not report it under the fixed profile
+                    duration_ms=0,
+                    content_digest=record.record_digest,
+                    has_error=record.error_class != "NONE",
+                )
+            )
+            evidence.append(
+                NormalizedEvidence(
+                    evidence_id=f"{result.id}:{name}",
+                    engine=SecurityEngine.NUCLEI,
+                    adapter_version=job.adapter_version,
+                    engine_execution_id=outcome.execution.execution_id,
+                    run_id=job.run_id,
+                    scan_id=result.id,
+                    timestamp=record.observed_at,
+                    capability_id=job.capability_id,
+                    target_ref=job.target_ref,
+                    request_refs=[name],
+                    artifact_refs=[f"{outcome.execution.execution_id}:{record.template_id}"],
+                    redaction_status="REDACTED",
+                    content_digest=record.record_digest,
+                    parser_version=NUCLEI_PARSER_VERSION,
+                    source_class=EvidenceSourceClass.ENGINE_OBSERVATION,
+                    retention_class=RetentionClass.STANDARD,
+                )
+            )
+            if record.matcher_status:
+                reported.append(
+                    EngineReportedFinding(
+                        report_key=f"{job.capability_id}:{record.template_id}:{job.target_ref}",
+                        engine=SecurityEngine.NUCLEI,
+                        capability_id=job.capability_id,
+                        claimed_category="SCM metadata exposure (tool claim)",
+                        target_operation_id=job.target.operation_id,
+                        principal_profile="anonymous",
+                        observation_names=[name],
+                        signal=(
+                            f"Template {record.template_id} matched at {record.checked_path} "
+                            "(unverified raw tool signal)."
+                        )[:200],
+                    )
+                )
+        execution = outcome.execution.model_copy(
+            update={"observations": observations, "reported_findings": reported}
+        )
+        correlated = []
+        for item in dedupe_reported(reported):
+            record_ids = {r.template_id for r in response.results if r.matcher_status}
+            in_scope = (
+                item.capability_id == job.capability_id
+                and item.report_key.split(":")[1] in job.template_ids
+                and item.report_key.split(":")[1] in record_ids
+                and item.report_key.endswith(f":{target.target_ref}")
+            )
+            self._audit(
+                result,
+                "NUCLEI_FINDING_REPORTED",
+                {
+                    "engine": item.engine.value,
+                    "capability": item.capability_id,
+                    "report_key": item.report_key,
+                    "template_id": item.report_key.split(":")[1],
+                    "claimed_category": item.claimed_category,
+                    "provenance": "TOOL_REPORTED",
+                    "lifecycle_state": FindingLifecycleState.TOOL_REPORTED.value,
+                },
+            )
+            normalized = correlate_reported_finding(
+                item,
+                job,
+                ai_hypothesis="None - operator-requested capability; no AI involvement.",
+                in_scope=in_scope,
+            )
+            self._audit(
+                result,
+                "NUCLEI_FINDING_CORRELATED",
+                {
+                    "normalized_id": normalized.normalized_id,
+                    "lifecycle_state": normalized.lifecycle_state.value,
+                    "capability": normalized.capability_id,
+                    "target_ref": job.target_ref,
+                    "correlation": "IN_SCOPE" if in_scope else "OUT_OF_SCOPE",
+                },
+            )
+            correlated.append(normalized)
+        return execution, evidence, correlated
+
+    def _verifier_evidence(
+        self,
+        result: ScanResult,
+        job: NucleiEngineJob,
+        execution_id: str,
+        facts: list[scm_verifier.ScmProbeFacts],
+    ) -> list[NormalizedEvidence]:
+        items = []
+        for fact in facts:
+            digest = fact.body_sha256 or hashlib.sha256(
+                json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
+            ).hexdigest()
+            items.append(
+                NormalizedEvidence(
+                    evidence_id=f"{result.id}:{fact.name}",
+                    engine=SecurityEngine.NUCLEI,
+                    adapter_version=job.adapter_version,
+                    engine_execution_id=execution_id,
+                    run_id=job.run_id,
+                    scan_id=result.id,
+                    timestamp=datetime.now(UTC),
+                    capability_id=job.capability_id,
+                    target_ref=job.target_ref,
+                    request_refs=[fact.name],
+                    artifact_refs=[f"{result.id}:{fact.name}"],
+                    redaction_status="REDACTED",
+                    content_digest=digest,
+                    parser_version=scm_verifier.VERIFIER_VERSION,
+                    source_class=EvidenceSourceClass.VERIFIER_DERIVED,
+                    retention_class=RetentionClass.STANDARD,
+                )
+            )
+        return items

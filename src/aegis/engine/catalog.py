@@ -5,14 +5,18 @@ dataclasses defined in code; there is no setter, no API and no field on any mode
 that mutates it. The AI can only NAME a capability that already exists here (via the existing
 :mod:`aegis.registry` projection); it can never add, widen or re-classify one.
 
-Only ``AEGIS_NATIVE`` has an enabled profile in Phase 1.1. Nuclei, ZAP and Burp DAST have catalog
-entries so the console can describe them honestly, but their profiles are ``enabled=False`` and
-their adapters fail closed.
+Phase 1.1 enabled only ``AEGIS_NATIVE``. Phase 1.2 adds ONE enabled Nuclei profile,
+``NUCLEI_LAB_SAFE_HTTP_V1``, bound to one capability backed by a pinned, admitted, signed template
+and a deterministic Aegis verifier. A catalog-enabled profile is still inert until the operator
+enables the Nuclei adapter and the isolated runner attests READY. ZAP and Burp DAST remain disabled
+and fail closed. Two Nuclei capabilities are catalogued ONLY so that requests for them are rejected
+with a precise reason (state-changing HTTP, non-HTTP protocol); no profile references them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from aegis.engine.contracts import (
     ENGINE_KERNEL_VERSION,
@@ -26,7 +30,7 @@ from aegis.engine.contracts import (
 # job, execution, evidence item and normalized finding so provenance survives an adapter upgrade.
 ADAPTER_VERSIONS: dict[SecurityEngine, str] = {
     SecurityEngine.AEGIS_NATIVE: "aegis-native/1.1.0",
-    SecurityEngine.NUCLEI: "nuclei-adapter/0.0.0-disabled",
+    SecurityEngine.NUCLEI: "nuclei-adapter/1.2.0",
     SecurityEngine.ZAP: "zap-adapter/0.0.0-disabled",
     SecurityEngine.BURP_DAST: "burp-dast-adapter/0.0.0-disabled",
 }
@@ -52,6 +56,11 @@ class EngineCapability:
     evidence_types: tuple[str, ...]
     verification_policy: VerificationPolicy
     adapter_version: str
+    # Phase 1.2 (additive, defaulted so Phase 1.1 entries are unchanged). ``protocol`` is the only
+    # network protocol the capability may use; ``verified_severity`` is the Aegis-owned severity a
+    # deterministic verifier assigns on VERIFIED — never an engine's claimed severity.
+    protocol: str = "http"
+    verified_severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "HIGH"
 
     def projection(self) -> dict[str, object]:
         """Non-sensitive projection for the console. No behaviour, no attack sequence."""
@@ -73,6 +82,8 @@ class EngineCapability:
             "evidence_types": list(self.evidence_types),
             "verification_policy": self.verification_policy.value,
             "adapter_version": self.adapter_version,
+            "protocol": self.protocol,
+            "verified_severity": self.verified_severity,
         }
 
 
@@ -129,8 +140,70 @@ CAPABILITY_CATALOG: tuple[EngineCapability, ...] = (
         verification_policy=VerificationPolicy.DETERMINISTIC_AEGIS_VERIFIER,
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.AEGIS_NATIVE],
     ),
+    # Phase 1.2: the single operational Nuclei capability. One anonymous read-only GET per admitted
+    # template (budget = the manifest's declared max requests), a deterministic Aegis verifier
+    # (``aegis.scm_verifier``) as the only promotion authority, and an Aegis-owned MEDIUM severity.
+    # It is classified ACTIVE honestly: it sends a read-only probe the application did not link to.
+    EngineCapability(
+        capability_id="nuclei_scm_metadata_exposure_v1",
+        engine=SecurityEngine.NUCLEI,
+        title="Source-control metadata exposure (Nuclei, signed template, read-only)",
+        activity=EngineActivity.ACTIVE,
+        supported_methods=("GET", "HEAD"),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=False,
+        required_approvals=("SYNTHETIC_LAB_SCOPE", "OPERATOR_ENABLE_NUCLEI"),
+        request_budget=1,
+        concurrency_budget=1,
+        time_budget_ms=30_000,
+        evidence_types=("NUCLEI_EXECUTION_CARD", "VERIFIER_PROBE_CARD"),
+        verification_policy=VerificationPolicy.DETERMINISTIC_AEGIS_VERIFIER,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
+        protocol="http",
+        verified_severity="MEDIUM",
+    ),
+    # Catalogued ONLY to be refused: requesting either yields a precise, audited rejection before
+    # any runner call. No profile references them and they can never become executable.
+    EngineCapability(
+        capability_id="nuclei_http_state_changing_v0",
+        engine=SecurityEngine.NUCLEI,
+        title="State-changing HTTP templates (denied)",
+        activity=EngineActivity.ACTIVE,
+        supported_methods=("POST", "PUT", "PATCH", "DELETE"),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=True,
+        required_approvals=("NEVER_APPROVED",),
+        request_budget=0,
+        concurrency_budget=1,
+        time_budget_ms=1,
+        evidence_types=(),
+        verification_policy=VerificationPolicy.NONE,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
+        protocol="http",
+    ),
+    EngineCapability(
+        capability_id="nuclei_network_protocol_v0",
+        engine=SecurityEngine.NUCLEI,
+        title="Non-HTTP (network/TCP) templates (denied)",
+        activity=EngineActivity.ACTIVE,
+        supported_methods=(),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=False,
+        required_approvals=("NEVER_APPROVED",),
+        request_budget=0,
+        concurrency_budget=1,
+        time_budget_ms=1,
+        evidence_types=(),
+        verification_policy=VerificationPolicy.NONE,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
+        protocol="network",
+    ),
     # Disabled catalog entries. They exist so the console can describe the planned integrations
-    # honestly; no enabled profile references them and no adapter executes them in Phase 1.1.
+    # honestly; no enabled profile references them and no adapter executes them. The Nuclei v0
+    # entry is the retired Phase 1.1 placeholder, kept disabled for record continuity.
     EngineCapability(
         capability_id="nuclei_passive_http_templates_v0",
         engine=SecurityEngine.NUCLEI,
@@ -210,16 +283,36 @@ PROFILE_CATALOG: tuple[EngineProfile, ...] = (
         ),
     ),
     EngineProfile(
+        profile_id="NUCLEI_LAB_SAFE_HTTP_V1",
+        engine=SecurityEngine.NUCLEI,
+        title="Nuclei — lab-safe HTTP (pinned, signed, read-only)",
+        capability_ids=("nuclei_scm_metadata_exposure_v1",),
+        enabled=True,
+        environment=EngineEnvironment.SYNTHETIC_LAB,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
+        description=(
+            "Nuclei v3.11.1 (pinned binary) executing only the admitted, signed template set "
+            "aegis-nuclei-lab-safe-http-v1 against inventory-resolved synthetic-lab targets. "
+            "Results enter as TOOL_REPORTED; only the deterministic Aegis verifier promotes."
+        ),
+        isolation_boundary=(
+            "Separate nuclei-runner container: non-root, read-only root filesystem, bounded tmpfs, "
+            "all capabilities dropped, no shell, no Docker socket, no host mount, no credential. "
+            "Reached only over the internal engine-rpc network; reaches only the synthetic target "
+            "network; no internet, planner or model-gateway access. Fixed argv, no shell."
+        ),
+    ),
+    EngineProfile(
         profile_id="nuclei-passive-synthetic",
         engine=SecurityEngine.NUCLEI,
-        title="Nuclei — passive templates (disabled)",
+        title="Nuclei — Phase 1.1 placeholder (retired, disabled)",
         capability_ids=("nuclei_passive_http_templates_v0",),
         enabled=False,
         environment=EngineEnvironment.SYNTHETIC_LAB,
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
-        description="Planned Phase 1.2 integration. Not installed, not connected, fail-closed.",
+        description="Retired Phase 1.1 placeholder. Superseded by NUCLEI_LAB_SAFE_HTTP_V1.",
         isolation_boundary=(
-            "FUTURE: Nuclei runs as a separate, non-privileged sidecar on an isolated network "
+            "SUPERSEDED: Nuclei runs as a separate, non-privileged sidecar on an isolated network "
             "segment with egress restricted to the approved synthetic origin only; templates come "
             "from a pinned, reviewed template set (no remote template fetch); no credential is "
             "mounted unless a reviewed synthetic profile is provisioned into the sidecar boundary; "

@@ -15,6 +15,7 @@ deterministic Aegis verifier.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Protocol
 
 from aegis.engine.adapters import PARSER_VERSION
 from aegis.engine.catalog import get_engine_capability
@@ -28,9 +29,28 @@ from aegis.engine.contracts import (
     NormalizedEvidence,
     NormalizedFinding,
     RetentionClass,
+    SecurityEngine,
+    TargetReference,
     VerificationPolicy,
     VerifierConclusion,
 )
+
+
+class CorrelatableJob(Protocol):
+    """Job fields read by correlation. Satisfied by EngineJob and the Phase 1.2 NucleiEngineJob."""
+
+    @property
+    def job_id(self) -> str: ...
+    @property
+    def engine(self) -> SecurityEngine: ...
+    @property
+    def adapter_version(self) -> str: ...
+    @property
+    def capability_id(self) -> str: ...
+    @property
+    def run_id(self) -> str: ...
+    @property
+    def target(self) -> TargetReference: ...
 
 # A conservative bound. A well-formed native execution yields at most the job's request budget of
 # observations; anything larger is treated as malformed engine output and fails closed.
@@ -98,7 +118,7 @@ def normalize_observation_evidence(
 
 def correlate_reported_finding(
     reported: EngineReportedFinding,
-    job: EngineJob,
+    job: CorrelatableJob,
     *,
     ai_hypothesis: str,
     in_scope: bool,
@@ -146,12 +166,18 @@ def dedupe_reported(
 def record_verifier_conclusion(
     normalized: NormalizedFinding,
     conclusion: VerifierConclusion,
+    *,
+    inconclusive_state: FindingLifecycleState = FindingLifecycleState.REJECTED,
 ) -> NormalizedFinding:
     """Apply the deterministic verifier's conclusion, respecting the capability's policy.
 
     Only a ``CONFIRMED`` conclusion under the ``DETERMINISTIC_AEGIS_VERIFIER`` policy may reach
     ``VERIFIED`` and set severity/confidence. Under ``HUMAN_REVIEW_REQUIRED`` a confirmed-looking
-    signal can only reach ``REVIEW_REQUIRED``. Anything else is ``REJECTED``."""
+    signal can only reach ``REVIEW_REQUIRED``. A ``PASS`` (the verifier disproved the claim) is
+    ``REJECTED``. An ``INSUFFICIENT`` result becomes ``inconclusive_state`` — ``REJECTED`` by
+    default (the unchanged Phase 1.1 behaviour); Phase 1.2 Nuclei passes ``REVIEW_REQUIRED``
+    because a tool claim the verifier could neither prove nor disprove needs a human, not silent
+    dismissal."""
 
     capability = get_engine_capability(normalized.capability_id)
     policy = (
@@ -166,14 +192,18 @@ def record_verifier_conclusion(
             update.update(
                 lifecycle_state=FindingLifecycleState.VERIFIED,
                 aegis_finding_id=conclusion.aegis_finding_id,
-                severity="HIGH",
+                # Aegis-owned severity from the catalog (HIGH for native BOLA); never the engine's.
+                severity=capability.verified_severity if capability else "HIGH",
                 confidence="CONFIRMED",
                 evidence_ids=conclusion.evidence_ids or normalized.evidence_ids,
             )
         else:
             update.update(lifecycle_state=FindingLifecycleState.REVIEW_REQUIRED)
+    elif conclusion.status == "INSUFFICIENT":
+        # An inconclusive verifier result never confirms a reported finding.
+        update.update(lifecycle_state=inconclusive_state)
     else:
-        # A PASS or INSUFFICIENT verifier result never confirms a reported finding.
+        # A PASS verifier result disproves the reported finding.
         update.update(lifecycle_state=FindingLifecycleState.REJECTED)
     return normalized.model_copy(update=update)
 

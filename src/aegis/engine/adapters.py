@@ -351,12 +351,18 @@ def get_adapter(
     return DisabledEngineAdapter(engine)
 
 
-def build_dispatcher(executor: TestExecutor, safety: SafetyController) -> EngineDispatcher:
-    """Wire the full adapter fleet: one enabled native adapter, three fail-closed skeletons."""
+def build_dispatcher(
+    executor: TestExecutor,
+    safety: SafetyController,
+    *,
+    nuclei: SecurityEngineAdapter | None = None,
+) -> EngineDispatcher:
+    """Wire the adapter fleet: the enabled native adapter, the Phase 1.2 Nuclei adapter when the
+    operator enabled it (otherwise its fail-closed skeleton), and the ZAP/Burp skeletons."""
 
     adapters: dict[SecurityEngine, SecurityEngineAdapter] = {
         SecurityEngine.AEGIS_NATIVE: AegisNativeAdapter(executor, safety),
-        SecurityEngine.NUCLEI: DisabledEngineAdapter(SecurityEngine.NUCLEI),
+        SecurityEngine.NUCLEI: nuclei or DisabledEngineAdapter(SecurityEngine.NUCLEI),
         SecurityEngine.ZAP: DisabledEngineAdapter(SecurityEngine.ZAP),
         SecurityEngine.BURP_DAST: DisabledEngineAdapter(SecurityEngine.BURP_DAST),
     }
