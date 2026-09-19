@@ -39,6 +39,9 @@ aegis = [
 ]
 aegis_nuclei = ["manifest.json", "py.typed"]
 nuclei_runner = ["py.typed"]
+aegis_zap = ["manifest.json", "sources/*.json", "py.typed"]
+zap_runner = ["py.typed"]
+zap_guard = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -55,4 +58,12 @@ ignore = ["S101"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["aegis", "lab_api", "aegis_nuclei", "nuclei_runner"]
+packages = [
+  "aegis",
+  "lab_api",
+  "aegis_nuclei",
+  "nuclei_runner",
+  "aegis_zap",
+  "zap_runner",
+  "zap_guard",
+]

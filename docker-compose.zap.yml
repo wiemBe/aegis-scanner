@@ -1,0 +1,114 @@
+# Phase 1.3 controlled ZAP passive OpenAPI overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.zap.yml up --build
+#   (combine with docker-compose.nuclei.yml / docker-compose.ollama.yml / -dashboard.yml as needed)
+#
+# Topology (every network is internal: true — no gateway, no internet, no host access):
+#
+#   control-plane --[zap-rpc]--> zap-runner --[zap-egress]--> zap-scope-guard --[zap-target]--> lab-api
+#
+# - zap-runner joins ONLY zap-rpc + zap-egress. zap-rpc is shared only with the control plane (it is
+#   deliberately NOT the Phase 1.2 engine-rpc network, so the ZAP runner cannot reach the Nuclei
+#   runner) and zap-egress contains nothing but the scope guard, so ZAP has no network route to the
+#   target, the LLM gateway, Ollama, the Nuclei runner, the dashboard, the host or the internet.
+#   Every ZAP request must pass through the guard.
+# - zap-scope-guard joins ONLY zap-egress + zap-target. It forwards only armed, allowlisted
+#   GET/HEAD requests to the approved synthetic origin within the hard budget, and counts traffic
+#   independently of ZAP.
+# - lab-api joins zap-target so the guard can reach the synthetic target and nothing else.
+# - The control plane shares zap-rpc with the runner, so its API is bound ONLY to its fixed
+#   security-lab address: from zap-rpc no control-plane port is listening.
+# - No service publishes a port, mounts a host path or the Docker socket, or holds a credential.
+
+services:
+  control-plane:
+    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000
+    environment:
+      ZAP_ENABLED: "true"
+      ZAP_RUNNER_URL: http://zap-runner:8092
+    networks:
+      security-lab:
+        ipv4_address: 10.213.47.10
+      zap-rpc: {}
+    depends_on:
+      zap-runner:
+        condition: service_healthy
+
+  lab-api:
+    networks:
+      security-lab: {}
+      zap-target: {}
+
+  zap-scope-guard:
+    build:
+      context: .
+      dockerfile: deploy/zap-guard/Dockerfile
+    image: aegis-zap-scope-guard:1.3.0
+    user: "10003:10003"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 96m
+    cpus: 0.5
+    ulimits:
+      nofile: {soft: 256, hard: 256}
+    stop_grace_period: 5s
+    expose: ["3128", "3129"]
+    environment: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3129/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    networks: [zap-egress, zap-target]
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "2"}
+
+  zap-runner:
+    build:
+      context: .
+      dockerfile: deploy/zap-runner/Dockerfile
+    image: aegis-zap-runner:1.3.0
+    user: "10002:10002"
+    read_only: true
+    tmpfs:
+      # The ONLY writable location: per-execution ZAP home, session database, projection, plan,
+      # report, JVM temp files and captured output. Destroyed after every execution; gone on stop.
+      - /work:size=256m,mode=0700,uid=10002,gid=10002,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1536m
+    cpus: 2.0
+    ulimits:
+      nofile: {soft: 1024, hard: 1024}
+    stop_grace_period: 10s
+    expose: ["8092"]
+    environment: {}
+    depends_on:
+      zap-scope-guard:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 90s
+    networks: [zap-rpc, zap-egress]
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "2"}
+
+networks:
+  security-lab:
+    ipam:
+      config:
+        - subnet: 10.213.47.0/24
+  zap-rpc:
+    internal: true
+  zap-egress:
+    internal: true
+  zap-target:
+    internal: true

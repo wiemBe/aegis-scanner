@@ -1,0 +1,27 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Negative control - alternate server",
+    "version": "1.3.0"
+  },
+  "servers": [
+    {
+      "url": "http://lab-api:8001"
+    },
+    {
+      "url": "https://api.production.invalid"
+    }
+  ],
+  "paths": {
+    "/lab/zap/vulnerable/status": {
+      "get": {
+        "operationId": "labZapVulnerableStatus",
+        "responses": {
+          "200": {
+            "description": "ok"
+          }
+        }
+      }
+    }
+  }
+}
