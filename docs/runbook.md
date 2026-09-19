@@ -101,6 +101,54 @@ docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
 Never enable runtime updates, mount a template directory, add a credential/proxy variable or expose
 the runner port. Any engine/template/signature mismatch is a stop condition, not an upgrade prompt.
 
+## Phase 1.3 — controlled ZAP passive OpenAPI profile
+
+Build and start (combine with the Nuclei and dashboard overlays as needed):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.zap.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.zap.yml logs zap-runner zap-scope-guard
+```
+
+The runner must report `runner-boot ready=True failures=none zap=2.17.0 ... addonlist_verified=True`
+and the guard `guard-boot version=zap-scope-guard/1.3.0 allowed_origins=http://lab-api:8001`. The
+first boot needs the pinned `zaproxy/zap-stable` index digest (~3.6 GB) locally or pullable at build
+time; nothing is downloaded at runtime.
+
+Request the capability through the existing scan API only:
+
+```json
+{"capability": "zap_passive_header_openapi_v1", "variant": "vulnerable"}
+{"capability": "zap_passive_header_openapi_v1", "variant": "patched", "retest_of": "<scan id>"}
+```
+
+Never add a URL, OpenAPI document, plan, job, rule, option, header or credential — the request
+schemas refuse them. Live acceptance (inside the control-plane container, host kept awake):
+
+```bash
+caffeinate -ims docker compose ... exec -T control-plane python - \
+  --base-url http://10.213.47.10:8000 --runner-url http://zap-runner:8092 \
+  < scripts/phase_1_3_acceptance.py > phase-1.3-live.json
+docker exec -i <zap-runner> python3 - zap-runner < scripts/zap_topology_probe.py
+docker exec -i <zap-scope-guard> python - zap-scope-guard < scripts/zap_topology_probe.py
+docker run --rm --network none --read-only -v "$PWD/tests/fixtures:/fixtures:ro" \
+  -v "$PWD/scripts:/scripts:ro" --entrypoint python3 aegis-zap-runner:1.3.0 \
+  /scripts/zap_parser_controls.py /fixtures/zap-2.17.0-traditional-json-vulnerable.json
+```
+
+Reconcile the acceptance JSON with `docker logs <lab-api>` (by the guard's source IP) to count
+unauthorized target traffic independently. The backend gate now covers seven packages:
+
+```bash
+mypy --explicit-package-bases -p aegis -p lab_api -p aegis_nuclei -p nuclei_runner \
+     -p aegis_zap -p zap_runner -p zap_guard
+```
+
+Stop conditions (never "upgrade" at runtime): any image, jar, JVM or add-on drift; a forbidden add-on
+id present; silent mode not confirmed; guard not attested. See
+[Phase 1.3](phase-1.3-zap-passive-openapi.md) and the [troubleshooting](operator-console-troubleshooting.md)
+failure codes.
+
 ## 1. Phase 0.9 one-command management demo
 
 Prerequisites: Docker/Compose is running and the already-approved local `qwen3:8b` model is present

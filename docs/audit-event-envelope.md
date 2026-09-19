@@ -15,7 +15,7 @@ The Phase 1.0 envelope is an additive redacted projection of persisted Phase 0.9
 | `event_type` | Stable persisted event class |
 | `stage` | Normalized workflow stage |
 | `status` | Structured state such as `RECORDED`, `CONFIRMED`, `PASS`, `FAILED`, or `REJECTED` |
-| `engine` | `AEGIS_NATIVE`; forward-compatible with `NUCLEI`, `ZAP`, `BURP_DAST` |
+| `engine` | `AEGIS_NATIVE`, `NUCLEI` (Phase 1.2) or `ZAP` (Phase 1.3); `BURP_DAST` reserved |
 | `summary` | Server-owned concise summary, never raw model/target prose |
 | `evidence_refs` | Approved redacted evidence references |
 | `redaction_status` | `REDACTED` or `NOT_REQUIRED` |
@@ -36,3 +36,16 @@ signals a gap, sends heartbeat comments every 15 seconds, and enforces eight con
 
 Audit API and stream access are recorded in a separate access-log table with request ID, route,
 outcome, and timestamp. The access log stores no query values or response data.
+
+## Phase 1.3 ZAP events
+
+`ZAP_PROJECTION_CREATED`, `ZAP_PROJECTION_REJECTED`, `ZAP_JOB_ADMITTED`, `ZAP_JOB_REJECTED` and
+`ZAP_ALERT_CORRELATED` are `CONTROLLER` events; `ZAP_RUNNER_STARTED` (runner and scope-guard
+attestation) is `SYSTEM`; `ZAP_PLAN_VALIDATED`, `ZAP_OPENAPI_IMPORT_STARTED`,
+`ZAP_OPENAPI_IMPORT_COMPLETED`, `ZAP_PASSIVE_SCAN_WAIT_STARTED`, `ZAP_PASSIVE_SCAN_DRAINED`,
+`ZAP_EXECUTION_COMPLETED`, `ZAP_EXECUTION_FAILED` and `ZAP_ALERT_REPORTED` are `TOOL_RUNNER`;
+`ZAP_VERIFICATION_STARTED` and `ZAP_VERIFICATION_COMPLETED` are `VERIFIER`. New stages:
+`OPENAPI_PROJECTION`, `PLAN_VALIDATION`, `OPENAPI_IMPORT` and `PASSIVE_SCAN`. The metadata allowlist
+adds only ids, digests, versions, counts, codes and labels (for example `projection_digest`,
+`urls_added`, `observed_requests`, `blocked_reasons`, `plugin_id`, `claimed_risk`); ZAP alert prose,
+report text and HTTP content are never persisted, so they cannot be projected.

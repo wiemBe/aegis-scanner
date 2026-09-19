@@ -1,7 +1,27 @@
-# Aegis AI Security Lab — Phase 1.2
+# Aegis AI Security Lab — Phase 1.3
 
 A bounded, guardrailed security-testing demonstration for the included synthetic banking API.
 **Not production-ready. No external or production targets are authorized.**
+
+Phase 1.3 adds one operational, **passive-only** [ZAP integration](docs/phase-1.3-zap-passive-openapi.md).
+ZAP `2.17.0` runs from a digest-pinned image with exactly eight verified add-ons in a non-root,
+read-only, shell-less `zap-runner` container whose only network path to the synthetic target is an
+independent scope guard that forwards only armed, allowlisted GET requests within a hard budget. The
+controller projects a minimal read-only OpenAPI document from controller-owned inventory; ZAP imports
+it from a local file and passively analyses the responses with one admitted rule. ZAP passively
+analyzes responses from controller-approved read-only API operations. ZAP alerts are independently
+correlated and verified by Aegis. Real pinned-image acceptance is vulnerable 5/5 and patched 5/5 with
+every negative control failing closed and zero unauthorized target traffic. **GO only for this one
+synthetic, anonymous, passive capability.** No active scanning, spidering, scripting,
+authentication, production target, Burp DAST or OWASP coverage claim is enabled.
+
+Details: [runner isolation](docs/zap-runner-isolation.md),
+[OpenAPI projection](docs/zap-openapi-projection.md),
+[supply chain and rule manifest](docs/zap-passive-rule-manifest.md),
+[evidence and verification](docs/zap-evidence-and-verification.md) and
+[Phase 1.4 prerequisites](docs/phase-1.4-zap-active-staging-prerequisites.md).
+
+## Earlier phases
 
 Phase 1.2 adds one operational, tightly constrained
 [Nuclei integration](docs/phase-1.2-nuclei-integration.md). Nuclei `v3.11.1` runs in a separate
@@ -12,7 +32,7 @@ owns target/profile/template selection and constructs a strict typed RPC; Nuclei
 TOOL_REPORTED and only a fresh deterministic Aegis verifier can confirm a finding or patched PASS.
 Real pinned-binary acceptance is vulnerable 5/5 and patched-negative 5/5 with every negative control
 passing and zero unauthorized traffic. **GO only for this one synthetic, anonymous, read-only HTTP
-capability.** No broad template scan, Nuclei AI/DAST/OAST, authentication, production target, ZAP,
+capability.** No broad template scan, Nuclei AI/DAST/OAST, authentication, production target,
 Burp DAST or automatic OWASP coverage is enabled.
 
 Supply chain and operations: [template pins](docs/nuclei-template-supply-chain.md),
@@ -26,8 +46,9 @@ deterministic execution policy that rejects disallowed jobs before any tool traf
 disabled skeletons for `NUCLEI`, `ZAP` and `BURP_DAST`. Engine observations are untrusted; only the
 deterministic verifier or explicit human review promotes a result. Phase 1.1 verdict: **GO for the
 bounded synthetic-lab and the single read-only BOLA capability, executed through the new engine
-interface**. At that Phase 1.1 baseline, Nuclei/ZAP/Burp DAST were not operational; Phase 1.2 now
-enables only the bounded Nuclei profile described above. ZAP and Burp remain disabled.
+interface**. At that Phase 1.1 baseline, Nuclei/ZAP/Burp DAST were not operational; Phase 1.2
+enabled the bounded Nuclei profile and Phase 1.3 the passive ZAP profile described above. Burp DAST
+remains disabled.
 
 Phase 1.0 added the [Aegis Operator Console](docs/phase-1.0.md), a distinct local React/TypeScript
 surface over the completed Phase 0.9 scan, audit, finding, retest, and evidence contracts. It adds
@@ -37,7 +58,8 @@ dashboard remains at `/`; the console is at `/console/`; the Phase 0.9 focused v
 
 Phase 1.0 verdict: **GO for the localhost operator console over the bounded synthetic-lab
 capability**. This is not a production-readiness or broad-coverage verdict. Its historical Nuclei,
-ZAP and Burp state is superseded only by the Phase 1.2 Nuclei profile; ZAP and Burp remain disabled.
+ZAP and Burp state is superseded only by the Phase 1.2 Nuclei and Phase 1.3 passive ZAP profiles;
+Burp DAST remains disabled.
 
 Phase 0.9 verdict: **GO for the reproducible synthetic-lab demonstration** after two consecutive
 fresh `qwen3:8b` runs. This is not a production-readiness or broad-coverage verdict.
@@ -300,7 +322,8 @@ docker build --build-arg INSTALL_DEV=true -t aegis-check .
 docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
   -e PYTHONPATH=/workspace/src -e MYPYPATH=/workspace/src aegis-check \
   sh -c 'ruff check src tests scripts && \
-         mypy --explicit-package-bases -p aegis -p lab_api -p aegis_nuclei -p nuclei_runner && \
+         mypy --explicit-package-bases -p aegis -p lab_api -p aegis_nuclei -p nuclei_runner \
+              -p aegis_zap -p zap_runner -p zap_guard && \
          pytest -q'
 ```
 

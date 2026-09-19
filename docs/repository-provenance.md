@@ -20,4 +20,8 @@ Aegis AI Security Lab.
   only one pinned, signed, anonymous read-only Nuclei capability for the synthetic lab. ZAP and Burp
   DAST remain disabled. Nothing in this repository claims production readiness.
 
+- **Phase 1.3 is ordinary forward history.** Work after `phase-1.2-go` is recorded on
+  `feat/phase-1.3-zap-passive`. It adds only one pinned, isolated, passive ZAP profile for the
+  synthetic lab. Active scanning, production targets and Burp DAST remain disabled.
+
 The baseline commit is tagged `phase-1.1-go`.
