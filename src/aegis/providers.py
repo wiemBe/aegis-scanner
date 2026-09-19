@@ -26,6 +26,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from aegis.beast.contracts import BEAST_DECISION_ADAPTER, BeastDecision, BeastDecisionRequest
+from aegis.beast.observe import render_decision_brief
 from aegis.budget import ScanBudget
 from aegis.candidates import candidate_generation_schema, selection_schema
 from aegis.contract import DECISION_MODELS, build_generation_schema, state_adapter
@@ -66,6 +68,7 @@ def _permitted_and_schema(context: dict[str, Any]) -> tuple[tuple[str, ...], dic
     surface = context.get("surface") if isinstance(context.get("surface"), dict) else {}
     return permitted, build_generation_schema(permitted, surface or {})
 
+
 # Chat/completions-style providers get a short brevity addendum: local models tend to over-generate
 # free-text fields, which wastes the num_predict budget and truncates the JSON. This is a decoding
 # aid only; the strict schema and fail-closed validation remain the authority.
@@ -74,6 +77,27 @@ _CHAT_ADDENDUM = (
     "'summary' under 240 characters and every 'rationale' under 400 characters."
 )
 CHAT_SYSTEM_PROMPT = SYSTEM_PROMPT + _CHAT_ADDENDUM
+
+BEAST_SYSTEM_PROMPT = """You are operating a real shell inside an explicitly authorized,
+disposable synthetic security lab. You control the attack logic: form a concise hypothesis, choose
+any installed tool or shell syntax, and return either one command to execute or a stop decision.
+Adapt each decision to the bounded observations from earlier commands. Do not assume an endpoint or
+vulnerability that has not been observed. Start from the supplied target origin and base path;
+inspect public target material when discovery is needed. Never target another host. You may create
+Bash or Python files and generate raw HTTP or payloads. Commands execute exactly as command_text,
+so make each command non-interactive and bounded. Files produced in the workspace may appear in
+the next observation as bounded artifact_previews; treat those previews as command output. During
+endpoint discovery, retain useful response bodies and follow observed links instead of inventing
+endpoint names. A status code without a response body is not discovery evidence: retrieve the body
+from the same already-observed URL before probing an unobserved path. A command exit code alone is
+not vulnerability evidence. Do not repeat a semantically equivalent command after its result is
+observed: if an approach fails, select a materially different approach. The controller supplies an
+objective_evidence_sufficient boolean derived from normalized observations. When it is true, you
+MUST return a stop decision immediately and cite the relevant observation IDs; do not issue another
+command. The controller may also supply decision_requirements describing missing evidence; satisfy
+those requirements on the next turn while choosing the tool, syntax, and arguments yourself. Stop
+only when the cited observations are sufficient for an independent verifier. Return one JSON object
+matching the supplied schema, with no markdown or private chain-of-thought."""
 
 # Responses API output item types that indicate the model tried to call a tool. None are permitted.
 _TOOL_CALL_TYPES = frozenset(
@@ -119,6 +143,14 @@ class SelectionResult:
     usage: ProviderUsage
     metadata: ProviderRunMetadata
     planner_contract_version: int = PLANNER_CONTRACT_VERSION
+
+
+@dataclass(frozen=True)
+class BeastProviderResult:
+    model: str
+    decision: BeastDecision
+    usage: ProviderUsage
+    metadata: ProviderRunMetadata
 
 
 class PlannerProvider(ABC):
@@ -291,15 +323,18 @@ class OllamaProvider(_HttpModelProvider):
     def _payload(
         self,
         system_prompt: str,
-        content: dict[str, Any],
+        content: dict[str, Any] | str,
         max_output_tokens: int,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
+        user_content = (
+            content if isinstance(content, str) else json.dumps(content, ensure_ascii=True)
+        )
         return {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(content, ensure_ascii=True)},
+                {"role": "user", "content": user_content},
             ],
             "stream": False,
             # Non-thinking mode: no separated chain-of-thought, only the structured JSON output.
@@ -317,7 +352,7 @@ class OllamaProvider(_HttpModelProvider):
     async def _chat(
         self,
         system_prompt: str,
-        content: dict[str, Any],
+        content: dict[str, Any] | str,
         schema: dict[str, Any],
         max_output_tokens: int,
     ) -> tuple[str, dict[str, Any]]:
@@ -421,6 +456,27 @@ class OllamaProvider(_HttpModelProvider):
             raise
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def adversary_decide(self, request: BeastDecisionRequest) -> BeastProviderResult:
+        """Produce one genuine command-level decision; no deterministic fallback exists."""
+
+        await self._load_metadata()
+        schema = BEAST_DECISION_ADAPTER.json_schema()
+        try:
+            content, data = await self._chat(
+                BEAST_SYSTEM_PROMPT,
+                render_decision_brief(request),
+                schema,
+                min(self._output_cap, 4096),
+            )
+            decision = BEAST_DECISION_ADAPTER.validate_json(content)
+            return BeastProviderResult(
+                self.model, decision, self._usage(data), self._metadata(data)
+            )
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"BEAST_MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
 
 class InternalOpenAICompatibleProvider(_HttpModelProvider):
@@ -849,7 +905,9 @@ class DemoHeuristicProvider(PlannerProvider):
             provider_type=self.provider_type, runtime="demo", model=self.model
         )
         return ProviderResult(
-            self.model, decision, ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            self.model,
+            decision,
+            ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
             metadata,
         )
 

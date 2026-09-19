@@ -1,0 +1,133 @@
+# Phase 1.4 — Disposable AI Adversary Sandbox (SYNTHETIC_LAB only).
+#
+# control-plane -> beast-rpc -> RPC relay -> beast-adversary -> sandbox supervisor
+# sandbox command -> beast-adversary -> exact target gateway -> beast-target-backend -> lab-api
+#
+# The command process has only the beast-adversary network. It has no host mount, Docker socket,
+# public route, model route, control-plane route or credential environment. The RPC relay is a
+# one-purpose forwarder; supervisor authorization is required and its token is stripped from the
+# command environment. The target gateway independently enforces exact prefix and byte/connection
+# budgets. No other project service joins beast-adversary.
+
+services:
+  control-plane:
+    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000
+    environment:
+      BEAST_ENABLED: "true"
+      BEAST_SUPERVISOR_URL: http://beast-rpc-relay:8094
+      BEAST_SUPERVISOR_TOKEN: ${BEAST_SUPERVISOR_TOKEN:?set a random supervisor token}
+      BEAST_REQUIRED_MODEL: qwen3:8b
+    networks:
+      security-lab:
+        ipv4_address: 10.213.47.10
+      beast-rpc: {}
+    depends_on:
+      beast-rpc-relay:
+        condition: service_started
+      beast-sandbox:
+        condition: service_healthy
+
+  lab-api:
+    networks:
+      security-lab: {}
+      beast-target-backend: {}
+
+  beast-target-gateway:
+    build: .
+    command: uvicorn beast_gateway.server:app --host 0.0.0.0 --port 8080
+    environment:
+      BEAST_BOUNDARY_TOKEN: ${BEAST_BOUNDARY_TOKEN:?set a random boundary token}
+      BEAST_TARGET_BACKEND: http://lab-api:8001
+    read_only: true
+    tmpfs: ["/tmp:size=8m,nosuid,nodev,noexec"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    expose: ["8080"]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+    networks:
+      beast-adversary:
+        aliases: [beast-target]
+        ipv4_address: 10.214.48.2
+      beast-target-backend: {}
+
+  beast-sandbox:
+    build:
+      context: .
+      dockerfile: deploy/beast-sandbox/Dockerfile
+    image: aegis-beast-adversary-sandbox:1.4.0
+    environment:
+      BEAST_SUPERVISOR_TOKEN: ${BEAST_SUPERVISOR_TOKEN:?set a random supervisor token}
+      BEAST_BOUNDARY_TOKEN: ${BEAST_BOUNDARY_TOKEN:?set a random boundary token}
+      BEAST_TARGET_GATEWAY: http://beast-target:8080
+      BEAST_WORKSPACE_ROOT: /workspace
+    read_only: true
+    tmpfs:
+      - "/workspace:size=32m,mode=0700,uid=0,gid=0,nosuid,nodev"
+      - "/tmp:size=4m,mode=0700,uid=0,gid=0,nosuid,nodev,noexec"
+      - "/dev/shm:size=64k,mode=0700,uid=0,gid=0,nosuid,nodev,noexec"
+    cap_drop: [ALL]
+    # Supervisor-only capabilities: create a run-owned workspace, drop the command to uid/gid
+    # 65532, and terminate its process group. No raw-network, namespace, mount or policy capability.
+    cap_add: [CHOWN, SETUID, SETGID, KILL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 48
+    mem_limit: 384m
+    cpus: 1.0
+    ulimits:
+      nofile: {soft: 64, hard: 64}
+      core: {soft: 0, hard: 0}
+    stop_grace_period: 3s
+    expose: ["8094"]
+    # Static target resolution replaces general DNS inside the command namespace.
+    extra_hosts: ["beast-target:10.214.48.2"]
+    dns: ["127.0.0.1"]
+    depends_on:
+      beast-target-gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8094/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+      start_period: 10s
+    networks: [beast-adversary]
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "2"}
+
+  beast-rpc-relay:
+    build: .
+    command: uvicorn beast_gateway.relay:app --host 0.0.0.0 --port 8094
+    user: "65534:65534"
+    read_only: true
+    tmpfs: ["/tmp:size=4m,nosuid,nodev,noexec"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 16
+    mem_limit: 32m
+    cpus: 0.25
+    expose: ["8094"]
+    depends_on:
+      beast-sandbox:
+        condition: service_healthy
+    networks: [beast-rpc, beast-adversary]
+
+networks:
+  security-lab:
+    ipam:
+      config:
+        - subnet: 10.213.47.0/24
+  beast-rpc:
+    internal: true
+  beast-adversary:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.214.48.0/28
+  beast-target-backend:
+    internal: true

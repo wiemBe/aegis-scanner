@@ -13,8 +13,12 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Requ
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, ConfigDict, Field
 
 from aegis import scm_verifier, zap_verifier
+from aegis.beast.contracts import BeastRunRequest, LeaseRequest
+from aegis.beast.controller import BeastController, BeastRejected
+from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
@@ -58,6 +62,8 @@ planner = build_planner(settings)
 service = ScanService(settings, store, planner, safety)
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
+beast_store = BeastStore(settings.database_path)
+beast = BeastController(settings, beast_store)
 
 
 class StreamConnections:
@@ -84,6 +90,7 @@ streams = StreamConnections()
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     store.initialize()
+    beast_store.initialize()
     yield
 
 
@@ -115,9 +122,7 @@ async def security_headers(request: Request, call_next: object) -> object:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
     # Only LOCAL_LLM deployments carry an acceptance verdict badge; other modes show nothing.
-    validation_status = (
-        settings.local_llm_validation_status if planner.name == "LOCAL_LLM" else ""
-    )
+    validation_status = settings.local_llm_validation_status if planner.name == "LOCAL_LLM" else ""
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html",
@@ -207,9 +212,7 @@ def _console_events(
             row,
             current_scan,
             parent_event_id=(
-                f"evt-{int(row['parent_id']):012d}"
-                if row.get("parent_id") is not None
-                else None
+                f"evt-{int(row['parent_id']):012d}" if row.get("parent_id") is not None else None
             ),
         )
         projected.append(envelope)
@@ -231,7 +234,82 @@ async def console_config() -> dict[str, object]:
         "actor_contract": [item.value for item in ActorType],
         "engine_kernel_version": ENGINE_KERNEL_VERSION,
         "engine_catalog": catalog_projection(),
+        "beast": beast.config(),
     }
+
+
+class EmergencyStopRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operator_id: str = Field(pattern=r"^[A-Za-z0-9._@-]{3,80}$")
+
+
+@app.get("/api/beast/config")
+async def beast_config() -> dict[str, object]:
+    return beast.config()
+
+
+@app.get("/api/beast/preflight/{target_ref}")
+async def beast_preflight(target_ref: str) -> dict[str, object]:
+    try:
+        return beast.preflight(target_ref).model_dump(mode="json")
+    except (BeastRejected, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@app.post("/api/beast/leases", status_code=201)
+async def beast_issue_lease(request: LeaseRequest) -> dict[str, object]:
+    try:
+        return beast.issue_lease(request).model_dump(mode="json")
+    except BeastRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@app.post("/api/beast/runs", status_code=202)
+async def beast_create_run(
+    request: BeastRunRequest, background_tasks: BackgroundTasks
+) -> dict[str, object]:
+    try:
+        run = beast.create_run(request)
+    except BeastRejected as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    background_tasks.add_task(beast.run, run.run_id)
+    return run.model_dump(mode="json")
+
+
+@app.get("/api/beast/runs")
+async def beast_runs(limit: int = Query(default=50, ge=1, le=100)) -> dict[str, object]:
+    items = beast_store.list_runs(limit)
+    return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+
+@app.get("/api/beast/runs/{run_id}")
+async def beast_run_detail(run_id: str) -> dict[str, object]:
+    run = beast_store.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Beast run not found")
+    return {
+        "run": run.model_dump(mode="json"),
+        "events": beast_store.events(run_id),
+    }
+
+
+@app.post("/api/beast/runs/{run_id}/stop")
+async def beast_emergency_stop(run_id: str, request: EmergencyStopRequest) -> dict[str, object]:
+    try:
+        run = await beast.emergency_stop(run_id, request.operator_id)
+    except BeastRejected as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    return run.model_dump(mode="json")
+
+
+@app.post("/api/beast/targets/{target_ref}/restore")
+async def beast_restore_target(
+    target_ref: str, request: EmergencyStopRequest
+) -> dict[str, object]:
+    try:
+        return await beast.restore_target(target_ref, request.operator_id)
+    except (BeastRejected, ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
 @app.get("/api/console/runs")

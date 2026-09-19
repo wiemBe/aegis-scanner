@@ -5,6 +5,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+COPY scripts ./scripts
 ARG INSTALL_DEV=false
 RUN if [ "$INSTALL_DEV" = "true" ]; then pip install --no-cache-dir '.[dev]'; else pip install --no-cache-dir .; fi
 
