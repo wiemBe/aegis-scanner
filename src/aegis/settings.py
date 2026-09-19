@@ -18,6 +18,11 @@ PROVIDER_MODE_LABELS: dict[str, str] = {
 
 ProviderName = Literal["demo", "ollama", "internal_openai_compatible", "openai_responses"]
 AuthMode = Literal["none", "bearer"]
+# Structured-output negotiation for OpenAI-compatible backends. "json_schema" uses the provider's
+# strict JSON-Schema response_format (OpenAI); "json_object" uses plain JSON mode and embeds the
+# same strict schema in the prompt (e.g. DeepSeek, which does not support json_schema). In BOTH
+# cases the full local Pydantic/JSON-Schema validation chain still runs and nothing is coerced.
+JsonResponseMode = Literal["json_schema", "json_object"]
 
 
 class Settings(BaseSettings):
@@ -47,6 +52,16 @@ class Settings(BaseSettings):
     # Bearer credential for the internal endpoint. It is mounted ONLY into the llm-gateway service
     # (via .env.gateway) and is never given to the control plane, which refuses to start with it.
     ai_auth_token: SecretStr | None = None
+    # Structured-output mode for internal_openai_compatible backends. Default json_schema keeps the
+    # existing OpenAI strict-schema behaviour; json_object is for backends (e.g. DeepSeek) that only
+    # support JSON mode — the strict schema is embedded in the prompt and locally re-validated.
+    ai_response_format: JsonResponseMode = "json_schema"
+    # Some OpenAI-compatible backends (e.g. DeepSeek) do not accept the OpenAI 'seed' field. When
+    # False the field is omitted and metadata records seed=None, so no false determinism is claimed.
+    ai_supports_seed: bool = True
+    # Route the internal_openai_compatible provider through the constrained CONNECT egress proxy
+    # (used for public backends like DeepSeek) instead of a direct internal-network connection.
+    ai_use_egress_proxy: bool = False
 
     # Control plane -> llm-gateway RPC over the internal planner-rpc network (no secret in transit).
     llm_gateway_url: str = "http://llm-gateway:8080"
