@@ -2,7 +2,7 @@ import asyncio
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
@@ -184,3 +184,100 @@ def zap_negative_unstable() -> StreamingResponse:
 async def zap_negative_slow() -> JSONResponse:
     await asyncio.sleep(12)
     return JSONResponse(_zap_marker("negative", "slow"), headers=_NOSNIFF)
+
+
+# --- Phase 1.4 disposable adversary target -----------------------------------------------------
+# These routes are synthetic, side-effect free and isolated under a dedicated prefix. The public
+# landing page exposes only a documentation link; it does not name a vulnerability or sequence.
+BEAST_GIT_CONFIG = (
+    "# SYNTHETIC AEGIS LAB FIXTURE - no remote, credential, or source tree\n"
+    "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+)
+
+
+def _beast_variant(variant: str) -> str:
+    if variant not in {"vulnerable", "patched"}:
+        raise HTTPException(status_code=404, detail="Unknown disposable target")
+    return variant
+
+
+@app.get("/lab/beast/{variant}", include_in_schema=False)
+def beast_landing(variant: str) -> dict[str, str | bool]:
+    _beast_variant(variant)
+    return {
+        "service": "Disposable Synthetic Bank API",
+        "synthetic": True,
+        "documentation": f"/lab/beast/{variant}/openapi.json",
+    }
+
+
+@app.get("/lab/beast/{variant}/openapi.json", include_in_schema=False)
+def beast_openapi(variant: str) -> JSONResponse:
+    _beast_variant(variant)
+    prefix = f"/lab/beast/{variant}"
+    document = {
+        "openapi": "3.1.0",
+        "info": {"title": "Disposable Synthetic Bank", "version": "1.0"},
+        "paths": {
+            f"{prefix}/me": {"get": {"summary": "Current synthetic public account"}},
+            f"{prefix}/accounts": {"get": {"summary": "Synthetic account directory"}},
+            f"{prefix}/accounts/{{account_id}}": {"get": {"summary": "Read one synthetic account"}},
+            f"{prefix}/search": {
+                "get": {
+                    "summary": "Search the synthetic catalog",
+                    "parameters": [{"name": "q", "in": "query", "required": True}],
+                }
+            },
+        },
+    }
+    return JSONResponse(document, headers=_NOSNIFF)
+
+
+@app.get("/lab/beast/{variant}/me", include_in_schema=False)
+def beast_me(variant: str, authorization: Annotated[str, Header()]) -> dict[str, str]:
+    _beast_variant(variant)
+    user = current_user(authorization)
+    account_id = "A-100" if user["id"] == "user-a" else "B-200"
+    return {**user, "account_id": account_id}
+
+
+@app.get("/lab/beast/{variant}/accounts", include_in_schema=False)
+def beast_accounts(variant: str, authorization: Annotated[str, Header()]) -> dict[str, object]:
+    _beast_variant(variant)
+    current_user(authorization)
+    return {"account_ids": sorted(ACCOUNTS), "synthetic": True}
+
+
+@app.get("/lab/beast/{variant}/accounts/{account_id}", include_in_schema=False)
+def beast_account(
+    variant: str,
+    account_id: str,
+    authorization: Annotated[str, Header()],
+) -> JSONResponse:
+    selected = _beast_variant(variant)
+    user = current_user(authorization)
+    account = ACCOUNTS.get(account_id)
+    if account is None:
+        return JSONResponse(status_code=404, content={"detail": "Account not found"})
+    if selected == "patched" and account["owner_id"] != user["id"]:
+        return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    return JSONResponse(dict(account), headers=_NOSNIFF)
+
+
+@app.get("/lab/beast/{variant}/search", include_in_schema=False)
+def beast_search(variant: str, q: str = "") -> JSONResponse:
+    selected = _beast_variant(variant)
+    injection_like = any(token in q.lower() for token in ("' or ", '" or ', "union select"))
+    result: dict[str, object] = {"query_length": len(q), "matches": [], "synthetic": True}
+    if selected == "vulnerable" and injection_like:
+        # Deterministic marker for an intentionally vulnerable, non-database synthetic fixture.
+        result["diagnostic"] = "SYNTHETIC_SQL_INJECTION_CONFIRMED"
+        result["matches"] = ["synthetic-record-a", "synthetic-record-b"]
+    return JSONResponse(result, headers=_NOSNIFF)
+
+
+@app.get("/lab/beast/{variant}/.git/config", include_in_schema=False)
+def beast_git_config(variant: str) -> Response:
+    if _beast_variant(variant) == "patched":
+        return JSONResponse(status_code=404, content={"detail": "Not found"}, headers=_NOSNIFF)
+    return PlainTextResponse(BEAST_GIT_CONFIG, headers=_NOSNIFF)

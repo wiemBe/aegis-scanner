@@ -42,6 +42,8 @@ nuclei_runner = ["py.typed"]
 aegis_zap = ["manifest.json", "sources/*.json", "py.typed"]
 zap_runner = ["py.typed"]
 zap_guard = ["py.typed"]
+beast_sandbox = ["py.typed"]
+beast_gateway = ["py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -66,4 +68,6 @@ packages = [
   "aegis_zap",
   "zap_runner",
   "zap_guard",
+  "beast_sandbox",
+  "beast_gateway",
 ]

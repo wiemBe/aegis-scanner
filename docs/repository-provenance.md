@@ -24,4 +24,9 @@ Aegis AI Security Lab.
   `feat/phase-1.3-zap-passive`. It adds only one pinned, isolated, passive ZAP profile for the
   synthetic lab. Active scanning, production targets and Burp DAST remain disabled.
 
+- **Phase 1.4 is ordinary forward history.** Work starts from clean `main` at annotated tag
+  `phase-1.3-go` on `feat/phase-1.4-beast-mode`. The authoritative TRUE ADVERSARY SHELL correction
+  permits arbitrary model-selected commands only inside the disposable sandbox. It does not widen
+  the synthetic target, network, resource, audit, cleanup, emergency-stop or verifier boundaries.
+
 The baseline commit is tagged `phase-1.1-go`.

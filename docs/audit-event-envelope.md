@@ -49,3 +49,21 @@ attestation) is `SYSTEM`; `ZAP_PLAN_VALIDATED`, `ZAP_OPENAPI_IMPORT_STARTED`,
 adds only ids, digests, versions, counts, codes and labels (for example `projection_digest`,
 `urls_added`, `observed_requests`, `blocked_reasons`, `plugin_id`, `claimed_risk`); ZAP alert prose,
 report text and HTTP content are never persisted, so they cannot be projected.
+
+## Phase 1.4 Beast audit
+
+Beast records use a dedicated append-only SQLite table and a global SHA-256 previous-digest chain.
+Each API replay returns `beast-evt-<12 digits>`, sequence, UTC timestamp, run, event/actor, exact
+details, previous digest and digest. This is checksummed local evidence, not an immutable audit-store
+claim. Synthetic-lab command text and bounded stdout/stderr are visible to the authorized operator.
+React renders them as text, never unsafe HTML.
+
+Activation/lease events: `BEAST_MODE_REQUESTED`, `BEAST_PREFLIGHT_STARTED`,
+`BEAST_PREFLIGHT_REJECTED`, `BEAST_APPROVAL_RECORDED`, `BEAST_LEASE_ISSUED`,
+`BEAST_MODE_ACTIVATED`, `BEAST_CAPABILITY_AUTHORIZED/REJECTED`, budget warning/exhaustion and lease
+expiry. Adaptive-loop events: `AI_ADVERSARY_DECISION`, `AI_SHELL_COMMAND_PROPOSED/STARTED/COMPLETED`,
+`AI_SHELL_COMMAND_TIMED_OUT/TERMINATED`, `AI_SHELL_OUTPUT_REDACTED` and
+`AI_ADVERSARY_OBSERVATION/STOPPED`. Artifact/network events record creation, admission/rejection,
+boundary blocks and sandbox destruction. Verifier, cleanup, emergency-stop, health-restore and final
+completion events retain actor separation. Every next-decision event includes its input observation
+IDs; commands contain their parent command IDs.

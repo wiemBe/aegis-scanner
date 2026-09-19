@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
+from aegis.beast.contracts import BeastDecisionRequest, BeastDecisionResponse
 from aegis.models import (
     GatewayCandidateRequest,
     GatewayCandidateResponse,
@@ -26,7 +27,7 @@ from aegis.models import (
     GatewaySelectResponse,
 )
 from aegis.planner import PlannerFailure
-from aegis.providers import PlannerProvider, build_provider
+from aegis.providers import OllamaProvider, PlannerProvider, build_provider
 from aegis.settings import get_settings
 
 _provider: PlannerProvider | None = None
@@ -120,4 +121,26 @@ async def select(request: GatewaySelectRequest) -> GatewaySelectResponse:
         usage=result.usage,
         metadata=result.metadata,
         planner_contract_version=result.planner_contract_version,
+    )
+
+
+@app.post("/v1/beast/decide", response_model=BeastDecisionResponse)
+async def beast_decide(request: BeastDecisionRequest) -> BeastDecisionResponse:
+    """Phase 1.4 deliberately has no demo/mock/heuristic provider or command fallback."""
+
+    provider = get_provider()
+    if not isinstance(provider, OllamaProvider) or provider.provider_type != "ollama":
+        raise HTTPException(status_code=409, detail="BEAST_REQUIRES_LOCAL_OLLAMA_MODEL")
+    try:
+        result = await provider.adversary_decide(request)
+    except PlannerFailure as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": str(exc), "response_sha256": exc.response_digest},
+        ) from None
+    return BeastDecisionResponse(
+        model=result.model,
+        decision=result.decision,
+        usage=result.usage.model_dump(mode="json"),
+        metadata=result.metadata.model_dump(mode="json"),
     )

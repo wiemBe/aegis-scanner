@@ -226,6 +226,49 @@ type Finding = {
 
 type Integration = { name: string; engine: string; state: string; model?: string | null; digest?: string | null; provider?: string | null }
 
+type BeastConfig = {
+  enabled: boolean
+  mode: string
+  available_mode: string | null
+  profile_id: string
+  required_model: string
+  synthetic_lab_only: boolean
+  target_refs: string[]
+  technical_subtitle: string
+  boundary_description: string
+}
+
+type BeastPreflight = {
+  profile_id: string
+  target: {
+    target_ref: string; name: string; origin: string; base_path: string; environment: string
+    owner: string; approval_reference: string; allowed_methods: string[]; allowed_path_prefix: string
+    reset_strategy: string; synthetic_credential_profiles: string[]; expected_impact: string
+    prohibited_operations: string[]; max_blast_radius: string
+  }
+  enabled_capabilities: string[]
+  enabled_engines: string[]
+  resources: Record<string, number>
+  automatic_expiry_seconds: number
+  emergency_stop: string
+  technical_subtitle: string
+  boundary_description: string
+}
+
+type BeastRun = {
+  run_id: string; lease_id: string; target_ref: string; scenario_id: string; state: string
+  model: string; profile_id: string; created_at: string; lease_expires_at: string | null; started_at: string | null
+  completed_at: string | null; resources: Record<string, number>
+  commands: { command_id: string; command_text: string; expected_intent: string; hypothesis_reference: string; sequence: number }[]
+  results: { command_id: string; exit_code: number | null; duration_ms: number; stdout: string; stderr: string; resource_usage: Record<string, number>; network_destinations: string[]; artifact_references: string[] }[]
+  observations: { observation_id: string; summary: string; facts: Record<string, unknown> }[]
+  model_calls: Record<string, unknown>[]; verifier_conclusion: Record<string, unknown> | null
+  stop_reason: string | null; workspace_destroyed: boolean; cleanup_verified: boolean
+  emergency_stopped: boolean
+}
+
+type BeastEvent = { event_id: string; event_type: string; actor_type: string; timestamp: string; details: Record<string, unknown>; digest: string }
+
 const NAV: View[] = ['Mission Control', 'Runs', 'Findings', 'Audit', 'Evidence', 'Integrations', 'System Health']
 const WORKFLOW = ['PREFLIGHT', 'AI_HYPOTHESIS', 'CANDIDATE_VALIDATION', 'QUEUE_ADMISSION', 'REQUEST_COMPILATION', 'SAFETY_AUTHORIZATION', 'EXECUTION', 'VERIFICATION', 'FINDING', 'LINKED_RETEST', 'COMPLETE']
 const ZAP_WORKFLOW = ['PREFLIGHT', 'OPENAPI_PROJECTION', 'ENGINE_JOB', 'RUNNER_ATTESTATION', 'PLAN_VALIDATION', 'OPENAPI_IMPORT', 'PASSIVE_SCAN', 'EXECUTION', 'TOOL_FINDING', 'CORRELATION', 'VERIFICATION', 'COMPLETE']
@@ -235,6 +278,17 @@ const yesNo = (value: boolean | null | undefined) => value === undefined || valu
 const api = async <T,>(path: string): Promise<T> => {
   const response = await fetch(path, { headers: { Accept: 'application/json' } })
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
+  return response.json() as Promise<T>
+}
+
+const apiPost = async <T,>(path: string, body: Record<string, unknown>): Promise<T> => {
+  const response = await fetch(path, {
+    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const problem = await response.json().catch(() => ({})) as { detail?: string }
+    throw new Error(problem.detail ?? `Request failed (${response.status})`)
+  }
   return response.json() as Promise<T>
 }
 
@@ -440,7 +494,60 @@ function HealthView({ health }: { health: Record<string, unknown> | null }) {
 }
 
 function ManagementView({ finding, onClose }: { finding?: Finding; onClose: () => void }) {
-  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.3</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">The local AI model analyzes a projected API surface and independently proposes an object-authorization attack hypothesis. A deterministic policy layer validates scope and safety, compiles approved read-only requests, and executes the test. A deterministic verifier confirms the result from fresh evidence. After remediation, the controller repeats the same access direction and verifies that the unauthorized request is denied.</p><p className="management-narrative">Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.</p><p className="management-narrative">{ZAP_RESPONSIBILITY}</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Projected API metadata only. Zero external model egress.</p></article><article className="controller"><span>02</span><h2>Deterministic controls</h2><p>Scope, safety, compilation and bounded execution.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Remediation verified</h2><p>Linked retests require independently verified patched evidence before PASS.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Synthetic lab</li><li>One read-only BOLA capability</li><li>One signed Nuclei template</li><li>One passive ZAP rule · no active scanning</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
+  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.4</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">Within a disposable and network-isolated attacker environment, the AI is allowed to create and execute its own commands and payloads, adapt its attack strategy from observed results, and produce evidence for independent verification.</p><p className="management-narrative">BEAST MODE allows AI-generated attack hypotheses to be executed inside a disposable shell under deterministic scope, budget, authorization and evidence controls.</p><p className="management-narrative">Nuclei and ZAP remain controller-owned bounded engines. Their results never directly confirm Aegis findings.</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Real model decisions and exact shell commands inside the disposable sandbox.</p></article><article className="controller"><span>02</span><h2>Immutable boundaries</h2><p>Target reachability, resources, lease, audit and emergency stop.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Cleanup verified</h2><p>Workspace destruction is required before a normal terminal result.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Disposable synthetic lab only</li><li>Read-only target methods in Phase 1.4</li><li>No public egress or callbacks</li><li>No staging or production Beast shell</li><li>Findings remain verifier-owned</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
+}
+
+function BeastControl({ config, run, events, onOpen, onStop }: {
+  config?: BeastConfig; run?: BeastRun; events: BeastEvent[]; onOpen: () => void; onStop: () => void
+}) {
+  const active = run && ['QUEUED', 'RUNNING'].includes(run.state)
+  const activeRunId = active ? run.run_id : undefined
+  const [leaseClock, setLeaseClock] = useState({ runId: '', elapsed: 0 })
+  useEffect(() => {
+    if (!activeRunId) return undefined
+    const timer = window.setInterval(() => setLeaseClock((value) => value.runId === activeRunId
+      ? { ...value, elapsed: value.elapsed + 1 }
+      : { runId: activeRunId, elapsed: 1 }), 1000)
+    return () => window.clearInterval(timer)
+  }, [activeRunId])
+  if (!config?.enabled) return null
+  const latestResult = run?.results.at(-1)
+  const latestCommand = run?.commands.at(-1)
+  const requestsUsed = latestResult?.resource_usage.target_connections ?? 0
+  const leaseDuration = run?.lease_expires_at ? Math.floor((new Date(run.lease_expires_at).getTime() - new Date(run.created_at).getTime()) / 1000) : 0
+  const leaseSeconds = Math.max(0, leaseDuration - (leaseClock.runId === run?.run_id ? leaseClock.elapsed : 0))
+  return <section className={`beast-strip ${active ? 'active' : ''}`} aria-label="Beast Mode control">
+    <div className="beast-signal"><i /><div><strong>BEAST MODE</strong><span>Disposable AI Adversary Sandbox</span></div></div>
+    {active ? <>
+      <div className="beast-live"><span>{run.target_ref}</span><strong>{run.scenario_id.replaceAll('_', ' ')}</strong><small>AI_ADVERSARY_SHELL · {run.commands.length}/{run.resources.max_commands} commands · {requestsUsed}/{run.resources.max_target_connections} requests · concurrency {run.resources.max_concurrency} · {leaseSeconds}s lease remaining</small></div>
+      <button className="beast-stop" onClick={onStop}>STOP BEAST MODE</button>
+    </> : <>
+      <p>Unrestricted attack logic inside a strictly bounded execution environment. SYNTHETIC_LAB only.</p>
+      <button className="beast-launch" onClick={onOpen}>BEAST MODE</button>
+    </>}
+    {run && <details className="beast-telemetry"><summary>Live command, observation and verifier telemetry</summary><div><h4>Current hypothesis / authorized capability</h4><pre>{JSON.stringify({ capability: run.scenario_id, engine: 'AI_ADVERSARY_SHELL', hypothesis: latestCommand?.hypothesis_reference ?? null, expected_intent: latestCommand?.expected_intent ?? null, state_changing_operation: null }, null, 2)}</pre><h4>Exact model-selected command</h4><pre>{latestCommand?.command_text ?? 'Awaiting first model decision'}</pre><h4>Bounded result / normalized observation</h4><pre>{latestResult ? JSON.stringify({ exit_code: latestResult.exit_code, duration_ms: latestResult.duration_ms, network_destinations: latestResult.network_destinations, resource_usage: latestResult.resource_usage, artifacts: latestResult.artifact_references, stdout: latestResult.stdout, stderr: latestResult.stderr, observation: run.observations.at(-1) ?? null }, null, 2) : 'No result yet'}</pre><h4>Next decision / independent verifier / cleanup</h4><pre>{JSON.stringify({ latest_model_call: run.model_calls.at(-1) ?? null, verifier: run.verifier_conclusion, finding_authority: 'DETERMINISTIC_VERIFIER', cleanup_verified: run.cleanup_verified, workspace_destroyed: run.workspace_destroyed, stop_reason: run.stop_reason }, null, 2)}</pre><h4>Hash-chained audit stream</h4><ol>{events.slice(-6).map((event) => <li key={event.event_id}><span>{event.actor_type}</span><strong>{event.event_type}</strong><code>{event.digest.slice(0, 16)}…</code></li>)}</ol></div></details>}
+  </section>
+}
+
+function BeastPreflightModal({ preflight, busy, onClose, onActivate }: {
+  preflight: BeastPreflight; busy: boolean; onClose: () => void
+  onActivate: (confirmation: string, scenario: string) => void
+}) {
+  const [confirmation, setConfirmation] = useState('')
+  const [scenario, setScenario] = useState('endpoint_discovery')
+  const expected = `BEAST ${preflight.target.name}`
+  const resourceRows = Object.entries(preflight.resources)
+  return <div className="beast-modal-scrim" role="presentation"><section className="beast-modal" role="dialog" aria-modal="true" aria-label="BEAST MODE preflight">
+    <header><div><p className="eyebrow">TIME-BOUNDED CONTROLLED ACTIVE TESTING</p><h2>BEAST MODE preflight</h2><span>{preflight.technical_subtitle}</span></div><button aria-label="Close Beast preflight" onClick={onClose}>×</button></header>
+    <div className="beast-warning">Commands and payloads are model-selected inside the disposable shell. Target reachability, lease, resources, audit retention, emergency stop and verifier authority remain immutable.</div>
+    <div className="beast-preflight-grid">
+      <dl className="detail-list"><div><dt>Exact target</dt><dd>{preflight.target.name}</dd></div><div><dt>Origin</dt><dd className="mono">{preflight.target.origin}{preflight.target.base_path}</dd></div><div><dt>Environment</dt><dd>{preflight.target.environment}</dd></div><div><dt>Owner</dt><dd>{preflight.target.owner}</dd></div><div><dt>Approval</dt><dd>{preflight.target.approval_reference}</dd></div><div><dt>Methods / paths</dt><dd>{preflight.target.allowed_methods.join(', ')} · <span className="mono">{preflight.target.allowed_path_prefix}/**</span></dd></div><div><dt>Engines</dt><dd>{preflight.enabled_engines.join(', ')}</dd></div><div><dt>Active capabilities</dt><dd>{preflight.enabled_capabilities.join(', ')}</dd></div><div><dt>State-changing operations</dt><dd>None in Phase 1.4</dd></div><div><dt>Reset</dt><dd>{preflight.target.reset_strategy}</dd></div><div><dt>Synthetic credentials</dt><dd>{preflight.target.synthetic_credential_profiles.join(', ')}</dd></div><div><dt>Expected impact</dt><dd>{preflight.target.expected_impact}</dd></div><div><dt>Maximum blast radius</dt><dd>{preflight.target.max_blast_radius}</dd></div><div><dt>Automatic expiry</dt><dd>{Math.floor(preflight.automatic_expiry_seconds / 60)} minutes · single run</dd></div></dl>
+      <div><h3>Immutable resource envelope</h3><div className="beast-resource-grid">{resourceRows.map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><strong>{value.toLocaleString()}</strong></div>)}</div><h3>Emergency stop</h3><p className="muted">{preflight.emergency_stop}</p><h3>Prohibited target effects</h3><p className="muted">{preflight.target.prohibited_operations.join(' · ')}</p></div>
+    </div>
+    <label><span>Scenario</span><select value={scenario} onChange={(event) => setScenario(event.target.value)}>{preflight.enabled_capabilities.map((item) => <option value={item} key={item}>{item.replaceAll('_', ' ')}</option>)}</select></label>
+    <label><span>Type <code>{expected}</code> to issue a non-renewable lease</span><input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+    <footer><button className="secondary" onClick={onClose}>Cancel</button><button className="beast-launch" disabled={busy || confirmation !== expected} onClick={() => onActivate(confirmation, scenario)}>{busy ? 'Activating…' : 'Activate one bounded run'}</button></footer>
+  </section></div>
 }
 
 export function App() {
@@ -458,6 +565,11 @@ export function App() {
   const [error, setError] = useState<string>()
   const [loading, setLoading] = useState(true)
   const [presentation, setPresentation] = useState(new URLSearchParams(location.search).get('presentation') === '1')
+  const [beastConfig, setBeastConfig] = useState<BeastConfig>()
+  const [beastPreflight, setBeastPreflight] = useState<BeastPreflight>()
+  const [beastRun, setBeastRun] = useState<BeastRun>()
+  const [beastEvents, setBeastEvents] = useState<BeastEvent[]>([])
+  const [beastBusy, setBeastBusy] = useState(false)
   const lastSequence = useRef(0)
 
   const hydrate = useCallback(async () => {
@@ -473,6 +585,25 @@ export function App() {
   }, [])
 
   useEffect(() => { void hydrate() }, [hydrate])
+  const refreshBeast = useCallback(async () => {
+    try {
+      const config = await api<BeastConfig>('/api/beast/config')
+      setBeastConfig(config)
+      if (!config.enabled) return
+      const data = await api<{ items: BeastRun[] }>('/api/beast/runs?limit=5')
+      const current = data.items.find((item) => ['QUEUED', 'RUNNING'].includes(item.state)) ?? data.items[0]
+      setBeastRun(current)
+      if (current) {
+        const detail = await api<{ run: BeastRun; events: BeastEvent[] }>(`/api/beast/runs/${encodeURIComponent(current.run_id)}`)
+        setBeastRun(detail.run); setBeastEvents(detail.events)
+      }
+    } catch { /* Beast control has its own availability state; legacy console remains usable. */ }
+  }, [])
+  useEffect(() => {
+    void refreshBeast()
+    const timer = window.setInterval(() => void refreshBeast(), 2000)
+    return () => window.clearInterval(timer)
+  }, [refreshBeast])
   useEffect(() => {
     const source = new EventSource(`/api/console/events?cursor=${lastSequence.current}`)
     source.onopen = () => setStreamState('LIVE')
@@ -493,7 +624,25 @@ export function App() {
   const evidence = selectedRun?.evidence ?? []
   const openRun = async (id: string) => { try { const detail = await api<{ run: Run; events: EventRecord[]; evidence: Evidence[]; lifecycle?: LifecycleCard[]; execution_policy?: ExecutionPolicy }>(`/api/console/runs/${encodeURIComponent(id)}`); setSelectedRun(detail); setView('Runs') } catch { setError('Run detail could not be loaded.') } }
   const chooseView = (next: View) => { setView(next); if (next !== 'Runs') setSelectedRun(undefined); if (next !== 'Findings') setSelectedFinding(undefined) }
+  const openBeast = async () => {
+    try { setBeastPreflight(await api<BeastPreflight>('/api/beast/preflight/beast-synthetic-vulnerable')) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'BEAST preflight unavailable') }
+  }
+  const activateBeast = async (confirmation: string, scenario: string) => {
+    setBeastBusy(true)
+    try {
+      const lease = await apiPost<{ lease_id: string }>('/api/beast/leases', { operator_id: 'local-operator', actor_type: 'OPERATOR', target_ref: beastPreflight?.target.target_ref, profile_id: beastPreflight?.profile_id, confirmation })
+      const created = await apiPost<BeastRun>('/api/beast/runs', { lease_id: lease.lease_id, scenario_id: scenario })
+      setBeastRun(created); setBeastEvents([]); setBeastPreflight(undefined); await refreshBeast()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'BEAST activation rejected') }
+    finally { setBeastBusy(false) }
+  }
+  const stopBeast = async () => {
+    if (!beastRun) return
+    try { await apiPost(`/api/beast/runs/${encodeURIComponent(beastRun.run_id)}/stop`, { operator_id: 'local-operator' }); await refreshBeast() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Emergency stop failed') }
+  }
 
   if (presentation) return <ManagementView finding={findings[0]} onClose={() => setPresentation(false)} />
-  return <div className="shell"><aside className="sidebar"><a className="brand" href="/console/"><i>A</i><span>AEGIS<small>Operator Console</small></span></a><nav>{NAV.map((item, index) => <button className={view === item ? 'active' : ''} onClick={() => chooseView(item)} key={item}><span>{String(index + 1).padStart(2, '0')}</span>{item}</button>)}</nav><div className="sidebar-foot"><a href="/">Engineering dashboard ↗</a><button onClick={() => setPresentation(true)}>Presentation mode</button><div className={`stream-state ${streamState.toLowerCase()}`}><i />Event stream · {streamState}</div><small>Structured, checksummed audit evidence<br />Not an immutable audit store</small></div></aside><div className="workspace"><header className="topbar"><div><p className="eyebrow">AEGIS NATIVE · LOCAL CONTROL PLANE</p><h1>{selectedRun ? 'Run Replay' : view}</h1></div><ScopeBadges /></header>{error && <div className="error-banner" role="alert"><strong>Console degraded</strong><span>{error}. Persisted views may be stale.</span><button onClick={() => void hydrate()}>Retry</button></div>}<main>{loading ? <Loading /> : selectedRun && view === 'Runs' ? <RunReplay detail={selectedRun} onBack={() => setSelectedRun(undefined)} /> : view === 'Mission Control' ? <MissionControl run={activeRun} events={events} onOpenRun={(id) => void openRun(id)} streamState={streamState} /> : view === 'Runs' ? <RunList runs={runs} onOpen={(id) => void openRun(id)} /> : view === 'Findings' ? <FindingsView findings={findings} selected={selectedFinding} setSelected={setSelectedFinding} /> : view === 'Audit' ? <AuditView events={events} /> : view === 'Evidence' ? <EvidenceView evidence={evidence} screenshotPolicy={screenshotPolicy} /> : view === 'Integrations' ? <IntegrationsView integrations={integrations} engines={engines} /> : <HealthView health={health} />}</main></div></div>
+  return <div className="shell"><aside className="sidebar"><a className="brand" href="/console/"><i>A</i><span>AEGIS<small>Operator Console</small></span></a><nav>{NAV.map((item, index) => <button className={view === item ? 'active' : ''} onClick={() => chooseView(item)} key={item}><span>{String(index + 1).padStart(2, '0')}</span>{item}</button>)}</nav><div className="sidebar-foot"><a href="/">Engineering dashboard ↗</a><button onClick={() => setPresentation(true)}>Presentation mode</button><div className={`stream-state ${streamState.toLowerCase()}`}><i />Event stream · {streamState}</div><small>Structured, checksummed audit evidence<br />Not an immutable audit store</small></div></aside><div className="workspace"><header className="topbar"><div><p className="eyebrow">AEGIS NATIVE · LOCAL CONTROL PLANE</p><h1>{selectedRun ? 'Run Replay' : view}</h1></div><ScopeBadges /></header><BeastControl config={beastConfig} run={beastRun} events={beastEvents} onOpen={() => void openBeast()} onStop={() => void stopBeast()} />{error && <div className="error-banner" role="alert"><strong>Console degraded</strong><span>{error}. Persisted views may be stale.</span><button onClick={() => void hydrate()}>Retry</button></div>}<main>{loading ? <Loading /> : selectedRun && view === 'Runs' ? <RunReplay detail={selectedRun} onBack={() => setSelectedRun(undefined)} /> : view === 'Mission Control' ? <MissionControl run={activeRun} events={events} onOpenRun={(id) => void openRun(id)} streamState={streamState} /> : view === 'Runs' ? <RunList runs={runs} onOpen={(id) => void openRun(id)} /> : view === 'Findings' ? <FindingsView findings={findings} selected={selectedFinding} setSelected={setSelectedFinding} /> : view === 'Audit' ? <AuditView events={events} /> : view === 'Evidence' ? <EvidenceView evidence={evidence} screenshotPolicy={screenshotPolicy} /> : view === 'Integrations' ? <IntegrationsView integrations={integrations} engines={engines} /> : <HealthView health={health} />}</main>{beastPreflight && <BeastPreflightModal preflight={beastPreflight} busy={beastBusy} onClose={() => setBeastPreflight(undefined)} onActivate={(confirmation, scenario) => void activateBeast(confirmation, scenario)} />}</div></div>
 }

@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     zap_runner_url: str = "http://zap-runner:8092"
     zap_rpc_timeout_seconds: float = Field(default=150.0, gt=0, le=330)
 
+    # --- Phase 1.4 disposable AI adversary sandbox (OFF by default) -----------------------------
+    # The controller sends command text as opaque JSON to the supervisor. This shared RPC token is
+    # mounted only in those two controller components and is stripped from every shell environment.
+    beast_enabled: bool = False
+    beast_supervisor_url: str = "http://beast-rpc-relay:8094"
+    beast_supervisor_token: SecretStr | None = None
+    beast_lease_seconds: int = Field(default=600, ge=30, le=900)
+    beast_required_model: str = "qwen3:8b"
+
     @property
     def allowed_hosts(self) -> frozenset[str]:
         return frozenset(host.strip().lower() for host in self.allowed_target_hosts.split(","))
