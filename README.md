@@ -1,7 +1,17 @@
-# Aegis AI Security Lab — Phase 1.3
+# Aegis AI Security Lab — Phase 1.4
 
 A bounded, guardrailed security-testing demonstration for the included synthetic banking API.
 **Not production-ready. No external or production targets are authorized.**
+
+Phase 1.4 adds [BEAST MODE](docs/phase-1.4-beast-mode.md), a real `qwen3:8b`-controlled arbitrary
+shell inside a disposable, resource-bounded and network-isolated adversary sandbox. The model owns
+commands, tool arguments, scripts, raw HTTP and adaptive next steps; immutable outer controls own the
+single synthetic target, read-only method/path scope, static network reachability, resource ceilings,
+audit retention, emergency stop, cleanup and verifier authority. There is no command allowlist or
+deterministic command fallback. Phase 1.4 is SYNTHETIC_LAB only; staging and production Beast shell
+activation are disabled. The final verdict is recorded after live 5-trial-per-scenario acceptance.
+
+## Phase 1.3 baseline
 
 Phase 1.3 adds one operational, **passive-only** [ZAP integration](docs/phase-1.3-zap-passive-openapi.md).
 ZAP `2.17.0` runs from a digest-pinned image with exactly eight verified add-ons in a non-root,
