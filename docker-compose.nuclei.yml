@@ -1,0 +1,78 @@
+# Phase 1.2 controlled Nuclei overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.nuclei.yml up --build
+#   (combine with docker-compose.ollama.yml / docker-compose.dashboard.yml as needed)
+#
+# Topology (every network is internal: true — no gateway, no internet, no host access):
+#
+#   control-plane --[engine-rpc]--> nuclei-runner --[nuclei-target]--> lab-api (synthetic only)
+#        |
+#   [security-lab] --> lab-api          (planner-rpc / model-egress stay untouched and runner-free)
+#
+# - nuclei-runner joins ONLY engine-rpc + nuclei-target. It never joins security-lab, planner-rpc
+#   or model-egress, so it cannot resolve or reach the LLM gateway, Ollama, the dashboard or the host.
+# - The control plane shares engine-rpc with the runner, so its API is bound ONLY to its fixed
+#   security-lab address: from engine-rpc the runner reaches no listening control-plane port.
+# - lab-api joins nuclei-target so the runner can reach the synthetic target and nothing else.
+# - The runner holds no credential of any kind, has no shell, no Docker socket, no host mount, no
+#   published port, a read-only root filesystem, a bounded tmpfs, no Linux capabilities,
+#   no-new-privileges, and CPU / memory / PID limits.
+
+services:
+  control-plane:
+    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000
+    environment:
+      NUCLEI_ENABLED: "true"
+      NUCLEI_RUNNER_URL: http://nuclei-runner:8090
+    networks:
+      security-lab:
+        ipv4_address: 10.213.47.10
+      engine-rpc: {}
+    depends_on:
+      nuclei-runner:
+        condition: service_healthy
+
+  lab-api:
+    networks:
+      security-lab: {}
+      nuclei-target: {}
+
+  nuclei-runner:
+    build:
+      context: .
+      dockerfile: deploy/nuclei-runner/Dockerfile
+    image: aegis-nuclei-runner:1.2.0
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /work:size=16m,mode=0700,uid=10001,gid=10001,nosuid,nodev
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    ulimits:
+      nofile: {soft: 256, hard: 256}
+    stop_grace_period: 5s
+    expose: ["8090"]
+    environment: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 20s
+    networks: [engine-rpc, nuclei-target]
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "2"}
+
+networks:
+  security-lab:
+    ipam:
+      config:
+        - subnet: 10.213.47.0/24
+  engine-rpc:
+    internal: true
+  nuclei-target:
+    internal: true
