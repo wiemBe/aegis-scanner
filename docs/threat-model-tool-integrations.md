@@ -71,3 +71,32 @@ Residual risks: the scope guard and runner are lab-grade Python services on Dock
 networks, not a production egress firewall or sandbox; the rule manifest review is AI-assisted and
 not operator-countersigned; `callhome` is a mandatory core add-on that is neutralised rather than
 removed; only one passive rule and one synthetic scenario are exercised.
+
+## Phase 1.4 — TRUE ADVERSARY SHELL correction
+
+The Phase 1.4 boundary is intentionally different from T1/T2 above. Inside
+`BEAST_ADVERSARY_SANDBOX_V1`, qwen3:8b may select any installed tool, argument, shell syntax, script,
+raw request or payload. There is no command-content allowlist. Outside that sandbox, target identity,
+network reachability, resources, authorization, audit, emergency stop, cleanup and verifier
+authority remain immutable. This exception applies only to Beast Mode in `SYNTHETIC_LAB`; it does
+not alter AEGIS_NATIVE, Nuclei or ZAP contracts.
+
+| # | Threat | Mitigation / acceptance evidence |
+| --- | --- | --- |
+| B1 | Model targets public, production, staging, wildcard or alternate lab service | Controller inventory has two launchable synthetic refs and fixed origin; production/no-reset records reject preflight; static DNS plus internal network exposes only `beast-target`; exact prefix gateway blocks alternate paths/methods. |
+| B2 | Command reaches host, Docker, control plane, Ollama, LLM gateway, corporate/public network | No host mounts/socket/corporate network; sandbox joins only `beast-adversary`; public routing and general DNS are disabled; live negative commands probe every named destination. |
+| B3 | Shell steals supervisor/control credentials or modifies/signals supervisor | Child receives a minimal environment without tokens, runs uid/gid 65532 with empty groups and no capabilities, cannot read root `/proc/1/environ`, write the read-only image or signal PID 1. |
+| B4 | Detached/background process survives | Supervisor is a child subreaper and kills every process owned by the dedicated command identity after each command, stop and destroy; container PID ceiling is independent. |
+| B5 | Fork/output/disk/artifact exhaustion | Container CPU/memory/PID/nofile ceilings, per-child rlimits, workspace tmpfs quota, command timeout, output cap and artifact total; live exhaustion/output controls. |
+| B6 | Command widens target method, path, rate, concurrency or byte budget | Gateway is armed by authenticated supervisor data, not shell data; it independently counts and blocks. The shell has no boundary token or network-policy capability. |
+| B7 | Workspace/tool cache/payload persists | Read-only root; HOME/TMP/XDG point into a per-run workspace; root-only `/tmp` and `/dev/shm`; artifacts are hashed/classified and workspace is destroyed. A second-session probe proves no persistence. |
+| B8 | Model repeats a fixed or failed sequence; controller silently substitutes commands | Every qwen decision receives prior normalized observations and an evidence-sufficiency bit; exact model command is transported unchanged; failure is terminal and visible; no fallback exists. Live acceptance requires changed commands after changed evidence and failed-first-command recovery. |
+| B9 | Model/tool promotes its own finding | Model can only command or stop. A fresh deterministic verifier owns `CONFIRMED`, `PASS` and `VERIFIED`; success exit codes and prose have no authority. |
+| B10 | Emergency stop races an in-flight model or command | Lease revocation and persisted STOPPED state happen first; the session is destroyed; checks after every external boundary plus a final persisted-state reconciliation prevent overwrite; target remains operator-review blocked. |
+| B11 | Shell alters/deletes audit or breaks replay linkage | No audit route/mount; commands/results/observations/next decisions carry stable IDs and parent sequence; append-only rows are SHA-256 hash chained. SQLite is not claimed immutable. |
+| B12 | Fixture or controller hard-codes the expected attack | Public OpenAPI omits hidden weakness names/markers; controller source contains no expected command; five live trials per scenario retain all model decisions and exact commands for review. |
+
+Residual risk: this is a single-tenant synthetic-lab container/process sandbox, not a hardened VM or
+multi-tenant production isolation product. The narrow authenticated RPC relay is strictly required on
+the adversary network; the child can reach its listener but cannot authenticate. Phase 1.4 grants no
+staging or production authority.

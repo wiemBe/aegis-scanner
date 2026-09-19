@@ -107,3 +107,19 @@ to `VERIFIER_PROBE_CARD`; the Management view states: “ZAP passively analyzes 
 controller-approved read-only API operations. ZAP alerts are independently correlated and verified by
 Aegis.” All alert content renders as React text. See
 [ZAP evidence and verification](zap-evidence-and-verification.md).
+
+## Phase 1.4 Beast additions
+
+The console adds a prominent BEAST MODE strip while keeping SAFE_PASSIVE as the default. Activation
+opens a preflight modal showing the exact synthetic target/origin/environment/owner, method/path
+scope, engines/capabilities, request/rate/concurrency/time/process/file/CPU/memory/disk/output/artifact
+ceilings, absence of state-changing operations, reset strategy, synthetic profiles, approval,
+expected impact, blast radius, expiry and emergency-stop behavior. The action stays disabled until
+the operator types the exact target-bound phrase.
+
+An active run shows a pulsing red indicator, target/capability/engine, remaining lease time,
+commands/requests against hard limits and a permanent red stop action. The expandable live replay is
+hydrated only from persisted Beast API data: current hypothesis, exact model command, intent,
+exit/timing/network/resources/artifacts, bounded stdout/stderr, normalized observation, next model
+decision metadata, verifier result, cleanup state and recent hash-chain digests. No fake terminal or
+unsafe HTML is used. See [Phase 1.4](phase-1.4-beast-mode.md).

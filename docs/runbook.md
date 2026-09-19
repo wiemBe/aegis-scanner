@@ -101,6 +101,57 @@ docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
 Never enable runtime updates, mount a template directory, add a credential/proxy variable or expose
 the runner port. Any engine/template/signature mismatch is a stop condition, not an upgrade prompt.
 
+## Phase 1.4 — BEAST MODE disposable adversary sandbox
+
+Prerequisites: Docker/Compose, local Ollama, and the already-approved `qwen3:8b` digest. Never use
+`AI_PROVIDER=demo`, a mock gateway or staging/production for Phase 1.4 acceptance. Generate fresh
+boundary tokens in the shell without printing or persisting them, then combine the base, Ollama and
+Beast overlays:
+
+```bash
+export AI_MODEL=qwen3:8b
+export BEAST_SUPERVISOR_TOKEN="$(openssl rand -hex 32)"
+export BEAST_BOUNDARY_TOKEN="$(openssl rand -hex 32)"
+docker compose -f docker-compose.yml -f docker-compose.ollama.yml \
+  -f docker-compose.beast.yml up -d --build
+```
+
+Confirm `control-plane`, `llm-gateway`, `lab-api`, `beast-target-gateway`, `beast-sandbox` and
+`beast-rpc-relay` are healthy. The sandbox health must report bash, Python, curl, httpie, jq,
+openssl, nmap, ffuf, sqlmap and Nuclei. Do not add a host mount, Docker socket, external network,
+published sandbox port or extra capability.
+
+Run the full live matrix inside the control-plane container. It performs five vulnerable and five
+patched trials for each of four scenarios and fails rather than substituting commands:
+
+```bash
+docker exec ai-security-lab-control-plane-1 python scripts/phase_1_4_acceptance.py \
+  --base-url http://10.213.47.10:8000 --trials 5 --control-trials 3 \
+  --output /data/phase-1.4-live-model-acceptance.json
+docker cp ai-security-lab-control-plane-1:/data/phase-1.4-live-model-acceptance.json \
+  artifacts/phase-1.4-live-model-acceptance.json
+docker cp ai-security-lab-control-plane-1:/data/phase-1.4-live-model-acceptance.json.sha256 \
+  artifacts/phase-1.4-live-model-acceptance.json.sha256
+```
+
+When no Beast run is active, run the destructive boundary controls. These commands are acceptance
+probes only and are not primary scenario commands:
+
+```bash
+docker exec ai-security-lab-control-plane-1 python scripts/phase_1_4_boundary_acceptance.py \
+  --supervisor-url http://beast-rpc-relay:8094 \
+  --output /data/phase-1.4-boundary-acceptance.json
+```
+
+The red `STOP BEAST MODE` action must be tested during a live command/model run. STOPPED must remain
+terminal, the workspace must be destroyed, and preflight must reject reactivation until an operator
+POSTs `/api/beast/targets/{target_ref}/restore` and the deterministic health probe succeeds.
+
+Stop and preserve evidence on any wrong model/digest/runtime metadata, missing explicit stop,
+repeated non-adaptive sequence, command not attributable to AI_MODEL, incomplete linkage, boundary
+reachability, failed process-tree kill, failed cleanup or non-verifier conclusion. Such a result is
+NO-GO; do not replace it with a controller-authored scan.
+
 ## Phase 1.3 — controlled ZAP passive OpenAPI profile
 
 Build and start (combine with the Nuclei and dashboard overlays as needed):
