@@ -32,7 +32,7 @@ await page.getByRole('heading', { name: 'Findings', level: 2 }).waitFor()
 const findingRow = page.locator('tbody tr').first()
 if (await findingRow.count()) {
   await findingRow.click()
-  await page.getByRole('heading', { name: /Broken Object|authorization/i }).waitFor()
+  await page.getByRole('heading', { name: /Broken Object|authorization|metadata exposed|header missing/i }).waitFor()
   await capture('finding-detail.desktop.ui-regression.png')
 }
 

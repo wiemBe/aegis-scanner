@@ -37,6 +37,31 @@ type Run = {
   engine_job_rejections?: number
   tool_reported_count?: number
   verifier_confirmed_count?: number
+  zap?: ZapSummary | null
+}
+
+type ZapSummary = {
+  profile_id?: string
+  profile_version?: string
+  engine_version?: string | null
+  image_index_digest?: string | null
+  add_on_inventory_digest?: string | null
+  projection_digest?: string | null
+  operation_count?: number | null
+  imported_urls?: number | null
+  expected_requests?: number | null
+  observed_requests?: number | null
+  blocked_requests?: number | null
+  passive_queue_drained?: boolean
+  plan_validated?: boolean
+  tool_reported_alerts?: number
+  correlated_alerts?: number
+  verifier_confirmed?: number
+  coverage_state?: string
+  exit_class?: string | null
+  error_code?: string | null
+  session_destroyed?: boolean
+  rules?: { plugin_id?: number; name?: string }[]
 }
 
 type EngineReadiness = {
@@ -66,6 +91,15 @@ type EngineReadiness = {
     admitted_template_count?: number
     upstream_templates?: string
     signature_probe?: string | null
+    pinned_image_index_digest?: string
+    attested_arch?: string | null
+    add_on_inventory_digest?: string
+    attested_add_on_inventory_digest?: string | null
+    profile_id?: string
+    profile_version?: string | null
+    approved_rule_count?: number
+    guard_version?: string | null
+    guard_reachable?: boolean
     last_health_check?: string | null
     latest_execution?: {
       scan_id?: string
@@ -77,7 +111,15 @@ type EngineReadiness = {
       records?: number | null
       lifecycle_states?: string[]
       tool_reported?: number
+      correlated?: number
       verifier_confirmed?: number
+      projection_digest?: string | null
+      operation_count?: number | null
+      imported_urls?: number | null
+      expected_requests?: number | null
+      observed_requests?: number | null
+      passive_queue_drained?: boolean | null
+      coverage_state?: string
       completed_at?: string | null
     } | null
     responsibility?: string
@@ -132,7 +174,7 @@ type EventRecord = {
 }
 
 type Evidence = {
-  artifact_type: 'API_EVIDENCE_CARD' | 'NUCLEI_EXECUTION_CARD' | 'VERIFIER_PROBE_CARD'
+  artifact_type: 'API_EVIDENCE_CARD' | 'NUCLEI_EXECUTION_CARD' | 'VERIFIER_PROBE_CARD' | 'ZAP_EXECUTION_CARD' | 'ZAP_ALERT_CARD'
   artifact_id: string
   scan_id: string
   method: string
@@ -146,6 +188,15 @@ type Evidence = {
   request_id: string
   evidence_hash: string
   control_probe_role: string
+  provenance?: string
+  plugin_id?: number
+  rule_name?: string
+  claimed_risk?: string
+  claimed_confidence?: string
+  property_observed?: string
+  coverage_state?: string
+  observed_requests?: number | null
+  expected_requests?: number | null
 }
 
 type Finding = {
@@ -177,6 +228,9 @@ type Integration = { name: string; engine: string; state: string; model?: string
 
 const NAV: View[] = ['Mission Control', 'Runs', 'Findings', 'Audit', 'Evidence', 'Integrations', 'System Health']
 const WORKFLOW = ['PREFLIGHT', 'AI_HYPOTHESIS', 'CANDIDATE_VALIDATION', 'QUEUE_ADMISSION', 'REQUEST_COMPILATION', 'SAFETY_AUTHORIZATION', 'EXECUTION', 'VERIFICATION', 'FINDING', 'LINKED_RETEST', 'COMPLETE']
+const ZAP_WORKFLOW = ['PREFLIGHT', 'OPENAPI_PROJECTION', 'ENGINE_JOB', 'RUNNER_ATTESTATION', 'PLAN_VALIDATION', 'OPENAPI_IMPORT', 'PASSIVE_SCAN', 'EXECUTION', 'TOOL_FINDING', 'CORRELATION', 'VERIFICATION', 'COMPLETE']
+const ZAP_RESPONSIBILITY = 'ZAP passively analyzes responses from controller-approved read-only API operations. ZAP alerts are independently correlated and verified by Aegis.'
+const yesNo = (value: boolean | null | undefined) => value === undefined || value === null ? '—' : value ? 'YES' : 'NO'
 
 const api = async <T,>(path: string): Promise<T> => {
   const response = await fetch(path, { headers: { Accept: 'application/json' } })
@@ -233,6 +287,7 @@ function MissionControl({ run, events, onOpenRun, streamState }: { run?: Run; ev
   const runEvents = events.filter((item) => item.scan_id === run.id)
   const latest = runEvents.at(-1)
   const currentStage = latest?.stage ?? (run.completed_at ? 'COMPLETE' : 'PREFLIGHT')
+  const workflow = run.engine === 'ZAP' ? ZAP_WORKFLOW : WORKFLOW
   return <div className="view-stack">
     <section className="mission-head panel">
       <div><p className="eyebrow">LIVE OPERATIONAL OVERVIEW</p><h2>{run.target_name}</h2><p className="muted mono">{run.id}</p></div>
@@ -247,8 +302,8 @@ function MissionControl({ run, events, onOpenRun, streamState }: { run?: Run; ev
     <section className="panel workflow-panel">
       <div className="section-head"><div><p className="eyebrow">RESPONSIBILITY-AWARE WORKFLOW</p><h3>Live control path</h3></div><span className="muted">Planner contract v{run.planner_contract_version} · policy v{run.execution_policy_version}</span></div>
       <div className="workflow">
-        {WORKFLOW.map((stage, index) => {
-          const reached = runEvents.some((item) => item.stage === stage) || index <= WORKFLOW.indexOf(currentStage)
+        {workflow.map((stage, index) => {
+          const reached = runEvents.some((item) => item.stage === stage) || index <= workflow.indexOf(currentStage)
           const active = stage === currentStage
           const actor = stage === 'AI_HYPOTHESIS' ? 'ai' : stage === 'VERIFICATION' || stage === 'FINDING' ? 'verifier' : stage === 'SAFETY_AUTHORIZATION' ? 'safety' : 'controller'
           return <div className={`workflow-step ${reached ? 'reached' : ''} ${active ? 'active' : ''} ${actor}`} key={stage}><i>{String(index + 1).padStart(2, '0')}</i><span>{stage.replaceAll('_', ' ')}</span></div>
@@ -266,8 +321,17 @@ function MissionControl({ run, events, onOpenRun, streamState }: { run?: Run; ev
         <dl className="metrics"><div><dt>Generated candidates</dt><dd>{run.candidate_counts.generated}</dd></div><div><dt>Validated candidates</dt><dd>{run.candidate_counts.validated}</dd></div><div><dt>Tool-reported (untrusted)</dt><dd>{run.tool_reported_count ?? 0}</dd></div><div><dt>Verifier-confirmed</dt><dd>{run.verifier_confirmed_count ?? 0}</dd></div><div><dt>Safety rejections</dt><dd>{run.safety_rejections}</dd></div><div><dt>Linked retest</dt><dd>{run.linked_retests.length ? 'AVAILABLE' : run.retest_of ? 'THIS RUN' : 'NONE'}</dd></div></dl>
       </section>
     </div>
+    {run.zap && <ZapCoverage zap={run.zap} />}
     <section className="panel event-slice"><div className="section-head"><h3>Latest structured events</h3><button className="text-button" onClick={() => onOpenRun(run.id)}>Full chronological replay →</button></div>{runEvents.slice(-5).reverse().map((event) => <EventRow key={event.event_id} event={event} />)}</section>
   </div>
+}
+
+function ZapCoverage({ zap }: { zap: ZapSummary }) {
+  return <section className="panel zap-coverage"><div className="section-head"><div><p className="eyebrow">ZAP PASSIVE COVERAGE · CONTROLLER-PROJECTED OPENAPI</p><h3>Passive analysis of approved read-only operations</h3></div><Badge tone={zap.coverage_state === 'COMPLETE' ? 'good' : 'warning'}>{zap.coverage_state === 'COMPLETE' ? 'COVERAGE COMPLETE' : 'COVERAGE INCOMPLETE'}</Badge></div>
+    <dl className="metrics zap-metrics"><div><dt>Projected operations</dt><dd>{zap.operation_count ?? '—'}</dd></div><div><dt>Imported messages</dt><dd>{zap.imported_urls ?? '—'}</dd></div><div><dt>Target requests (observed / expected)</dt><dd>{zap.observed_requests ?? '—'} / {zap.expected_requests ?? '—'}</dd></div><div><dt>Passive queue drained</dt><dd>{yesNo(zap.passive_queue_drained)}</dd></div><div><dt>Tool-reported alerts (untrusted)</dt><dd>{zap.tool_reported_alerts ?? 0}</dd></div><div><dt>Correlated alerts</dt><dd>{zap.correlated_alerts ?? 0}</dd></div><div><dt>Verifier-owned conclusions</dt><dd>{zap.verifier_confirmed ?? 0}</dd></div><div><dt>Blocked by scope guard</dt><dd>{zap.blocked_requests ?? '—'}</dd></div></dl>
+    <dl className="detail-list compact"><div><dt>Engine</dt><dd className="mono">ZAP {zap.engine_version ?? '—'} · {short(zap.image_index_digest, 22)}</dd></div><div><dt>Projection</dt><dd className="mono">{short(zap.projection_digest, 22)}</dd></div><div><dt>Passive rules</dt><dd>{(zap.rules ?? []).map((rule) => `${rule.plugin_id ?? '—'} ${rule.name ?? ''}`).join(', ') || '—'}</dd></div><div><dt>Exit</dt><dd>{zap.exit_class ?? '—'}{zap.error_code ? ` · ${zap.error_code}` : ''}</dd></div></dl>
+    <p className="responsibility-note">{ZAP_RESPONSIBILITY}</p>
+  </section>
 }
 
 function EventRow({ event, onClick }: { event: EventRecord; onClick?: () => void }) {
@@ -305,16 +369,19 @@ function RunReplay({ detail, onBack }: { detail: { run: Run; events: EventRecord
   const linkedEvidence = detail.evidence.filter((item) => event?.evidence_refs.some((ref) => ref.evidence_id === item.artifact_id) || event?.event_type === 'OBSERVATION')
   const jump = (types: string[]) => { const found = detail.events.findIndex((item) => types.includes(item.event_type)); if (found >= 0) setIndex(found) }
   return <div className="view-stack replay"><section className="replay-bar panel"><button className="text-button" onClick={onBack}>← Runs</button><div><h2>Chronological replay</h2><p className="mono muted">{detail.run.id}</p></div><div className="replay-controls"><button aria-label="Previous event" onClick={() => setIndex((value) => Math.max(0, value - 1))}>←</button><span>{index + 1} / {detail.events.length}</span><button aria-label="Next event" onClick={() => setIndex((value) => Math.min(detail.events.length - 1, value + 1))}>→</button><button className="secondary" onClick={() => setFollowing(!following)}>{following ? 'Pause live following' : 'Resume live following'}</button></div></section>
-    <section className="jump-bar panel"><span>Jump to</span><button onClick={() => jump(['CANDIDATE_GENERATED'])}>Candidate</button><button onClick={() => jump(['REQUEST_STARTED'])}>Request</button><button onClick={() => jump(['VERIFIER_RESULT'])}>Finding</button><button onClick={() => jump(['RETEST_PLAN'])}>Retest</button></section>
+    {detail.run.engine === 'ZAP' ? <section className="jump-bar panel"><span>Jump to</span><button onClick={() => jump(['ZAP_PROJECTION_CREATED', 'ZAP_PROJECTION_REJECTED'])}>Projection</button><button onClick={() => jump(['ZAP_OPENAPI_IMPORT_COMPLETED'])}>Import</button><button onClick={() => jump(['ZAP_PASSIVE_SCAN_DRAINED'])}>Passive queue</button><button onClick={() => jump(['ZAP_ALERT_REPORTED'])}>Tool alert</button><button onClick={() => jump(['ZAP_VERIFICATION_COMPLETED'])}>Verification</button></section> : <section className="jump-bar panel"><span>Jump to</span><button onClick={() => jump(['CANDIDATE_GENERATED'])}>Candidate</button><button onClick={() => jump(['REQUEST_STARTED'])}>Request</button><button onClick={() => jump(['VERIFIER_RESULT'])}>Finding</button><button onClick={() => jump(['RETEST_PLAN'])}>Retest</button></section>}
     <div className="replay-grid"><section className="panel timeline-panel"><div className="section-head"><h3>Actor-separated timeline</h3><Badge tone={following ? 'good' : 'neutral'}>{following ? 'FOLLOWING' : 'PAUSED'}</Badge></div><div className="vertical-timeline">{detail.events.map((item, itemIndex) => <button key={item.event_id} className={`timeline-node ${item.actor_type.toLowerCase()} ${itemIndex === index ? 'selected' : ''}`} onClick={() => setIndex(itemIndex)}><i /><div><span>{item.stage.replaceAll('_', ' ')}</span><strong>{item.summary}</strong><small>{item.actor_type} · {new Date(item.timestamp).toLocaleTimeString()} · {item.event_id}</small></div></button>)}</div></section>
       <aside className="panel evidence-viewport"><div className="section-head"><h3>Evidence viewport</h3><Badge tone="scope">REDACTED</Badge></div>{event ? <><p className="eyebrow">SELECTED EVENT</p><h4>{event.event_type.replaceAll('_', ' ')}</h4><p>{event.summary}</p><dl className="detail-list"><div><dt>Actor</dt><dd>{event.actor_type}</dd></div><div><dt>Engine</dt><dd>{event.engine}</dd></div><div><dt>Status</dt><dd>{event.status}</dd></div><div><dt>Integrity</dt><dd className="mono">SHA-256 · {short(event.integrity.digest, 20)}</dd></div></dl>{(linkedEvidence.length ? linkedEvidence : detail.evidence.slice(0, 3)).map((card) => <EvidenceCard key={card.artifact_id} card={card} />)}</> : <Empty title="No event selected" copy="Choose an event from the replay." />}</aside></div>
     <LifecyclePanel lifecycle={detail.lifecycle} policy={detail.execution_policy} />
-    <section className="panel comparison"><div><p className="eyebrow">DISCOVERY</p><h3>Vulnerable</h3><strong>200 / 200 / 200</strong><small>Owner control · alternate-owner control · cross-owner probe</small></div><span>→</span><div><p className="eyebrow">LINKED RETEST</p><h3>Patched</h3><strong className="good-text">200 / 200 / 403</strong><small>Same controller-constructed access direction · remediation PASS</small></div></section>
+    {detail.run.zap && <ZapCoverage zap={detail.run.zap} />}
+    {detail.run.engine === 'ZAP' ? <section className="panel comparison"><div><p className="eyebrow">DISCOVERY</p><h3>Vulnerable</h3><strong>NO NOSNIFF</strong><small>Catalog route JSON without X-Content-Type-Options · verifier-confirmed</small></div><span>→</span><div><p className="eyebrow">LINKED RETEST</p><h3>Patched</h3><strong className="good-text">NOSNIFF</strong><small>Complete passive coverage · independent verifier PASS</small></div></section> : <section className="panel comparison"><div><p className="eyebrow">DISCOVERY</p><h3>Vulnerable</h3><strong>200 / 200 / 200</strong><small>Owner control · alternate-owner control · cross-owner probe</small></div><span>→</span><div><p className="eyebrow">LINKED RETEST</p><h3>Patched</h3><strong className="good-text">200 / 200 / 403</strong><small>Same controller-constructed access direction · remediation PASS</small></div></section>}
   </div>
 }
 
 function EvidenceCard({ card }: { card: Evidence }) {
-  return <article className="evidence-card"><div className="evidence-title"><Badge tone="blue">API_EVIDENCE_CARD</Badge><span>{card.control_probe_role}</span></div><div className="request-line"><b>{card.method}</b><code>{card.normalized_route}</code><strong className={card.response_status === 403 ? 'good-text' : ''}>{card.response_status ?? 'ERR'}</strong></div><dl className="detail-list compact"><div><dt>Principal</dt><dd>{card.principal_profile_name}</dd></div><div><dt>Object</dt><dd>{card.object_reference}</dd></div><div><dt>Request</dt><dd className="mono">{short(card.request_id, 20)}</dd></div><div><dt>Evidence hash</dt><dd className="mono">{short(card.evidence_hash, 18)}</dd></div></dl><p className="redaction-note">Response body, credentials, cookies, and sensitive values omitted.</p></article>
+  const untrusted = card.provenance === 'TOOL_REPORTED'
+  const status = card.response_status ?? (untrusted ? 'TOOL' : 'ERR')
+  return <article className="evidence-card"><div className="evidence-title"><Badge tone={untrusted ? 'warning' : card.provenance === 'VERIFIER' ? 'good' : 'blue'}>{card.artifact_type}</Badge><span>{card.control_probe_role}</span></div><div className="request-line"><b>{card.method}</b><code>{card.normalized_route}</code><strong className={card.response_status === 403 ? 'good-text' : ''}>{status}</strong></div><dl className="detail-list compact"><div><dt>Principal</dt><dd>{card.principal_profile_name}</dd></div><div><dt>Object</dt><dd>{card.object_reference}</dd></div>{card.artifact_type === 'ZAP_ALERT_CARD' && <><div><dt>Passive rule</dt><dd>{card.plugin_id ?? '—'} · {card.rule_name ?? '—'}</dd></div><div><dt>ZAP claim (untrusted)</dt><dd>risk {card.claimed_risk ?? '—'} · confidence {card.claimed_confidence ?? '—'}</dd></div></>}{card.artifact_type === 'ZAP_EXECUTION_CARD' && <div><dt>Coverage</dt><dd>{card.coverage_state ?? '—'} · {card.observed_requests ?? '—'}/{card.expected_requests ?? '—'} requests</dd></div>}{card.property_observed && <div><dt>Property observed</dt><dd>{card.property_observed}</dd></div>}<div><dt>Request</dt><dd className="mono">{short(card.request_id, 20)}</dd></div><div><dt>Evidence hash</dt><dd className="mono">{short(card.evidence_hash, 18)}</dd></div></dl><p className="redaction-note">Response body, credentials, cookies, and sensitive values omitted.{untrusted ? ' Tool output is untrusted until the independent verifier concludes.' : ''}</p></article>
 }
 
 function FindingsView({ findings, selected, setSelected }: { findings: Finding[]; selected?: Finding; setSelected: (finding?: Finding) => void }) {
@@ -355,11 +422,13 @@ function ReadyDot({ label, value }: { label: string; value: boolean | null }) {
 
 function IntegrationsView({ integrations, engines }: { integrations: Integration[]; engines: EngineReadiness[] }) {
   return <div className="view-stack">
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">ENGINE REGISTRY</p><h2>Integrations</h2></div><span className="muted">Aegis Native and the bounded Nuclei profile are operational in Phase 1.2</span></div><div className="integration-grid">{integrations.map((item) => <article className={`integration-card ${item.state.toLowerCase()}`} key={item.name}><div className="integration-mark">{item.name.slice(0, 1)}</div><div><h3>{item.name}</h3><p>{item.engine}</p>{item.model && <p className="mono">{item.model} · {short(item.digest, 14)}</p>}</div><Badge tone={item.state === 'CONNECTED' ? 'good' : item.state.startsWith('PLANNED') ? 'neutral' : 'warning'}>{item.state.replaceAll('_', ' ')}</Badge></article>)}</div></section>
+    <section className="panel"><div className="section-head"><div><p className="eyebrow">ENGINE REGISTRY</p><h2>Integrations</h2></div><span className="muted">Aegis Native, the bounded Nuclei profile and the passive ZAP profile are operational in Phase 1.3</span></div><div className="integration-grid">{integrations.map((item) => <article className={`integration-card ${item.state.toLowerCase()}`} key={item.name}><div className="integration-mark">{item.name.slice(0, 1)}</div><div><h3>{item.name}</h3><p>{item.engine}</p>{item.model && <p className="mono">{item.model} · {short(item.digest, 14)}</p>}</div><Badge tone={item.state === 'CONNECTED' ? 'good' : item.state.startsWith('PLANNED') ? 'neutral' : 'warning'}>{item.state.replaceAll('_', ' ')}</Badge></article>)}</div></section>
     <section className="panel"><div className="section-head"><div><p className="eyebrow">INTEGRATION READINESS · SECURITY-TOOL KERNEL</p><h2>Engine adapters</h2></div><Badge tone="scope">CONFIGURED ≠ ENABLED ≠ REACHABLE ≠ AUTHORIZED</Badge></div><div className="engine-grid">{engines.map((engine) => {
       const provenance = engine.engine === 'NUCLEI' ? engine.provenance : null
+      const zapProvenance = engine.engine === 'ZAP' && engine.enabled ? engine.provenance : null
+      const zapLatest = zapProvenance?.latest_execution
       const latest = provenance?.latest_execution
-      return <article className={`engine-card ${engine.enabled ? 'enabled' : 'disabled'}`} key={engine.engine}><div className="engine-head"><div><h3>{engine.name}</h3><p className="mono">{engine.engine} · {engine.adapter_version ?? '—'}</p></div><Badge tone={engine.enabled ? 'good' : 'neutral'}>{engine.state}</Badge></div><div className="ready-grid"><ReadyDot label="Configured" value={engine.configured} /><ReadyDot label="Reachable" value={engine.reachable} /><ReadyDot label="Enabled" value={engine.enabled} /><ReadyDot label="Authorized" value={engine.authorized} /></div><p className="engine-detail">{engine.detail}</p>{provenance && <div className="nuclei-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">{provenance.pinned_engine_version ?? '—'} · {short(provenance.attested_binary_sha256, 20)}</dd></div><div><dt>Template manifest</dt><dd className="mono">{provenance.manifest_version ?? '—'} · {short(provenance.manifest_digest, 20)}</dd></div><div><dt>Admitted templates</dt><dd>{provenance.admitted_template_count ?? 0} · signature {provenance.signature_probe ?? '—'}</dd></div><div><dt>Last health check</dt><dd>{when(provenance.last_health_check)}</dd></div><div><dt>Latest execution</dt><dd>{latest ? <><span className="mono">{short(latest.scan_id, 18)}</span> · {latest.status} · {latest.http_connections ?? 0}/{latest.request_budget ?? 0} requests · {latest.records ?? 0} results</> : 'No execution recorded'}</dd></div><div><dt>Finding authority</dt><dd>{latest ? `${latest.tool_reported ?? 0} tool-reported · ${latest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div></dl><p className="responsibility-note">{provenance.responsibility}</p></div>}{!engine.enabled && <p className="isolation-note"><b>Future isolation boundary:</b> {engine.isolation_boundary}</p>}</article>
+      return <article className={`engine-card ${engine.enabled ? 'enabled' : 'disabled'}`} key={engine.engine}><div className="engine-head"><div><h3>{engine.name}</h3><p className="mono">{engine.engine} · {engine.adapter_version ?? '—'}</p></div><Badge tone={engine.enabled ? 'good' : 'neutral'}>{engine.state}</Badge></div><div className="ready-grid"><ReadyDot label="Configured" value={engine.configured} /><ReadyDot label="Reachable" value={engine.reachable} /><ReadyDot label="Enabled" value={engine.enabled} /><ReadyDot label="Authorized" value={engine.authorized} /></div><p className="engine-detail">{engine.detail}</p>{provenance && <div className="nuclei-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">{provenance.pinned_engine_version ?? '—'} · {short(provenance.attested_binary_sha256, 20)}</dd></div><div><dt>Template manifest</dt><dd className="mono">{provenance.manifest_version ?? '—'} · {short(provenance.manifest_digest, 20)}</dd></div><div><dt>Admitted templates</dt><dd>{provenance.admitted_template_count ?? 0} · signature {provenance.signature_probe ?? '—'}</dd></div><div><dt>Last health check</dt><dd>{when(provenance.last_health_check)}</dd></div><div><dt>Latest execution</dt><dd>{latest ? <><span className="mono">{short(latest.scan_id, 18)}</span> · {latest.status} · {latest.http_connections ?? 0}/{latest.request_budget ?? 0} requests · {latest.records ?? 0} results</> : 'No execution recorded'}</dd></div><div><dt>Finding authority</dt><dd>{latest ? `${latest.tool_reported ?? 0} tool-reported · ${latest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div></dl><p className="responsibility-note">{provenance.responsibility}</p></div>}{zapProvenance && <div className="nuclei-provenance zap-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">ZAP {zapProvenance.pinned_engine_version ?? '—'} · {short(zapProvenance.pinned_image_index_digest, 22)}</dd></div><div><dt>Add-on inventory</dt><dd className="mono">{short(zapProvenance.add_on_inventory_digest, 22)}{zapProvenance.attested_add_on_inventory_digest ? ' · attested' : ''}</dd></div><div><dt>Passive profile</dt><dd>{zapProvenance.profile_id ?? '—'} · v{zapProvenance.profile_version ?? '—'}</dd></div><div><dt>Approved passive rules</dt><dd>{zapProvenance.approved_rule_count ?? 0}</dd></div><div><dt>Scope guard</dt><dd>{zapProvenance.guard_version ?? '—'} · {zapProvenance.guard_reachable ? 'reachable' : 'not attested'}</dd></div><div><dt>Last health check</dt><dd>{when(zapProvenance.last_health_check)}</dd></div><div><dt>Latest projection</dt><dd>{zapLatest ? <><span className="mono">{short(zapLatest.projection_digest, 18)}</span> · {zapLatest.operation_count ?? 0} operations · {zapLatest.imported_urls ?? 0} imported</> : 'No execution recorded'}</dd></div><div><dt>Target requests</dt><dd>{zapLatest ? `${zapLatest.observed_requests ?? 0} observed / ${zapLatest.expected_requests ?? 0} expected · queue drained ${yesNo(zapLatest.passive_queue_drained)}` : '—'}</dd></div><div><dt>Finding authority</dt><dd>{zapLatest ? `${zapLatest.tool_reported ?? 0} tool-reported · ${zapLatest.correlated ?? 0} correlated · ${zapLatest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div><div><dt>Coverage</dt><dd>{zapLatest?.coverage_state ?? '—'}</dd></div></dl><p className="responsibility-note">{zapProvenance.responsibility ?? ZAP_RESPONSIBILITY}</p></div>}{!engine.enabled && <p className="isolation-note"><b>Future isolation boundary:</b> {engine.isolation_boundary}</p>}</article>
     })}</div></section>
   </div>
 }
@@ -371,7 +440,7 @@ function HealthView({ health }: { health: Record<string, unknown> | null }) {
 }
 
 function ManagementView({ finding, onClose }: { finding?: Finding; onClose: () => void }) {
-  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.2</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">The local AI model analyzes a projected API surface and independently proposes an object-authorization attack hypothesis. A deterministic policy layer validates scope and safety, compiles approved read-only requests, and executes the test. A deterministic verifier confirms the result from fresh evidence. After remediation, the controller repeats the same access direction and verifies that the unauthorized request is denied.</p><p className="management-narrative">Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Projected API metadata only. Zero external model egress.</p></article><article className="controller"><span>02</span><h2>Deterministic controls</h2><p>Scope, safety, compilation and bounded execution.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Remediation verified</h2><p>Linked retests require independently verified patched evidence before PASS.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Synthetic lab</li><li>One read-only BOLA capability</li><li>One signed Nuclei template</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
+  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.3</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">The local AI model analyzes a projected API surface and independently proposes an object-authorization attack hypothesis. A deterministic policy layer validates scope and safety, compiles approved read-only requests, and executes the test. A deterministic verifier confirms the result from fresh evidence. After remediation, the controller repeats the same access direction and verifies that the unauthorized request is denied.</p><p className="management-narrative">Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.</p><p className="management-narrative">{ZAP_RESPONSIBILITY}</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Projected API metadata only. Zero external model egress.</p></article><article className="controller"><span>02</span><h2>Deterministic controls</h2><p>Scope, safety, compilation and bounded execution.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Remediation verified</h2><p>Linked retests require independently verified patched evidence before PASS.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Synthetic lab</li><li>One read-only BOLA capability</li><li>One signed Nuclei template</li><li>One passive ZAP rule · no active scanning</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
 }
 
 export function App() {
