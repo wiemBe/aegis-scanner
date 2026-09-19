@@ -19,6 +19,7 @@ only a validated AgentDecision, provider-reported usage, and non-secret run meta
 
 import hashlib
 import json
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -665,6 +666,169 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
 
+class DeepSeekProvider(InternalOpenAICompatibleProvider):
+    """DeepSeek hosted OpenAI-compatible API (/chat/completions) for the beast adversary route.
+
+    Public egress: the llm-gateway is the ONLY component that reaches api.deepseek.com. The control
+    plane and the beast sandbox stay fully isolated, so the immutable sandbox boundary is unchanged
+    (the adversary still reaches only the synthetic target). Unlike Ollama there is no content
+    digest and no reproducible seed, so provenance records the model name, hosted response id,
+    request params, token counts and measured wall-clock timing only. The API key lives only in this
+    provider (mounted into the gateway), never in the control plane, the sandbox or the audit trail.
+
+    Model handling (configuration only, exact-allowlist enforced):
+      * deepseek-chat (V3) -> JSON-object response_format + temperature.
+      * deepseek-reasoner  -> no response_format/temperature/seed (unsupported by R1); the final
+        answer is re-validated strictly against the beast schema, fail closed. Hidden reasoning
+        (`reasoning_content`) is never read or stored; only `content` (the final answer) is used.
+    """
+
+    provider_type = "deepseek"
+    CHAT_PATH = "/chat/completions"
+    _SUPPORTED_MODELS = frozenset({"deepseek-chat", "deepseek-reasoner"})
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        # Bypass InternalOpenAICompatibleProvider.__init__ (its placeholder-host guard and
+        # ai_auth_token requirement do not apply): go straight to the shared HTTP hardening.
+        _HttpModelProvider.__init__(
+            self,
+            settings.ai_base_url,
+            require_https=True,
+            timeout=settings.model_timeout_seconds,
+            body_limit=settings.max_response_bytes,
+            allowed_paths=(self.CHAT_PATH,),
+            transport=transport,
+        )
+        self.model = settings.ai_model
+        self._allowed_models = settings.allowed_model_set
+        if self.model not in self._allowed_models:
+            raise ValueError("Configured model is not in the exact allowlist")
+        if self.model not in self._SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported DeepSeek model: {self.model}")
+        key = settings.deepseek_api_key
+        if key is None or not key.get_secret_value().strip():
+            raise ValueError("AI_PROVIDER=deepseek requires DEEPSEEK_API_KEY")
+        self._auth_mode = "bearer"
+        self._token = key.get_secret_value()
+        self._temperature = settings.ai_temperature
+        self._seed = settings.ai_seed
+        self._output_cap = settings.max_completion_tokens
+        self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    @property
+    def _is_reasoner(self) -> bool:
+        return "reasoner" in self.model
+
+    def _payload(
+        self,
+        system_prompt: str,
+        content: dict[str, Any] | str,
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        user_content = (
+            content if isinstance(content, str) else json.dumps(content, ensure_ascii=True)
+        )
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": False,
+            "max_tokens": min(max_output_tokens, self._output_cap),
+        }
+        if not self._is_reasoner:
+            # deepseek-reasoner rejects/ignores these; deepseek-chat honours them. The strict beast
+            # schema is enforced by Pydantic re-validation either way; JSON mode is belt-and-braces.
+            payload["temperature"] = self._temperature
+            payload["response_format"] = {"type": "json_object"}
+        return payload
+
+    def _usage(self, usage: dict[str, Any]) -> ProviderUsage:
+        prompt = usage.get("prompt_tokens") or 0
+        completion = usage.get("completion_tokens") or 0
+        if any(type(n) is not int or n < 0 for n in (prompt, completion)):
+            raise PlannerFailure("INVALID_PROVIDER_USAGE")
+        total = usage.get("total_tokens")
+        if not isinstance(total, int) or total < 0:
+            total = prompt + completion
+        if total != prompt + completion:
+            raise PlannerFailure("INCONSISTENT_PROVIDER_USAGE")
+        # The real cost bound is the per-call ceiling. reasoner legitimately spends many tokens on
+        # hidden reasoning (counted in completion_tokens), so the concise-output cap applies only to
+        # deepseek-chat; both models are still bounded by the per-call token ceiling.
+        if total > self._per_call_token_ceiling:
+            raise PlannerFailure("PROVIDER_USAGE_EXCEEDED_CEILING")
+        if not self._is_reasoner and completion > self._output_cap:
+            raise PlannerFailure("PROVIDER_USAGE_EXCEEDED_CEILING")
+        return ProviderUsage(input_tokens=prompt, output_tokens=completion, total_tokens=total)
+
+    async def _chat(
+        self,
+        system_prompt: str,
+        content: dict[str, Any] | str,
+        schema: dict[str, Any],
+        max_output_tokens: int,
+        headers: dict[str, str],
+    ) -> tuple[str, ProviderUsage, ProviderRunMetadata]:
+        start = time.monotonic()
+        raw = await self._request(
+            "POST",
+            self.CHAT_PATH,
+            json_body=self._payload(system_prompt, content, max_output_tokens, schema),
+            headers=headers,
+        )
+        elapsed_ms = round((time.monotonic() - start) * 1000)
+        data = json.loads(raw)
+        if data.get("model") and data["model"] != self.model:
+            raise PlannerFailure("PROVIDER_MODEL_MISMATCH")
+        choice = data["choices"][0]
+        finish = choice.get("finish_reason")
+        if finish not in (None, "stop"):
+            raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}")
+        # Only the final answer is read; DeepSeek's reasoning_content (hidden CoT) is never touched.
+        message = choice["message"]["content"]
+        if not isinstance(message, str) or not message.strip():
+            raise PlannerFailure("MISSING_MODEL_OUTPUT")
+        usage = self._usage(data.get("usage") or {})
+        response_id = data.get("id")
+        metadata = ProviderRunMetadata(
+            provider_type=self.provider_type,
+            runtime=self.provider_type,
+            model=self.model,
+            temperature=None if self._is_reasoner else self._temperature,
+            seed=None,
+            prompt_eval_count=usage.input_tokens,
+            eval_count=usage.output_tokens,
+            total_duration_ms=elapsed_ms,
+            stop_reason=finish,
+            response_id=str(response_id) if response_id else None,
+        )
+        return message, usage, metadata
+
+    async def adversary_decide(self, request: BeastDecisionRequest) -> BeastProviderResult:
+        """One genuine command-level decision from the hosted model; no deterministic fallback."""
+
+        schema = BEAST_DECISION_ADAPTER.json_schema()
+        try:
+            content, usage, metadata = await self._chat(
+                BEAST_SYSTEM_PROMPT,
+                render_decision_brief(request),
+                schema,
+                min(self._output_cap, 4096),
+                self._headers(),
+            )
+            decision = BEAST_DECISION_ADAPTER.validate_json(content)
+            return BeastProviderResult(self.model, decision, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"BEAST_MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+
 class OpenAIResponsesProvider(_HttpModelProvider):
     """DEPRECATED public OpenAI Responses API path. Not the intended deployment model; kept only
     as a disabled compatibility profile behind the Squid egress overlay. Reaches the provider
@@ -950,6 +1114,7 @@ _PROVIDERS: dict[str, type[PlannerProvider]] = {
     "ollama": OllamaProvider,
     "internal_openai_compatible": InternalOpenAICompatibleProvider,
     "openai_responses": OpenAIResponsesProvider,
+    "deepseek": DeepSeekProvider,
 }
 
 
