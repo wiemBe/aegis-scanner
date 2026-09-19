@@ -1,0 +1,904 @@
+"""Gateway-side planner providers.
+
+The llm-gateway is the ONLY component that talks to a model endpoint and the only holder of any
+provider credential. It selects a typed ``PlannerProvider`` from configuration; the control plane
+never contains Ollama-specific, OpenAI-specific or company-specific request logic.
+
+    PlannerProvider
+      ├── DemoHeuristicProvider            (offline heuristic, provider_type "demo")
+      ├── OllamaProvider                   (local/private Ollama runtime -> LOCAL_LLM)
+      ├── InternalOpenAICompatibleProvider (company private endpoint -> INTERNAL_LLM; disabled)
+      └── OpenAIResponsesProvider          (deprecated public compatibility profile; disabled)
+
+Every provider fails closed on malformed JSON, schema violations, model mismatch, timeout,
+redirects, oversized bodies, unexpected content types or unexpected endpoints, and re-validates
+the model's structured output against the strict planner Pydantic schema. Providers never let the
+model choose its own model name or endpoint, never persist hidden chain-of-thought, and return
+only a validated AgentDecision, provider-reported usage, and non-secret run metadata.
+"""
+
+import hashlib
+import json
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+
+from aegis.budget import ScanBudget
+from aegis.candidates import candidate_generation_schema, selection_schema
+from aegis.contract import DECISION_MODELS, build_generation_schema, state_adapter
+from aegis.http import bounded_body
+from aegis.models import (
+    CANDIDATE_SELECTION_ADAPTER,
+    PLANNER_CONTRACT_VERSION,
+    BudgetUsage,
+    CandidateGenerationResult,
+    CandidateSelection,
+    PlannerDecision,
+    ProviderRunMetadata,
+    ProviderUsage,
+    SelectionCandidateView,
+)
+from aegis.planner import (
+    ENUMERATION_SYSTEM_PROMPT,
+    SELECTION_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    DemoPlanner,
+    PlannerFailure,
+)
+from aegis.settings import Settings
+
+_JSON_CONTENT_TYPE = "application/json"
+
+
+def _permitted_and_schema(context: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
+    """Resolve the state-permitted decision types (declared by the orchestrator) and the congruent
+    generation schema narrowed by the projected surface's dynamic identifier enums.
+
+    The orchestrator always declares ``permitted_decision_types`` for the current state. If a direct
+    gateway caller omits it, we fall back to the full vocabulary; the control plane re-enforces the
+    state transition regardless, so this fallback never relaxes a real scan.
+    """
+    declared = context.get("permitted_decision_types") or []
+    permitted = tuple(t for t in declared if t in DECISION_MODELS) or tuple(DECISION_MODELS)
+    surface = context.get("surface") if isinstance(context.get("surface"), dict) else {}
+    return permitted, build_generation_schema(permitted, surface or {})
+
+# Chat/completions-style providers get a short brevity addendum: local models tend to over-generate
+# free-text fields, which wastes the num_predict budget and truncates the JSON. This is a decoding
+# aid only; the strict schema and fail-closed validation remain the authority.
+_CHAT_ADDENDUM = (
+    "\nRespond with a single JSON object only: no markdown, no preamble, no commentary. Keep "
+    "'summary' under 240 characters and every 'rationale' under 400 characters."
+)
+CHAT_SYSTEM_PROMPT = SYSTEM_PROMPT + _CHAT_ADDENDUM
+
+# Responses API output item types that indicate the model tried to call a tool. None are permitted.
+_TOOL_CALL_TYPES = frozenset(
+    {
+        "function_call",
+        "custom_tool_call",
+        "tool_call",
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "mcp_call",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ProviderResult:
+    model: str
+    decision: PlannerDecision
+    usage: ProviderUsage
+    metadata: ProviderRunMetadata
+    planner_contract_version: int = PLANNER_CONTRACT_VERSION
+
+
+@dataclass(frozen=True)
+class CandidateResult:
+    """Stage 1 provider output: candidates and blockers, with no terminal decision."""
+
+    model: str
+    result: CandidateGenerationResult
+    usage: ProviderUsage
+    metadata: ProviderRunMetadata
+    planner_contract_version: int = PLANNER_CONTRACT_VERSION
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    """Stage 3 provider output: one bounded selection over the controller's validated candidates."""
+
+    model: str
+    selection: CandidateSelection
+    usage: ProviderUsage
+    metadata: ProviderRunMetadata
+    planner_contract_version: int = PLANNER_CONTRACT_VERSION
+
+
+class PlannerProvider(ABC):
+    """Typed provider contract the gateway depends on. No provider specifics leak past this."""
+
+    provider_type: str
+    model: str
+
+    @abstractmethod
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None: ...
+
+    @abstractmethod
+    async def decide(self, context: dict[str, Any], max_output_tokens: int) -> ProviderResult: ...
+
+    @abstractmethod
+    async def enumerate_candidates(
+        self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
+    ) -> CandidateResult:
+        """Enumerate bounded read-only candidates without a terminal decision."""
+
+    @abstractmethod
+    async def select_candidate(
+        self,
+        context: dict[str, Any],
+        max_output_tokens: int,
+        validated: list[SelectionCandidateView],
+    ) -> SelectionResult:
+        """Contract V3 stage 3: select over the controller's validated candidates only."""
+
+
+def _duration_ms(value: Any) -> int | None:
+    return round(value / 1_000_000) if isinstance(value, int) and value >= 0 else None
+
+
+class _HttpModelProvider(PlannerProvider):
+    """Shared HTTP hardening: exact scheme/host/port/path pinning, no redirects, no env-proxy
+    inheritance, response size and content-type limits."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        require_https: bool,
+        timeout: float,
+        body_limit: int,
+        allowed_paths: tuple[str, ...],
+        transport: httpx.AsyncBaseTransport | None,
+    ) -> None:
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Model endpoint scheme must be http or https")
+        if require_https and parsed.scheme != "https":
+            raise ValueError("Model endpoint must be HTTPS")
+        if not parsed.hostname:
+            raise ValueError("Model endpoint must have a hostname")
+        if parsed.path.strip("/") or parsed.query or parsed.fragment:
+            raise ValueError("AI_BASE_URL must be a bare origin (scheme://host[:port])")
+        self._scheme = parsed.scheme
+        self._host = parsed.hostname
+        self._port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        self._origin = f"{self._scheme}://{self._host}:{self._port}"
+        self._allowed_paths = frozenset(allowed_paths)
+        self._timeout = timeout
+        self._body_limit = body_limit
+        self._transport = transport
+        self._verify: str | bool = True
+
+    def _url(self, path: str) -> str:
+        if path not in self._allowed_paths:
+            raise PlannerFailure("UNEXPECTED_ENDPOINT")
+        return self._origin + path
+
+    def _client(self) -> httpx.AsyncClient:
+        kwargs: dict[str, Any] = {
+            "timeout": self._timeout,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        elif self._scheme == "https":
+            kwargs["verify"] = self._verify
+        return httpx.AsyncClient(**kwargs)
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> bytes:
+        url = self._url(path)
+        parsed = urlsplit(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if (parsed.scheme, parsed.hostname, port, parsed.path) != (
+            self._scheme,
+            self._host,
+            self._port,
+            path,
+        ):
+            raise PlannerFailure("ENDPOINT_ORIGIN_MISMATCH")
+        async with (
+            self._client() as client,
+            client.stream(method, url, json=json_body, headers=headers or {}) as response,
+        ):
+            if response.is_redirect or 300 <= response.status_code < 400:
+                raise PlannerFailure("PROVIDER_REDIRECT")
+            response.raise_for_status()
+            if _JSON_CONTENT_TYPE not in response.headers.get("content-type", "").lower():
+                raise PlannerFailure("UNEXPECTED_CONTENT_TYPE")
+            return await bounded_body(response, self._body_limit)
+
+
+class OllamaProvider(_HttpModelProvider):
+    """Local/private Ollama runtime via the native /api/chat endpoint (stream=false)."""
+
+    provider_type = "ollama"
+    CHAT_PATH = "/api/chat"
+    VERSION_PATH = "/api/version"
+    TAGS_PATH = "/api/tags"
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        super().__init__(
+            settings.ai_base_url,
+            require_https=False,
+            timeout=settings.model_timeout_seconds,
+            body_limit=settings.max_response_bytes,
+            allowed_paths=(self.CHAT_PATH, self.VERSION_PATH, self.TAGS_PATH),
+            transport=transport,
+        )
+        self.model = settings.ai_model
+        self._allowed_models = settings.allowed_model_set
+        if self.model not in self._allowed_models:
+            raise ValueError("Configured model is not in the exact allowlist")
+        self._context_length = settings.ai_context_length
+        self._temperature = settings.ai_temperature
+        self._seed = settings.ai_seed
+        self._output_cap = settings.max_completion_tokens
+        self._per_call_token_ceiling = settings.max_tokens_per_scan
+        self._runtime_version: str | None = None
+        self._model_digest: str | None = None
+        self._metadata_ready = False
+
+    async def _load_metadata(self) -> None:
+        # Best-effort, one attempt: metadata never blocks or fails a decision.
+        if self._metadata_ready:
+            return
+        self._metadata_ready = True
+        try:
+            raw = await self._request("GET", self.VERSION_PATH)
+            version = json.loads(raw).get("version")
+            self._runtime_version = str(version) if version else None
+        except (PlannerFailure, httpx.HTTPError, ValueError):
+            self._runtime_version = None
+        try:
+            raw = await self._request("GET", self.TAGS_PATH)
+            for entry in json.loads(raw).get("models", []):
+                if entry.get("model") == self.model or entry.get("name") == self.model:
+                    digest = entry.get("digest")
+                    self._model_digest = str(digest) if digest else None
+                    break
+        except (PlannerFailure, httpx.HTTPError, ValueError):
+            self._model_digest = None
+
+    def _payload(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(content, ensure_ascii=True)},
+            ],
+            "stream": False,
+            # Non-thinking mode: no separated chain-of-thought, only the structured JSON output.
+            "think": False,
+            # Strict schema for constrained decoding, narrowed by projected identifiers.
+            "format": schema,
+            "options": {
+                "temperature": self._temperature,
+                "seed": self._seed,
+                "num_ctx": self._context_length,
+                "num_predict": min(max_output_tokens, self._output_cap),
+            },
+        }
+
+    async def _chat(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """One hardened /api/chat round trip. Returns (structured JSON string, raw response data).
+        Fails closed on model mismatch, incomplete output or a non-string message content."""
+        raw = await self._request(
+            "POST",
+            self.CHAT_PATH,
+            json_body=self._payload(system_prompt, content, max_output_tokens, schema),
+        )
+        data = json.loads(raw)
+        if data.get("model") != self.model:
+            raise PlannerFailure("PROVIDER_MODEL_MISMATCH")
+        done_reason = data.get("done_reason")
+        if not data.get("done") or (done_reason is not None and done_reason != "stop"):
+            label = str(done_reason or "not_done").upper()
+            raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{label}")
+        message_content = data["message"]["content"]
+        if not isinstance(message_content, str):
+            raise PlannerFailure("MISSING_MODEL_OUTPUT")
+        return message_content, data
+
+    def _usage(self, data: dict[str, Any]) -> ProviderUsage:
+        prompt = data.get("prompt_eval_count") or 0
+        completion = data.get("eval_count") or 0
+        if any(type(n) is not int or n < 0 for n in (prompt, completion)):
+            raise PlannerFailure("INVALID_PROVIDER_USAGE")
+        total = prompt + completion
+        if completion > self._output_cap or total > self._per_call_token_ceiling:
+            raise PlannerFailure("PROVIDER_USAGE_EXCEEDED_CEILING")
+        return ProviderUsage(input_tokens=prompt, output_tokens=completion, total_tokens=total)
+
+    def _metadata(self, data: dict[str, Any]) -> ProviderRunMetadata:
+        return ProviderRunMetadata(
+            provider_type=self.provider_type,
+            runtime="ollama",
+            runtime_version=self._runtime_version,
+            model=self.model,
+            model_digest=self._model_digest,
+            context_length=self._context_length,
+            temperature=self._temperature,
+            seed=self._seed,
+            prompt_eval_count=data.get("prompt_eval_count"),
+            eval_count=data.get("eval_count"),
+            total_duration_ms=_duration_ms(data.get("total_duration")),
+            load_duration_ms=_duration_ms(data.get("load_duration")),
+            stop_reason=data.get("done_reason"),
+        )
+
+    async def decide(self, context: dict[str, Any], max_output_tokens: int) -> ProviderResult:
+        await self._load_metadata()
+        permitted, schema = _permitted_and_schema(context)
+        try:
+            content, data = await self._chat(CHAT_SYSTEM_PROMPT, context, schema, max_output_tokens)
+            # Validate against the strict subset union permitted for this state (no coercion).
+            decision = state_adapter(permitted).validate_json(content)
+            return ProviderResult(self.model, decision, self._usage(data), self._metadata(data))
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def enumerate_candidates(
+        self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
+    ) -> CandidateResult:
+        await self._load_metadata()
+        schema = candidate_generation_schema(context)
+        try:
+            content, data = await self._chat(
+                ENUMERATION_SYSTEM_PROMPT + _CHAT_ADDENDUM, context, schema, max_output_tokens
+            )
+            result = CandidateGenerationResult.model_validate_json(content)
+            if len(result.candidates) > max_candidates:
+                raise PlannerFailure("CANDIDATE_LIMIT_EXCEEDED")
+            return CandidateResult(self.model, result, self._usage(data), self._metadata(data))
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def select_candidate(
+        self,
+        context: dict[str, Any],
+        max_output_tokens: int,
+        validated: list[SelectionCandidateView],
+    ) -> SelectionResult:
+        await self._load_metadata()
+        ids = [v.candidate_id for v in validated]
+        schema = selection_schema(ids, context)
+        content_obj = {
+            **context,
+            "validated_candidates": [v.model_dump(mode="json") for v in validated],
+        }
+        try:
+            content, data = await self._chat(
+                SELECTION_SYSTEM_PROMPT + _CHAT_ADDENDUM, content_obj, schema, max_output_tokens
+            )
+            selection = CANDIDATE_SELECTION_ADAPTER.validate_json(content)
+            return SelectionResult(self.model, selection, self._usage(data), self._metadata(data))
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+
+class InternalOpenAICompatibleProvider(_HttpModelProvider):
+    """Adapter for the company's private OpenAI-compatible endpoint (/chat/completions).
+
+    Disabled until real institutional details are supplied: constructing it against the placeholder
+    host fails closed. Any bearer credential is visible only here, never to the control plane.
+    """
+
+    provider_type = "internal_openai_compatible"
+    CHAT_PATH = "/chat/completions"
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        super().__init__(
+            settings.ai_base_url,
+            require_https=True,
+            timeout=settings.model_timeout_seconds,
+            body_limit=settings.max_response_bytes,
+            allowed_paths=(self.CHAT_PATH,),
+            transport=transport,
+        )
+        if transport is None and (
+            self._host == "internal-ai.example" or self._host.endswith(".example")
+        ):
+            raise ValueError(
+                "internal_openai_compatible provider is not configured: supply the company's "
+                "AI_BASE_URL, AI_MODEL and AI_AUTH_MODE before enabling it"
+            )
+        self.model = settings.ai_model
+        self._allowed_models = settings.allowed_model_set
+        if self.model not in self._allowed_models:
+            raise ValueError("Configured model is not in the exact allowlist")
+        self._auth_mode = settings.ai_auth_mode
+        self._token: str | None = None
+        if self._auth_mode == "bearer":
+            token = settings.ai_auth_token
+            if token is None or not token.get_secret_value().strip():
+                raise ValueError("AI_AUTH_MODE=bearer requires AI_AUTH_TOKEN")
+            self._token = token.get_secret_value()
+        self._temperature = settings.ai_temperature
+        self._seed = settings.ai_seed
+        self._output_cap = settings.max_completion_tokens
+        self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    def _payload(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(content, ensure_ascii=True)},
+            ],
+            "temperature": self._temperature,
+            "seed": self._seed,
+            "stream": False,
+            "max_tokens": min(max_output_tokens, self._output_cap),
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "security_decision",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
+
+    async def _chat(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+        headers: dict[str, str],
+    ) -> tuple[str, ProviderUsage, ProviderRunMetadata]:
+        raw = await self._request(
+            "POST",
+            self.CHAT_PATH,
+            json_body=self._payload(system_prompt, content, max_output_tokens, schema),
+            headers=headers,
+        )
+        data = json.loads(raw)
+        if data.get("model") and data["model"] != self.model:
+            raise PlannerFailure("PROVIDER_MODEL_MISMATCH")
+        choice = data["choices"][0]
+        finish = choice.get("finish_reason")
+        if finish not in (None, "stop"):
+            raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}")
+        message = choice["message"]["content"]
+        if not isinstance(message, str):
+            raise PlannerFailure("MISSING_MODEL_OUTPUT")
+        usage = self._usage(data.get("usage") or {})
+        metadata = ProviderRunMetadata(
+            provider_type=self.provider_type,
+            runtime=self.provider_type,
+            model=self.model,
+            temperature=self._temperature,
+            seed=self._seed,
+            prompt_eval_count=usage.input_tokens,
+            eval_count=usage.output_tokens,
+            stop_reason=finish,
+        )
+        return message, usage, metadata
+
+    def _usage(self, usage: dict[str, Any]) -> ProviderUsage:
+        prompt = usage.get("prompt_tokens") or 0
+        completion = usage.get("completion_tokens") or 0
+        if any(type(n) is not int or n < 0 for n in (prompt, completion)):
+            raise PlannerFailure("INVALID_PROVIDER_USAGE")
+        total = usage.get("total_tokens")
+        if not isinstance(total, int) or total < 0:
+            total = prompt + completion
+        if total != prompt + completion:
+            raise PlannerFailure("INCONSISTENT_PROVIDER_USAGE")
+        if completion > self._output_cap or total > self._per_call_token_ceiling:
+            raise PlannerFailure("PROVIDER_USAGE_EXCEEDED_CEILING")
+        return ProviderUsage(input_tokens=prompt, output_tokens=completion, total_tokens=total)
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._token}"} if self._token else {}
+
+    async def decide(self, context: dict[str, Any], max_output_tokens: int) -> ProviderResult:
+        permitted, schema = _permitted_and_schema(context)
+        try:
+            content, usage, metadata = await self._chat(
+                CHAT_SYSTEM_PROMPT, context, schema, max_output_tokens, self._headers()
+            )
+            decision = state_adapter(permitted).validate_json(content)
+            return ProviderResult(self.model, decision, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def enumerate_candidates(
+        self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
+    ) -> CandidateResult:
+        schema = candidate_generation_schema(context)
+        try:
+            content, usage, metadata = await self._chat(
+                ENUMERATION_SYSTEM_PROMPT + _CHAT_ADDENDUM,
+                context,
+                schema,
+                max_output_tokens,
+                self._headers(),
+            )
+            result = CandidateGenerationResult.model_validate_json(content)
+            if len(result.candidates) > max_candidates:
+                raise PlannerFailure("CANDIDATE_LIMIT_EXCEEDED")
+            return CandidateResult(self.model, result, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def select_candidate(
+        self,
+        context: dict[str, Any],
+        max_output_tokens: int,
+        validated: list[SelectionCandidateView],
+    ) -> SelectionResult:
+        ids = [v.candidate_id for v in validated]
+        content_obj = {
+            **context,
+            "validated_candidates": [v.model_dump(mode="json") for v in validated],
+        }
+        try:
+            content, usage, metadata = await self._chat(
+                SELECTION_SYSTEM_PROMPT + _CHAT_ADDENDUM,
+                content_obj,
+                selection_schema(ids, context),
+                max_output_tokens,
+                self._headers(),
+            )
+            selection = CANDIDATE_SELECTION_ADAPTER.validate_json(content)
+            return SelectionResult(self.model, selection, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+
+class OpenAIResponsesProvider(_HttpModelProvider):
+    """DEPRECATED public OpenAI Responses API path. Not the intended deployment model; kept only
+    as a disabled compatibility profile behind the Squid egress overlay. Reaches the provider
+    strictly through the configured CONNECT proxy with env-proxy inheritance disabled."""
+
+    provider_type = "openai_responses"
+    RESPONSES_PATH = "/v1/responses"
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        super().__init__(
+            settings.ai_base_url,
+            require_https=True,
+            timeout=settings.model_timeout_seconds,
+            body_limit=settings.max_response_bytes,
+            allowed_paths=(self.RESPONSES_PATH,),
+            transport=transport,
+        )
+        token = settings.ai_auth_token
+        if token is None or not token.get_secret_value().strip():
+            raise ValueError(
+                "AI_AUTH_TOKEN is required for the deprecated openai_responses profile"
+            )
+        self._token = token.get_secret_value()
+        self.model = settings.ai_model
+        self._allowed_models = settings.allowed_model_set
+        if self.model not in self._allowed_models:
+            raise ValueError("Configured model is not in the exact allowlist")
+        self._proxy_url = settings.provider_proxy_url
+        self._verify = settings.provider_ca_bundle or True
+        self._output_cap = settings.max_completion_tokens
+        self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    def _client(self) -> httpx.AsyncClient:
+        kwargs: dict[str, Any] = {
+            "timeout": self._timeout,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        else:
+            kwargs["proxy"] = self._proxy_url
+            kwargs["verify"] = self._verify
+        return httpx.AsyncClient(**kwargs)
+
+    def _payload(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "instructions": system_prompt,
+            "input": json.dumps(content, ensure_ascii=True),
+            "max_output_tokens": min(max_output_tokens, self._output_cap),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "security_decision",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+            "store": False,
+        }
+
+    def _usage(self, result: dict[str, Any]) -> ProviderUsage:
+        status = result.get("status")
+        if status == "incomplete":
+            reason = (result.get("incomplete_details") or {}).get("reason", "unknown")
+            raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{reason}".upper())
+        if status != "completed":
+            raise PlannerFailure("REFUSED_OR_INCOMPLETE_MODEL_OUTPUT")
+        raw = result["usage"]
+        prompt, completion, total = raw["input_tokens"], raw["output_tokens"], raw["total_tokens"]
+        if any(type(n) is not int or n < 0 for n in (prompt, completion, total)):
+            raise PlannerFailure("INVALID_PROVIDER_USAGE")
+        if total != prompt + completion:
+            raise PlannerFailure("INCONSISTENT_PROVIDER_USAGE")
+        if completion > self._output_cap or total > self._per_call_token_ceiling:
+            raise PlannerFailure("PROVIDER_USAGE_EXCEEDED_CEILING")
+        return ProviderUsage(input_tokens=prompt, output_tokens=completion, total_tokens=total)
+
+    def _decision(self, result: dict[str, Any], permitted: tuple[str, ...]) -> PlannerDecision:
+        return state_adapter(permitted).validate_json(  # type: ignore[no-any-return]
+            self._output_text(result)
+        )
+
+    def _output_text(self, result: dict[str, Any]) -> str:
+        text_payload: str | None = None
+        for item in result["output"]:
+            if item.get("type") in _TOOL_CALL_TYPES:
+                raise PlannerFailure("UNEXPECTED_PROVIDER_TOOL_CALL")
+            if item.get("type") != "message":
+                continue
+            for content in item.get("content", []):
+                ctype = content.get("type")
+                if ctype == "refusal":
+                    raise PlannerFailure("REFUSED_OR_INCOMPLETE_MODEL_OUTPUT")
+                if ctype == "output_text":
+                    text_payload = content["text"]
+        if text_payload is None:
+            raise PlannerFailure("MISSING_MODEL_OUTPUT")
+        return text_payload
+
+    async def _structured_call(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> tuple[dict[str, Any], ProviderUsage, str]:
+        raw = await self._request(
+            "POST",
+            self.RESPONSES_PATH,
+            json_body=self._payload(system_prompt, content, max_output_tokens, schema),
+            headers={"Authorization": f"Bearer {self._token}"},
+        )
+        result = json.loads(raw)
+        usage = self._usage(result)
+        return result, usage, hashlib.sha256(raw).hexdigest()
+
+    async def decide(self, context: dict[str, Any], max_output_tokens: int) -> ProviderResult:
+        digest: str | None = None
+        permitted, schema = _permitted_and_schema(context)
+        try:
+            result, usage, digest = await self._structured_call(
+                SYSTEM_PROMPT,
+                context,
+                max_output_tokens,
+                schema,
+            )
+            decision = self._decision(result, permitted)
+            metadata = ProviderRunMetadata(
+                provider_type=self.provider_type,
+                runtime=self.provider_type,
+                model=self.model,
+                prompt_eval_count=usage.input_tokens,
+                eval_count=usage.output_tokens,
+                stop_reason=result.get("status"),
+            )
+            return ProviderResult(self.model, decision, usage, metadata)
+        except PlannerFailure as exc:
+            exc.response_digest = digest
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}", digest) from None
+
+    async def enumerate_candidates(
+        self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
+    ) -> CandidateResult:
+        digest: str | None = None
+        try:
+            result, usage, digest = await self._structured_call(
+                ENUMERATION_SYSTEM_PROMPT,
+                context,
+                max_output_tokens,
+                candidate_generation_schema(context),
+            )
+            generated = CandidateGenerationResult.model_validate_json(self._output_text(result))
+            if len(generated.candidates) > max_candidates:
+                raise PlannerFailure("CANDIDATE_LIMIT_EXCEEDED", digest)
+            metadata = ProviderRunMetadata(
+                provider_type=self.provider_type,
+                runtime=self.provider_type,
+                model=self.model,
+                prompt_eval_count=usage.input_tokens,
+                eval_count=usage.output_tokens,
+                stop_reason=result.get("status"),
+            )
+            return CandidateResult(self.model, generated, usage, metadata)
+        except PlannerFailure as exc:
+            exc.response_digest = digest
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}", digest) from None
+
+    async def select_candidate(
+        self,
+        context: dict[str, Any],
+        max_output_tokens: int,
+        validated: list[SelectionCandidateView],
+    ) -> SelectionResult:
+        digest: str | None = None
+        ids = [item.candidate_id for item in validated]
+        content = {
+            **context,
+            "validated_candidates": [item.model_dump(mode="json") for item in validated],
+        }
+        try:
+            result, usage, digest = await self._structured_call(
+                SELECTION_SYSTEM_PROMPT,
+                content,
+                max_output_tokens,
+                selection_schema(ids, context),
+            )
+            selection = CANDIDATE_SELECTION_ADAPTER.validate_json(self._output_text(result))
+            metadata = ProviderRunMetadata(
+                provider_type=self.provider_type,
+                runtime=self.provider_type,
+                model=self.model,
+                prompt_eval_count=usage.input_tokens,
+                eval_count=usage.output_tokens,
+                stop_reason=result.get("status"),
+            )
+            return SelectionResult(self.model, selection, usage, metadata)
+        except PlannerFailure as exc:
+            exc.response_digest = digest
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}", digest) from None
+
+
+class DemoHeuristicProvider(PlannerProvider):
+    """Offline heuristic exposed through the provider interface (provider_type "demo").
+
+    Explicitly not AI. Used for provider-interface completeness and for baseline comparison; the
+    default demo deployment runs the DemoPlanner in-process without a gateway.
+    """
+
+    provider_type = "demo"
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        self._settings = settings
+        self._planner = DemoPlanner()
+        self.model = "demo-heuristic"
+
+    async def decide(self, context: dict[str, Any], max_output_tokens: int) -> ProviderResult:
+        budget = ScanBudget(self._settings, BudgetUsage())
+        decision = await self._planner.decide(context, budget)
+        metadata = ProviderRunMetadata(
+            provider_type=self.provider_type, runtime="demo", model=self.model
+        )
+        return ProviderResult(
+            self.model, decision, ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            metadata,
+        )
+
+    async def enumerate_candidates(
+        self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
+    ) -> CandidateResult:
+        budget = ScanBudget(self._settings, BudgetUsage())
+        result = await self._planner.enumerate_candidates(context, budget, max_candidates)
+        metadata = ProviderRunMetadata(
+            provider_type=self.provider_type, runtime="demo", model=self.model
+        )
+        return CandidateResult(
+            self.model,
+            result,
+            ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            metadata,
+        )
+
+    async def select_candidate(
+        self,
+        context: dict[str, Any],
+        max_output_tokens: int,
+        validated: list[SelectionCandidateView],
+    ) -> SelectionResult:
+        budget = ScanBudget(self._settings, BudgetUsage())
+        selection = await self._planner.select_candidate(context, budget, validated)
+        metadata = ProviderRunMetadata(
+            provider_type=self.provider_type, runtime="demo", model=self.model
+        )
+        return SelectionResult(
+            self.model,
+            selection,
+            ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
+            metadata,
+        )
+
+
+_PROVIDERS: dict[str, type[PlannerProvider]] = {
+    "demo": DemoHeuristicProvider,
+    "ollama": OllamaProvider,
+    "internal_openai_compatible": InternalOpenAICompatibleProvider,
+    "openai_responses": OpenAIResponsesProvider,
+}
+
+
+def build_provider(
+    settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+) -> PlannerProvider:
+    provider_cls = _PROVIDERS.get(settings.ai_provider)
+    if provider_cls is None:
+        raise ValueError(f"Unsupported AI_PROVIDER: {settings.ai_provider}")
+    return provider_cls(settings, transport)

@@ -1,0 +1,33 @@
+# Local validation overlay. Combine with docker-compose.provider.yml to exercise the FULL provider
+# topology with mock traffic and ZERO real external calls:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.provider.yml \
+#                  -f docker-compose.mock-egress.yml up --build -d
+#
+# A mock-provider joins provider-egress with the network alias api.openai.com, so the egress
+# proxy's UNCHANGED CONNECT allowlist tunnels to it instead of the internet. The gateway verifies
+# the mock's TLS certificate against the local test CA (deploy/certs/test-ca.pem), so certificate
+# verification stays ON. Run scripts/gen_test_ca.sh first to create the certificates.
+
+services:
+  llm-gateway:
+    environment:
+      # Additional trust anchor for the local mock ONLY. Unset in production.
+      PROVIDER_CA_BUNDLE: /certs/test-ca.pem
+    volumes:
+      - ./deploy/certs/test-ca.pem:/certs/test-ca.pem:ro
+
+  mock-provider:
+    build: .
+    command: python /app/mock_provider.py
+    volumes:
+      - ./deploy/mock_provider.py:/app/mock_provider.py:ro
+      - ./deploy/certs/server.crt:/certs/server.crt:ro
+      - ./deploy/certs/server.key:/certs/server.key:ro
+    # Impersonate the provider hostname for the egress proxy's DNS resolution on this network.
+    networks:
+      provider-egress:
+        aliases: [api.openai.com]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]

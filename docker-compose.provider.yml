@@ -1,0 +1,85 @@
+# DEPRECATED public-provider compatibility profile (AI_PROVIDER=openai_responses). Public AI
+# egress is NOT the intended deployment model; this overlay is disabled by default and retained
+# only as an optional compatibility profile. Enable explicitly if you must reach a public OpenAI
+# Responses endpoint through a constrained CONNECT allowlist:
+#   docker compose -f docker-compose.yml -f docker-compose.provider.yml up
+#
+# Topology (all application networks are internal: true; only the proxy touches egress):
+#
+#   control-plane --[planner-rpc]--> llm-gateway --[gateway-egress]--> egress-proxy --[provider-egress]--> internet
+#        |                                                                                (CONNECT api.openai.com:443 only)
+#   [security-lab] --> lab-api
+#
+# - control-plane joins only security-lab + planner-rpc. It keeps deny-all direct egress and
+#   never holds AI_AUTH_TOKEN (aegis.main refuses to start if the credential is present here).
+# - llm-gateway joins only planner-rpc + gateway-egress. It holds the credential and never touches
+#   the lab/target network.
+# - egress-proxy joins gateway-egress + provider-egress. It is the only egress-capable service.
+#   It holds no credential and publishes no host port.
+
+services:
+  control-plane:
+    environment:
+      AI_PROVIDER: openai_responses
+      AI_MODEL: ${AI_MODEL:-gpt-5-mini}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-gpt-5-mini}
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+    networks: [security-lab, planner-rpc]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+
+  llm-gateway:
+    build: .
+    command: uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080
+    # The credential is provided ONLY here, via an untracked env file. It is never placed in .env
+    # (which the control plane reads) or passed to any other service. Example .env.gateway:
+    #   AI_AUTH_TOKEN=<public provider API key; never paste into chat or commit>
+    env_file:
+      - path: .env.gateway
+        required: false
+    environment:
+      AI_PROVIDER: openai_responses
+      AI_MODEL: ${AI_MODEL:-gpt-5-mini}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-gpt-5-mini}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com}
+      PROVIDER_PROXY_URL: http://egress-proxy:3128
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-30}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-131072}
+      MAX_TOKENS_PER_SCAN: ${MAX_TOKENS_PER_SCAN:-80000}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    networks: [planner-rpc, gateway-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_beta
+    volumes:
+      - ./deploy/egress-proxy.squid.conf:/etc/squid/squid.conf:ro
+    # No host port. No API key. Only this service joins an egress-capable network.
+    networks: [gateway-egress, provider-egress]
+    # /tmp holds only the pid file; squid's proxy-owned log dirs stay on the writable layer.
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "squid -k parse"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  planner-rpc:
+    internal: true
+  gateway-egress:
+    internal: true
+  provider-egress:
+    # NOT internal: this is the single egress-capable network, reachable only by egress-proxy.
+    internal: false

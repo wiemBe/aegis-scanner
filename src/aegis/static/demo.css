@@ -1,0 +1,30 @@
+/* Phase 0.9 management demo view. Additive only; the engineering dashboard uses style.css alone. */
+.scope-banner { display:flex; flex-wrap:wrap; gap:10px; margin:28px 0 8px; }
+.scope-banner span { font:10px ui-monospace,monospace; letter-spacing:.12em; color:var(--green);
+  border:1px solid var(--green); padding:6px 12px; }
+.demo-hero { margin-bottom:40px; }
+.demo-hero h1 { font-size:clamp(38px,6vw,64px); }
+.demo-card .card-note { color:#a5b1b3; margin:0 0 16px; }
+.demo-card.ai { border-top:2px solid #6ea8ff; }
+.demo-card.controller { border-top:2px solid var(--green); }
+.kv { display:grid; grid-template-columns:auto 1fr; gap:8px 18px; margin:0; font:12px ui-monospace,monospace; }
+.kv dt { color:var(--muted); letter-spacing:.06em; }
+.kv dd { margin:0; color:#dfe8e9; overflow-wrap:anywhere; }
+.seq-table { width:100%; border-collapse:collapse; font:12px ui-monospace,monospace; color:#cdd6d7; }
+.seq-table th,.seq-table td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+.seq-table th { color:var(--muted); text-transform:uppercase; letter-spacing:.08em; font-size:10px; }
+.seq-table .codes b { color:var(--green); }
+.seq-table .codes b.deny { color:var(--red); }
+.verifier-note { border-left:2px solid #6ea8ff; padding-left:12px; color:#bcd0f2; }
+.demo-timeline div { grid-template-columns:150px 96px 1fr; }
+.demo-timeline .actor { font:10px ui-monospace,monospace; letter-spacing:.06em; }
+.demo-timeline .actor.AI_MODEL { color:#6ea8ff; }
+.demo-timeline .actor.CONTROLLER { color:var(--green); }
+.demo-timeline .actor.VERIFIER { color:#e1c35b; }
+.demo-timeline .actor.SAFETY { color:#ff9d6b; }
+.demo-timeline .ev { font:11px ui-monospace,monospace; color:#bdc7c8; }
+.demo-timeline .eid { color:#536064; font:9px ui-monospace,monospace; }
+.limits ul,.limits li { color:#b9c3c4; }
+.limits li { margin:6px 0; }
+.demo-error { border:1px solid var(--red); color:var(--red); padding:18px 20px; margin:24px 0;
+  font:12px ui-monospace,monospace; }

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aegis AI Security Lab</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="mark">A</span><span>AEGIS</span></div>
+      <div class="mode"><span class="pulse"></span>{{ planner_mode }}{% if model_name %} · {{ model_name }}{% endif %} · CONTRACT v{{ contract_version }}</div>
+      {% if validation_status %}<div class="acceptance {% if validation_status == 'LOCAL_LLM_VALIDATED' %}ok{% elif validation_status.startswith('NO-GO') %}nogo{% else %}pending{% endif %}" title="Recorded acceptance verdict for the deployed local model. Not a production-readiness or vulnerability-coverage claim.">{{ validation_status }}</div>{% endif %}
+    </header>
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">AUTHORIZED SECURITY ENGINEERING</p>
+          <h1>AI-directed testing.<br><span>Deterministic proof.</span></h1>
+          <p class="lede">The AI proposes bounded security hypotheses. The deterministic controller validates, orders, compiles, authorizes, executes and verifies them — the AI never selects, compiles or executes. DEMO_HEURISTIC uses offline rules; LOCAL_LLM (private Ollama) and INTERNAL_LLM (company endpoint) generate hypotheses only. Findings, PASS/FAIL and the linked retest are always deterministic.</p>
+        </div>
+        <div class="actions"><button id="run-scan">Discover vulnerability →</button><button id="retest" disabled>Retest patched endpoint →</button><p id="notice" role="status" aria-live="polite"></p></div>
+      </section>
+
+      <section class="guardrails">
+        <div><strong>01</strong><span>Exact host allowlist</span></div>
+        <div><strong>02</strong><span>Read-only HTTP methods</span></div>
+        <div><strong>03</strong><span>Requests, time, calls &amp; tokens bounded</span></div>
+        <div><strong>04</strong><span>Secrets isolated from AI</span></div>
+      </section>
+
+      <section class="grid">
+        <article class="panel span-2">
+          <div class="panel-head"><h2>Latest simulation</h2><span id="status" class="badge idle">IDLE</span></div>
+          <div id="empty" class="empty">Start the lab simulation to watch the agentic test loop.</div>
+          <div id="scan-detail" class="hidden">
+            <div class="metadata">
+              <div><small>SCAN ID</small><b id="scan-id">—</b></div>
+              <div><small>TARGET</small><b>Synthetic Bank API</b></div>
+              <div><small>PLANNER</small><b id="planner">—</b></div>
+              <div><small>MODE</small><b id="mode-label">—</b></div>
+            </div>
+            <div class="flow">
+              <div class="step"><i>1</i><span>Preflight</span><em>Controller-known facts</em></div>
+              <div class="line"></div>
+              <div class="step"><i>2</i><span>Enumerate</span><em>AI hypotheses</em></div>
+              <div class="line"></div>
+              <div class="step"><i>3</i><span>Validate &amp; admit</span><em>Deterministic queue</em></div>
+              <div class="line"></div>
+              <div class="step"><i>4</i><span>Compile &amp; execute</span><em>Typed read-only requests</em></div>
+              <div class="line"></div>
+              <div class="step"><i>5</i><span>Verify</span><em>Deterministic evidence</em></div>
+            </div>
+            <div id="hypothesis" class="hypothesis"></div>
+            <p id="verification"></p><p id="protocol" class="muted"></p><p id="provider" class="muted"></p><p id="budget" class="muted"></p><p id="retest-link"></p>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><h2>Verified findings</h2><span id="finding-count" class="count">0</span></div>
+          <div id="findings" class="empty compact">No verified findings yet.</div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head"><h2>Request evidence</h2><span class="muted">REDACTED</span></div>
+          <div id="evidence" class="empty compact">No requests executed yet.</div>
+        </article>
+
+        <article class="panel span-2">
+          <div class="panel-head"><h2>Candidate records &amp; safety</h2><span class="muted">NO PRIVATE CHAIN OF THOUGHT</span></div>
+          <div id="decisions"></div>
+        </article>
+        <article class="panel span-2">
+          <div class="panel-head"><h2>Persisted activity trail</h2><span class="muted">SQLITE · UTC · NOT TAMPER-PROOF</span></div>
+          <div id="audit" class="timeline"><div class="empty compact">Waiting for a simulation.</div></div>
+        </article>
+        <article class="panel span-2"><div class="panel-head"><h2>Scan history</h2></div><div id="history"></div></article>
+        <article class="panel span-2">
+          <div class="panel-head"><h2>Local model evaluation · Phase 0.8</h2><span class="muted">RECORDED EVIDENCE · NOT LIVE</span></div>
+          <table class="model-comparison">
+            <thead><tr><th>Model</th><th>Params</th><th>Valid candidate</th><th>Queue admission (det.)</th><th>HIGH/CONFIRMED</th><th>Linked retest</th><th>Verdict</th></tr></thead>
+            <tbody id="model-comparison-body">
+              <tr><td>qwen3:8b</td><td>8.2B</td><td>5/5</td><td>5/5</td><td>5/5</td><td>5/5</td><td class="go-cell">GO</td></tr>
+              <tr><td>foundation-sec:8b-q4</td><td>8B</td><td>5/5</td><td>5/5</td><td>5/5</td><td>5/5</td><td class="go-cell">GO</td></tr>
+            </tbody>
+          </table>
+          <p class="muted">Phase 0.8 removed the second, model-based candidate-selection call. AI candidates are admitted into a deterministic execution queue (execution_policy_version 1); the linked patched retest is controller-constructed from the confirmed finding. "Queue admission" is a deterministic controller decision, not a model decision. See docs/phase-0.8.md.</p>
+        </article>
+      </section>
+    </main>
+    <footer>LAB ONLY · SYNTHETIC DATA · NO PRODUCTION TARGETS</footer>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

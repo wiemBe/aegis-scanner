@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aegis Management Demo</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/demo.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="mark">A</span><span>AEGIS</span></div>
+      <div class="mode"><span class="pulse"></span>MANAGEMENT DEMO · {{ planner_mode }}{% if model_name %} · {{ model_name }}{% endif %} · CONTRACT v{{ contract_version }}</div>
+      <a class="acceptance" href="/" title="Return to the engineering dashboard">← ENGINEERING VIEW</a>
+    </header>
+    <main>
+      <section class="scope-banner" id="scope-banner">
+        <span>SYNTHETIC LAB</span><span>LOCAL LLM</span><span>READ-ONLY</span><span>AUTHORIZED TARGET</span>
+      </section>
+
+      <section class="hero demo-hero">
+        <div>
+          <p class="eyebrow">REPRODUCIBLE MANAGEMENT DEMO · PHASE 0.9</p>
+          <h1>The AI proposes.<br><span>The system proves.</span></h1>
+          <p class="lede" id="narrative">Loading demonstration…</p>
+        </div>
+      </section>
+
+      <div id="error" class="demo-error hidden"></div>
+
+      <div id="content" class="hidden">
+        <section class="grid">
+          <article class="panel demo-card ai">
+            <div class="panel-head"><h2>① AI contribution</h2><span class="badge">MODEL</span></div>
+            <p class="card-note">The local model independently proposed one bounded object-authorization hypothesis. It saw no path, credential, response body, finding, severity or verdict.</p>
+            <dl class="kv" id="ai-kv"></dl>
+          </article>
+          <article class="panel demo-card controller">
+            <div class="panel-head"><h2>② Deterministic controller</h2><span class="badge">CONTROLLER</span></div>
+            <p class="card-note">The controller — not the AI — validated, admitted, authorized, compiled and executed the read-only test.</p>
+            <dl class="kv" id="controller-kv"></dl>
+          </article>
+        </section>
+
+        <section class="panel span-2 demo-card">
+          <div class="panel-head"><h2>③ Observed response sequences</h2><span class="badge" id="verdict-badge">—</span></div>
+          <table class="seq-table">
+            <thead><tr><th>Stage</th><th>Route</th><th>Responses</th><th>Result</th></tr></thead>
+            <tbody id="seq-body"></tbody>
+          </table>
+        </section>
+
+        <section class="panel span-2 demo-card">
+          <div class="panel-head"><h2>④ Finding provenance</h2><span class="badge" id="finding-badge">—</span></div>
+          <dl class="kv" id="finding-kv"></dl>
+          <p class="card-note verifier-note" id="provenance-note"></p>
+        </section>
+
+        <section class="panel span-2 demo-card">
+          <div class="panel-head"><h2>⑤ Evidence timeline</h2><span class="muted">stable event ids · actor-typed</span></div>
+          <div class="timeline demo-timeline" id="timeline"></div>
+        </section>
+
+        <section class="panel span-2 demo-card limits">
+          <div class="panel-head"><h2>⑥ Honest limits — what this does NOT prove</h2></div>
+          <ul id="limits"></ul>
+        </section>
+      </div>
+    </main>
+    <footer>AEGIS · SYNTHETIC LAB · READ-ONLY · NOT PRODUCTION READINESS</footer>
+    <script src="/static/demo.js"></script>
+  </body>
+</html>

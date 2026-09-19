@@ -1,0 +1,71 @@
+# Local/private Ollama provider overlay (the intended development + acceptance path).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ollama.yml up --build
+#
+# Topology (application networks stay internal: true; only the gateway reaches the model):
+#
+#   control-plane --[planner-rpc]--> llm-gateway --[model-egress]--> host Ollama (/api/chat)
+#        |
+#   [security-lab] --> lab-api
+#
+# - control-plane joins only security-lab + planner-rpc (both internal). It keeps deny-all direct
+#   egress, holds no credential, and never reaches the model endpoint.
+# - llm-gateway joins planner-rpc + model-egress. model-egress is NOT internal so the gateway can
+#   reach the native host Ollama through Docker's host-gateway alias. The gateway never joins the
+#   lab/target network. Endpoint scheme/host/port/path are pinned in application code.
+# - No host port is published for Ollama; Ollama keeps its default localhost binding. Inference
+#   works with public egress disabled once the model is present locally.
+#
+# Switch models with configuration only, e.g. AI_MODEL=qwen3:8b (must be in AI_ALLOWED_MODELS).
+
+services:
+  control-plane:
+    environment:
+      AI_PROVIDER: ollama
+      AI_MODEL: ${AI_MODEL:-qwen3:4b}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-qwen3:4b,qwen3:8b,foundation-sec:8b-q4}
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      SCAN_TIMEOUT_SECONDS: ${SCAN_TIMEOUT_SECONDS:-300}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-90}
+    networks: [security-lab, planner-rpc]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+
+  llm-gateway:
+    build: .
+    command: uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080
+    environment:
+      AI_PROVIDER: ollama
+      AI_BASE_URL: ${AI_BASE_URL:-http://host.docker.internal:11434}
+      AI_MODEL: ${AI_MODEL:-qwen3:4b}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-qwen3:4b,qwen3:8b,foundation-sec:8b-q4}
+      AI_CONTEXT_LENGTH: ${AI_CONTEXT_LENGTH:-8192}
+      AI_TEMPERATURE: ${AI_TEMPERATURE:-0}
+      AI_SEED: ${AI_SEED:-42}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-90}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-131072}
+      MAX_TOKENS_PER_SCAN: ${MAX_TOKENS_PER_SCAN:-80000}
+    # host-gateway makes host.docker.internal resolve on Linux too; harmless on Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    networks: [planner-rpc, model-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  planner-rpc:
+    internal: true
+  model-egress:
+    # NOT internal: the single egress-capable network, reachable only by the gateway, and only to
+    # the pinned model endpoint. The control plane never joins it.
+    internal: false
