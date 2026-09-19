@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from aegis import scm_verifier
+from aegis import scm_verifier, zap_verifier
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
@@ -30,6 +30,7 @@ from aegis.operator import (
     nuclei_summary,
     project_event,
     scan_projection,
+    zap_summary,
 )
 from aegis.planner import build_planner
 from aegis.safety import SafetyController
@@ -39,6 +40,9 @@ from aegis.settings import get_settings
 from aegis.storage import ScanStore
 from aegis.verifier import DeterministicVerifier
 from aegis_nuclei.manifest import load_manifest, manifest_digest
+from aegis_zap.manifest import add_on_inventory_digest
+from aegis_zap.manifest import load_manifest as load_zap_manifest
+from aegis_zap.manifest import manifest_digest as zap_manifest_digest
 
 PACKAGE_DIR = Path(__file__).parent
 settings = get_settings()
@@ -221,7 +225,8 @@ async def console_config() -> dict[str, object]:
         "scope_badges": ["SYNTHETIC LAB", "LOCAL LLM", "READ-ONLY", "AUTHORIZED TARGET"],
         "screenshots_enabled": screenshot_store.enabled,
         "operational_engines": [Engine.AEGIS_NATIVE]
-        + ([Engine.NUCLEI] if service.nuclei.enabled else []),
+        + ([Engine.NUCLEI] if service.nuclei.enabled else [])
+        + ([Engine.ZAP] if service.zap.enabled else []),
         "engine_contract": [item.value for item in Engine],
         "actor_contract": [item.value for item in ActorType],
         "engine_kernel_version": ENGINE_KERNEL_VERSION,
@@ -391,6 +396,19 @@ def _nuclei_finding_verified(scan: ScanResult) -> bool:
     )
 
 
+def _zap_finding_verified(scan: ScanResult) -> bool:
+    """Re-evaluate a ZAP scan's persisted, body-free verifier facts. Only a verifier CONFIRMED
+    conclusion backed by a VERIFIED lifecycle record is ever displayed as a finding."""
+
+    try:
+        facts = [zap_verifier.ZapProbeFacts.model_validate(f) for f in scan.verifier_evidence]
+    except ValueError:
+        return False
+    return zap_verifier.evaluate(facts).status == "CONFIRMED" and any(
+        n.get("lifecycle_state") == "VERIFIED" for n in scan.normalized_findings
+    )
+
+
 def _verified_findings() -> list[tuple[ScanResult, int, list[ScanResult]]]:
     scans = store.list_all()
     verifier = DeterministicVerifier()
@@ -398,6 +416,10 @@ def _verified_findings() -> list[tuple[ScanResult, int, list[ScanResult]]]:
     for scan in scans:
         if scan.engine == SecurityEngine.NUCLEI.value:
             if scan.findings and _nuclei_finding_verified(scan):
+                output.append((scan, 0, _linked_retests(scans, scan.id)))
+            continue
+        if scan.engine == SecurityEngine.ZAP.value:
+            if scan.findings and _zap_finding_verified(scan):
                 output.append((scan, 0, _linked_retests(scans, scan.id)))
             continue
         verified_ids = {
@@ -418,8 +440,8 @@ async def console_findings(limit: int = Query(default=50, ge=1, le=100)) -> dict
     return {
         "items": [finding_projection(scan, index, retests) for scan, index, retests in findings],
         "provenance_policy": (
-            "Only deterministic verifier-generated records are displayed. Nuclei results are "
-            "tool-reported until the independent Aegis verifier confirms them."
+            "Only deterministic verifier-generated records are displayed. Nuclei results and ZAP "
+            "alerts are tool-reported until the independent Aegis verifier confirms them."
         ),
     }
 
@@ -515,6 +537,86 @@ def _nuclei_readiness_extras() -> dict[str, object]:
     }
 
 
+async def _zap_integration_state() -> str:
+    if not service.zap.enabled:
+        return "DISABLED"
+    await service.zap.attest()
+    health = service.zap.health()
+    return "CONNECTED" if health.authorized else health.state
+
+
+def _zap_readiness_extras() -> dict[str, object]:
+    """Pinned provenance, coverage and the latest execution for the ZAP readiness card. No URL, no
+    HTTP body, no alert prose, no raw ZAP output."""
+
+    manifest = load_zap_manifest()
+    attestation = service.zap.last_attestation
+    latest = next(
+        (
+            scan
+            for scan in store.list_all(100)
+            if scan.engine == SecurityEngine.ZAP.value and scan.zap_provenance
+        ),
+        None,
+    )
+    summary = zap_summary(latest) if latest else None
+    return {
+        "pinned_engine_version": manifest.engine.version,
+        "pinned_image_index_digest": manifest.engine.image.index_digest,
+        "pinned_image_platform_digests": dict(manifest.engine.image.platforms),
+        "pinned_jar_sha256": manifest.engine.jar.sha256,
+        "pinned_java_runtime": manifest.engine.java.runtime_version,
+        "attested_engine_version": attestation.engine.zap_version if attestation else None,
+        "attested_arch": attestation.engine.arch if attestation else None,
+        "add_on_inventory_digest": add_on_inventory_digest(manifest),
+        "attested_add_on_inventory_digest": (
+            attestation.engine.add_on_inventory_digest if attestation else None
+        ),
+        "add_ons": [
+            {"id": a.id, "version": a.version, "status": a.status} for a in manifest.add_ons
+        ],
+        "manifest_version": manifest.manifest_version,
+        "manifest_digest": zap_manifest_digest(),
+        "profile_id": manifest.profile_id,
+        "profile_version": attestation.profile_version if attestation else None,
+        "approved_rule_count": len(manifest.passive_rules),
+        "approved_rules": [
+            {"plugin_id": r.plugin_id, "name": r.name} for r in manifest.passive_rules
+        ],
+        "guard_version": attestation.guard.guard_version if attestation else None,
+        "guard_reachable": bool(attestation and attestation.guard.reachable),
+        "last_health_check": (
+            service.zap.last_checked_at.isoformat() if service.zap.last_checked_at else None
+        ),
+        "latest_execution": (
+            {
+                "scan_id": latest.id,
+                "status": latest.status.value,
+                "terminal_reason": latest.terminal_reason,
+                "projection_digest": summary.get("projection_digest") if summary else None,
+                "operation_count": summary.get("operation_count") if summary else None,
+                "imported_urls": summary.get("imported_urls") if summary else None,
+                "expected_requests": summary.get("expected_requests") if summary else None,
+                "observed_requests": summary.get("observed_requests") if summary else None,
+                "passive_queue_drained": (
+                    summary.get("passive_queue_drained") if summary else None
+                ),
+                "tool_reported": summary.get("tool_reported_alerts") if summary else 0,
+                "correlated": summary.get("correlated_alerts") if summary else 0,
+                "verifier_confirmed": summary.get("verifier_confirmed") if summary else 0,
+                "coverage_state": summary.get("coverage_state") if summary else "INCOMPLETE",
+                "completed_at": latest.completed_at.isoformat() if latest.completed_at else None,
+            }
+            if latest
+            else None
+        ),
+        "responsibility": (
+            "ZAP passively analyzes responses from controller-approved read-only API operations. "
+            "ZAP alerts are independently correlated and verified by Aegis."
+        ),
+    }
+
+
 @app.get("/api/console/integrations")
 async def console_integrations() -> dict[str, object]:
     gateway_status, gateway = await _check_json(f"{settings.llm_gateway_url}/health")
@@ -532,7 +634,7 @@ async def console_integrations() -> dict[str, object]:
                 "provider": gateway.get("provider") if gateway else None,
             },
             {"name": "Nuclei", "engine": "NUCLEI", "state": await _nuclei_integration_state()},
-            {"name": "ZAP", "engine": "ZAP", "state": "PLANNED_NOT_CONNECTED"},
+            {"name": "ZAP", "engine": "ZAP", "state": await _zap_integration_state()},
             {"name": "Burp DAST", "engine": "BURP_DAST", "state": "PLANNED_NOT_CONNECTED"},
         ]
     }
@@ -540,11 +642,13 @@ async def console_integrations() -> dict[str, object]:
 
 @app.get("/api/console/engines")
 async def console_engines() -> dict[str, object]:
-    # Honest, four-state engine readiness. Nuclei is operational only when its fresh runner
-    # attestation is authorized; ZAP and Burp stay disabled. Native reachability reflects the lab.
+    # Honest, four-state engine readiness. Nuclei and ZAP are operational only when their fresh
+    # runner attestations are authorized; Burp stays disabled. Native reachability reflects the lab.
     lab_status, _ = await _check_json(f"{settings.lab_base_url}/health")
     if service.nuclei.enabled:
         await service.nuclei.attest()
+    if service.zap.enabled:
+        await service.zap.attest()
     healths = []
     for health in service.dispatcher.health():
         if health.engine is SecurityEngine.AEGIS_NATIVE:
@@ -553,8 +657,14 @@ async def console_engines() -> dict[str, object]:
     operational = [SecurityEngine.AEGIS_NATIVE.value]
     if service.nuclei.enabled and service.nuclei.health().authorized:
         operational.append(SecurityEngine.NUCLEI.value)
+    if service.zap.enabled and service.zap.health().authorized:
+        operational.append(SecurityEngine.ZAP.value)
+    extras = {
+        SecurityEngine.NUCLEI: _nuclei_readiness_extras(),
+        SecurityEngine.ZAP: _zap_readiness_extras(),
+    }
     return {
-        "items": engine_readiness(healths, {SecurityEngine.NUCLEI: _nuclei_readiness_extras()}),
+        "items": engine_readiness(healths, extras),
         "kernel_version": ENGINE_KERNEL_VERSION,
         "operational_engines": operational,
     }

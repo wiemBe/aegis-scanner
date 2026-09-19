@@ -1,7 +1,14 @@
+import asyncio
+from collections.abc import Iterator
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 
 app = FastAPI(
     title="Synthetic Banking API",
@@ -110,3 +117,70 @@ def scm_lab_patched() -> dict[str, str | bool]:
 def scm_lab_patched_git_config() -> JSONResponse:
     # Remediated: the metadata path is explicitly denied with a deterministic body.
     return JSONResponse(status_code=404, content={"detail": "Repository metadata is not served"})
+
+
+# --- Phase 1.3 synthetic ZAP scenario: missing anti-MIME-sniffing header -------------------------
+# Explicitly synthetic, read-only route families, excluded from the OpenAPI document (so the
+# planner's imported surface and every AEGIS_NATIVE / Nuclei projection stay byte-identical). They
+# carry no credential, no business data and share no state with any other route. Every route sets
+# ``X-Content-Type-Options: nosniff`` EXCEPT the vulnerable catalog route; the patched catalog route
+# differs from it only by setting that header.
+ZAP_LAB = "zap-passive-header"
+ZAP_CATALOG_ID = "synthetic-catalog-1"
+_NOSNIFF = {"X-Content-Type-Options": "nosniff"}
+
+
+def _zap_marker(variant: str, route: str, **extra: str) -> dict[str, str | bool]:
+    return {"lab": ZAP_LAB, "variant": variant, "route": route, "synthetic": True, **extra}
+
+
+def _zap_not_found() -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": "Not found"}, headers=_NOSNIFF)
+
+
+@app.get("/lab/zap/vulnerable/status", include_in_schema=False)
+def zap_vulnerable_status() -> JSONResponse:
+    return JSONResponse(_zap_marker("vulnerable", "status"), headers=_NOSNIFF)
+
+
+@app.get("/lab/zap/vulnerable/catalog/{catalog_id}", include_in_schema=False)
+def zap_vulnerable_catalog(catalog_id: str) -> JSONResponse:
+    if catalog_id != ZAP_CATALOG_ID:
+        return _zap_not_found()
+    # Deliberate misconfiguration: this one route omits the anti-MIME-sniffing header.
+    return JSONResponse(_zap_marker("vulnerable", "catalog", catalog_id=catalog_id))
+
+
+@app.get("/lab/zap/patched/status", include_in_schema=False)
+def zap_patched_status() -> JSONResponse:
+    return JSONResponse(_zap_marker("patched", "status"), headers=_NOSNIFF)
+
+
+@app.get("/lab/zap/patched/catalog/{catalog_id}", include_in_schema=False)
+def zap_patched_catalog(catalog_id: str) -> JSONResponse:
+    if catalog_id != ZAP_CATALOG_ID:
+        return _zap_not_found()
+    # Remediated: the same response, with the header set on this route.
+    return JSONResponse(_zap_marker("patched", "catalog", catalog_id=catalog_id), headers=_NOSNIFF)
+
+
+# Negative-control fixtures. They exist only to prove that the ZAP scope guard and runner fail
+# closed; no acceptance scenario can pass through them.
+@app.get("/lab/zap/redirect/status", include_in_schema=False)
+def zap_negative_redirect() -> RedirectResponse:
+    return RedirectResponse("/lab/zap/redirect/elsewhere", status_code=302, headers=_NOSNIFF)
+
+
+@app.get("/lab/zap/unstable/status", include_in_schema=False)
+def zap_negative_unstable() -> StreamingResponse:
+    def broken() -> Iterator[bytes]:
+        yield b'{"lab": "zap-passive-header", '
+        raise RuntimeError("synthetic connection drop")
+
+    return StreamingResponse(broken(), media_type="application/json", headers=_NOSNIFF)
+
+
+@app.get("/lab/zap/slow/status", include_in_schema=False)
+async def zap_negative_slow() -> JSONResponse:
+    await asyncio.sleep(12)
+    return JSONResponse(_zap_marker("negative", "slow"), headers=_NOSNIFF)

@@ -4,6 +4,8 @@ from aegis.models import Hypothesis, PlannedRequest
 from aegis.settings import Settings
 from aegis.surface import OBJECTS, Variant, account_path
 from aegis_nuclei.targets import NUCLEI_TARGETS
+from aegis_zap.inventory import ZAP_TARGETS
+from aegis_zap.projection import project
 
 
 class SafetyViolation(ValueError):
@@ -91,6 +93,26 @@ class SafetyController:
         }
         if path not in permitted:
             raise SafetyViolation("Verifier request is outside the fixed synthetic SCM surface")
+        absolute_url = base_url.rstrip("/") + path
+        self.validate_absolute_url(absolute_url)
+        return absolute_url
+
+    def approve_zap_verification(self, base_url: str, path: str) -> str:
+        """Approve ONE of the fixed Phase 1.3 verifier requests: the control or scenario operation
+        of an ACCEPTANCE inventory target. Negative-control routes, any other path, host or scheme
+        is a SafetyViolation."""
+
+        permitted = {
+            op.path
+            for target in ZAP_TARGETS.values()
+            if target.purpose == "ACCEPTANCE"
+            and target.origin.rstrip("/") == base_url.rstrip("/")
+            for op in project(target).operations
+            if op.method == "GET"
+            and op.operation_id in {target.control_operation_id, target.scenario_operation_id}
+        }
+        if path not in permitted:
+            raise SafetyViolation("Verifier request is outside the fixed synthetic ZAP surface")
         absolute_url = base_url.rstrip("/") + path
         self.validate_absolute_url(absolute_url)
         return absolute_url
