@@ -1,18 +1,35 @@
 # Canonical project state
 
 Updated: 2026-09-19 (Europe/Istanbul)
-Phase: **1.1 Security Tool Integration Kernel. Phase 0.8, 0.9 and 1.0 remain GO. A provider-
-independent engine kernel (`src/aegis/engine/`) now sits between the deterministic controller and the
-executor: typed engine contracts, a model-immutable capability/profile catalog, a deterministic
-execution policy that rejects disallowed jobs before any tool traffic, one enabled AEGIS_NATIVE
-adapter (the migrated Phase 0.8 BOLA path, behaviour unchanged), and three fail-closed disabled
-skeletons for Nuclei, ZAP and Burp DAST. Engine observations are untrusted; only the deterministic
-verifier (or explicit human review) promotes a result through the TOOL_REPORTED → AEGIS_CORRELATED →
-VERIFIED/REVIEW_REQUIRED/REJECTED lifecycle. The console gained engine/adapter version on runs, a
-four-state engine-readiness surface, a finding-lifecycle visualization and an execution-policy panel,
-with all prior functionality intact. GO only for the bounded synthetic-lab and the single read-only
-BOLA capability — Nuclei/ZAP/Burp are NOT operational and no production readiness is claimed.**
-Version: 1.1.0
+Phase: **1.2 Controlled Nuclei Integration. Earlier GO phases remain intact. Nuclei v3.11.1 is now
+operational only through `NUCLEI_LAB_SAFE_HTTP_V1`: one official signed, byte-pinned `git-config`
+template; one anonymous read-only synthetic-lab capability; strict typed controller/runner RPC; an
+isolated non-root/read-only/no-shell runner with no public egress, planner/model access, credentials,
+host mount or published port; bounded fail-closed JSONL parsing; TOOL_REPORTED correlation; and a
+fresh deterministic Aegis verifier as the only automated finding/PASS authority. Real binary
+acceptance is vulnerable 5/5 and patched-negative 5/5; every negative matrix is 3/3 with zero
+unauthorized executions/traffic. ZAP and Burp remain disabled. GO only for this bounded synthetic
+profile — no production readiness or broad vulnerability coverage is claimed.**
+Version: 1.2.0
+
+## Phase 1.2 — Controlled Nuclei Integration
+
+Full detail: [Phase 1.2](docs/phase-1.2-nuclei-integration.md). Supply chain:
+[manifest](docs/nuclei-template-supply-chain.md); [isolation](docs/nuclei-runner-isolation.md);
+[operations](docs/nuclei-operations.md); [evidence](docs/nuclei-evidence-and-verification.md).
+
+Pins: Nuclei `v3.11.1`; arm64 binary SHA-256 `f27098e0be0cc370af52274611608ad61896d7f0a024e35b136327d39e725477`;
+amd64 `c49588140f357cbdddd5436dec11201953a4c5390faeec90777f9ee2cfd70251`;
+nuclei-templates `v10.4.8` commit `e5f19e6144135e107962bb943231413796fd7fe7`;
+`git-config` template SHA-256 `bd8bdfa0b5ed5bf4d3712edb793adfd0987d9282e51c6f7d673bf14b9e4dd524`;
+manifest SHA-256 `8c69c056d9d11990bf11cbc688252d30426654a7ccb16996d3559c84fa472845`.
+
+Acceptance: Ruff PASS; strict mypy PASS across 49 source files; **464 offline tests PASS**; frontend
+typecheck/lint PASS; **6 frontend tests PASS**; Vite build PASS; real pinned Nuclei vulnerable 5/5,
+patched-negative 5/5, out-of-scope 3/3, denied state-changing/non-HTTP 3/3 and template/RPC controls
+3/3; exactly 10 authorized executions and zero unauthorized traffic. Live topology allows only the
+synthetic target and blocks the control-plane listener, LLM gateway, Ollama and public IP. All prior
+Phase 1.1 evidence remains byte-identical.
 
 ## Phase 1.1 — Security Tool Integration Kernel
 
@@ -35,8 +52,8 @@ vulnerabilities; Phase 1.1 secret scan CLEAN; all 112 pre-existing artifact file
 HIGH/CONFIRMED` (verifier-only) and `200/200/403 → PASS`; disabled adapters fail closed with zero
 traffic; engine observations cannot self-confirm. Evidence: `artifacts/quality-gates-phase-1.1.txt`,
 `artifacts/frontend-gates-phase-1.1.txt`, `artifacts/secret-scan-phase-1.1.txt` (+ `.sha256`
-sidecars). Original Git history remains unavailable; no repository init, commit, tag or release was
-attempted.
+sidecars). Original Git history remains unavailable; the Phase 1.1 working snapshot was later
+imported honestly as the root commit and tagged `phase-1.1-go` before Phase 1.2 work began.
 
 ## Phase 1.0 — Aegis Operator Console
 

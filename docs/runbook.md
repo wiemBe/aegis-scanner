@@ -61,11 +61,45 @@ docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
          mypy --explicit-package-bases -p aegis -p lab_api && pytest -q'
 
 # Frontend (Node not required in the runtime image; console/node_modules already present)
-docker run --rm -v "$PWD/console:/app" -w /app node:22-alpine \
+docker run --rm --network none -v "$PWD:/workspace" -w /workspace/console node:22-alpine \
   sh -c 'npm run typecheck && npm run lint && npm test && npm run build'
 ```
 
 The Vite build re-emits `src/aegis/console/`. See [Phase 1.1](phase-1.1-security-tool-kernel.md).
+
+## Phase 1.2 — controlled Nuclei profile
+
+Build and start the isolated profile:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.nuclei.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.nuclei.yml ps
+docker compose -f docker-compose.yml -f docker-compose.nuclei.yml logs nuclei-runner
+```
+
+The runner must report `ready=True failures=none signature_probe=SIGNED_VERIFIED`. It has no host
+port. The control plane exposes the profile through the existing scan API only when
+`NUCLEI_ENABLED=true` and a fresh attestation matches all pins.
+
+Live acceptance is `scripts/phase_1_2_acceptance.py`; execute it inside the control-plane container
+with the internal control-plane and runner URLs. Expected result: vulnerable 5/5, patched-negative
+5/5, three out-of-scope, three denied-capability and three template/RPC controls, with zero
+unauthorized executions/traffic. See [operations](nuclei-operations.md) for failure codes and
+[isolation](nuclei-runner-isolation.md) for topology checks.
+
+The backend gate now includes all four source packages:
+
+```bash
+docker build --build-arg INSTALL_DEV=true -t aegis-check .
+docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
+  -e PYTHONPATH=/workspace/src -e MYPYPATH=/workspace/src aegis-check \
+  sh -c 'ruff check src tests scripts && \
+         mypy --explicit-package-bases -p aegis -p lab_api -p aegis_nuclei -p nuclei_runner && \
+         pytest -q'
+```
+
+Never enable runtime updates, mount a template directory, add a credential/proxy variable or expose
+the runner port. Any engine/template/signature mismatch is a stop condition, not an upgrade prompt.
 
 ## 1. Phase 0.9 one-command management demo
 

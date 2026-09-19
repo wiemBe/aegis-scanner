@@ -15,8 +15,9 @@ Aegis AI Security Lab.
 - **Local evidence stays local.** Generated runtime evidence under `artifacts/`, local configuration
   (`.env`, `.env.gateway`, backups), test certificates and keys (`deploy/certs/`), local databases and
   model weights are excluded by `.gitignore` and are not part of the repository.
-- **Scope is unchanged.** The Phase 1.1 GO verdict remains limited to the bounded synthetic lab and the
-  single read-only BOLA capability executed through the engine interface. Nuclei, ZAP and Burp DAST
-  are not operational. Nothing in this repository claims production readiness.
+- **Phase 1.2 is ordinary forward history.** Work after the import commit is recorded honestly on
+  `feat/phase-1.2-nuclei`; it does not reconstruct any missing ancestor. The Phase 1.2 scope adds
+  only one pinned, signed, anonymous read-only Nuclei capability for the synthetic lab. ZAP and Burp
+  DAST remain disabled. Nothing in this repository claims production readiness.
 
 The baseline commit is tagged `phase-1.1-go`.

@@ -1,5 +1,17 @@
 # Operator Console architecture
 
+## Phase 1.2 Nuclei projection
+
+The console remains read-only. `GET /api/console/engines` now adds controller-safe Nuclei
+provenance: pinned and attested version/digest, manifest version/digest, admitted-template count,
+signature probe, health timestamp and latest execution/request/result/lifecycle counts. Run Replay,
+Mission Control and Audit Explorer use the structured `NUCLEI_*` events and preserve the
+TOOL_REPORTED versus verifier-confirmed split. Evidence uses rendered execution/verifier cards; no
+browser screenshot is fabricated for tool output.
+
+The management view states: “Nuclei is an Aegis-controlled detection engine. Its results are
+independently correlated and verified; Nuclei does not directly confirm Aegis findings.”
+
 ## Surfaces
 
 | Surface | Path | Purpose |
