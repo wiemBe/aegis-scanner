@@ -1,0 +1,31 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Negative control - external reference",
+    "version": "1.3.0"
+  },
+  "servers": [
+    {
+      "url": "http://lab-api:8001"
+    }
+  ],
+  "paths": {
+    "/lab/zap/vulnerable/status": {
+      "get": {
+        "operationId": "labZapVulnerableStatus",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "https://schemas.remote.invalid/lab-marker.json"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

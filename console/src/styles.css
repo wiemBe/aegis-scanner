@@ -37,3 +37,5 @@
 .policy-row small{color:var(--muted);margin-left:auto}
 .policy-row.rejected{color:#f0b3b6}
 .badge.controller{background:#17243a;color:#9fc0f5}
+.zap-coverage .zap-metrics{grid-template-columns:repeat(4,1fr);margin-bottom:14px}
+@media(max-width:780px){.zap-coverage .zap-metrics{grid-template-columns:1fr 1fr}}

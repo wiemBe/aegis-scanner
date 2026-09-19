@@ -697,6 +697,8 @@ class ScanResult(BaseModel):
     capability_id: str | None = None
     target_ref: str | None = None
     nuclei_provenance: dict[str, Any] | None = None
+    # Phase 1.3 (additive): console-safe ZAP execution provenance (versions, digests, counts).
+    zap_provenance: dict[str, Any] | None = None
     verifier_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 

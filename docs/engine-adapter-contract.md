@@ -66,9 +66,8 @@ isolation boundary:
   to the approved synthetic origin; a pinned, reviewed template set (no remote template fetch); no
   credential unless a reviewed synthetic profile is provisioned into the sidecar boundary; no shell
   passthrough — the adapter builds the invocation from the typed job only.
-- **ZAP** — an isolated daemon reached over a pinned internal API; egress restricted to the approved
-  origin; the ZAP API key confined to the ZAP connector boundary; active scan disabled (passive
-  analysis of controller-driven traffic only).
+- **ZAP** — *superseded in Phase 1.3 (see below).* Originally planned as an isolated daemon reached
+  over a pinned internal API with active scan disabled.
 - **Burp DAST** — its own connector with credentials confined to that boundary; the Burp MCP surface
   is **not** invoked; egress restricted to the approved origin; passive audit only, active scan
   stays disabled.
@@ -82,3 +81,17 @@ isolation boundary:
 3. Keep `verification_policy=HUMAN_REVIEW_REQUIRED` until a deterministic Aegis verifier is written;
    a human-review capability can only reach `REVIEW_REQUIRED`, never `VERIFIED`, automatically.
 4. Add acceptance evidence under a new phase and a fresh, immutable matrix.
+
+## Phase 1.3: the ZAP adapter
+
+`ZapAdapter` (`src/aegis/engine/zap.py`, `zap-adapter/1.3.0`) is enabled only when the operator sets
+`ZAP_ENABLED`. It does not run ZAP as a daemon or use the ZAP API (no API key exists): the controller
+builds a typed `ZapEngineJob` through `build_zap_job` — which projects the controller-owned OpenAPI
+inventory and rejects before any runner call — and the adapter sends a strict `ZapRunRequest` to the
+isolated zap-runner, which runs one fixed Automation Framework plan in `-cmd` mode behind the scope
+guard. The adapter re-validates the runner attestation (pinned version, jar, JVM, add-on inventory
+digest, profile/parser/projection versions, rule manifest, guard) and the untrusted response (ids,
+nonce, projection and allowlist digests, alert rule/path allowlist, request budget, coverage
+consistency). A generic kernel `EngineJob` is refused with `UNSUPPORTED_JOB_TYPE`. New error codes:
+`PROJECTION_REJECTED`, `ACTIVE_SCAN_FORBIDDEN`. See
+[Phase 1.3](phase-1.3-zap-passive-openapi.md).

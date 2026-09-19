@@ -30,3 +30,15 @@ Any future enablement requires an approved runner, selector-redaction tests, exp
 and hardened attachment responses (`Content-Disposition: attachment`, fixed safe filename,
 `X-Content-Type-Options: nosniff`). It must not expand target scope or introduce unrestricted browser
 automation.
+
+## Phase 1.3 ZAP data handling
+
+ZAP produces no screenshots and no browser capture is enabled. ZAP's session database, HTTP history,
+report, `zap.log` and stdout exist only inside a per-execution directory on the zap-runner's bounded
+tmpfs and are deleted before the runner answers; the tmpfs disappears when the container stops. What
+persists is typed metadata only: versions, digests (projection, plan, report, stdout, evidence),
+counts, codes, the manifest rule name and bounded alert records (plugin id, method, approved path,
+parameter name, ZAP's untrusted risk/confidence labels, evidence length and SHA-256). Alert
+descriptions, solutions, references, other-info text and evidence strings are never stored. The
+scope guard forwards no cookies or `Authorization` headers and logs only its decision, method and
+approved path. No ZAP data is sent to the planner or model.

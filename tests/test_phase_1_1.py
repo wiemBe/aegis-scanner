@@ -557,11 +557,14 @@ async def test_console_audit_engine_filter_and_catalog(
 
 def test_only_native_profile_is_enabled() -> None:
     # Phase 1.2 deliberately enables exactly ONE additional profile: the controlled Nuclei profile
-    # (tests/test_phase_1_2.py). ZAP, Burp DAST and the retired Nuclei placeholder stay disabled.
+    # (tests/test_phase_1_2.py). Phase 1.3 adds exactly one more: the controlled ZAP passive
+    # OpenAPI profile (tests/test_phase_1_3.py). Burp DAST and the retired Nuclei/ZAP placeholders
+    # stay disabled.
     enabled = [p for p in PROFILE_CATALOG if p.enabled]
     assert [(p.engine, p.profile_id) for p in enabled] == [
         (SecurityEngine.AEGIS_NATIVE, "aegis-native-bola-synthetic"),
         (SecurityEngine.NUCLEI, "NUCLEI_LAB_SAFE_HTTP_V1"),
+        (SecurityEngine.ZAP, "ZAP_LAB_PASSIVE_OPENAPI_V1"),
     ]
     native = get_engine_profile("aegis-native-bola-synthetic")
     assert native and native.enabled

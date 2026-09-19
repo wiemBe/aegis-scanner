@@ -8,9 +8,15 @@ that mutates it. The AI can only NAME a capability that already exists here (via
 Phase 1.1 enabled only ``AEGIS_NATIVE``. Phase 1.2 adds ONE enabled Nuclei profile,
 ``NUCLEI_LAB_SAFE_HTTP_V1``, bound to one capability backed by a pinned, admitted, signed template
 and a deterministic Aegis verifier. A catalog-enabled profile is still inert until the operator
-enables the Nuclei adapter and the isolated runner attests READY. ZAP and Burp DAST remain disabled
-and fail closed. Two Nuclei capabilities are catalogued ONLY so that requests for them are rejected
-with a precise reason (state-changing HTTP, non-HTTP protocol); no profile references them.
+enables the Nuclei adapter and the isolated runner attests READY. Two Nuclei capabilities are
+catalogued ONLY so that requests for them are rejected with a precise reason (state-changing HTTP,
+non-HTTP protocol); no profile references them.
+
+Phase 1.3 adds ONE enabled ZAP profile, ``ZAP_LAB_PASSIVE_OPENAPI_V1``, bound to one PASSIVE
+capability: a projected, read-only OpenAPI import analysed by the admitted passive-rule manifest,
+with a deterministic Aegis verifier as the only promotion authority. It is inert until the operator
+enables the ZAP adapter and the isolated runner attests READY. A ZAP active-scan capability is
+catalogued ONLY to be refused. Burp DAST remains disabled and fails closed.
 """
 
 from __future__ import annotations
@@ -31,7 +37,7 @@ from aegis.engine.contracts import (
 ADAPTER_VERSIONS: dict[SecurityEngine, str] = {
     SecurityEngine.AEGIS_NATIVE: "aegis-native/1.1.0",
     SecurityEngine.NUCLEI: "nuclei-adapter/1.2.0",
-    SecurityEngine.ZAP: "zap-adapter/0.0.0-disabled",
+    SecurityEngine.ZAP: "zap-adapter/1.3.0",
     SecurityEngine.BURP_DAST: "burp-dast-adapter/0.0.0-disabled",
 }
 
@@ -221,10 +227,11 @@ CAPABILITY_CATALOG: tuple[EngineCapability, ...] = (
         verification_policy=VerificationPolicy.HUMAN_REVIEW_REQUIRED,
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.NUCLEI],
     ),
+    # Retired Phase 1.1 ZAP placeholder, kept disabled for record continuity (no profile uses it).
     EngineCapability(
         capability_id="zap_passive_scan_v0",
         engine=SecurityEngine.ZAP,
-        title="ZAP passive scan (planned)",
+        title="ZAP passive scan (Phase 1.1 placeholder, retired)",
         activity=EngineActivity.PASSIVE,
         supported_methods=("GET", "HEAD"),
         allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
@@ -237,6 +244,50 @@ CAPABILITY_CATALOG: tuple[EngineCapability, ...] = (
         evidence_types=("ZAP_ALERT",),
         verification_policy=VerificationPolicy.HUMAN_REVIEW_REQUIRED,
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+    ),
+    # Phase 1.3: the single operational ZAP capability. ZAP imports a controller-projected, local
+    # OpenAPI file of approved anonymous GET/HEAD operations (one request each, budget = the
+    # projection's operation count, at most 4) and passively analyses the responses with the
+    # admitted rule manifest only. The deterministic Aegis header verifier
+    # (``aegis.zap_verifier``) is the only promotion authority and assigns the Aegis-owned LOW
+    # severity.
+    EngineCapability(
+        capability_id="zap_passive_header_openapi_v1",
+        engine=SecurityEngine.ZAP,
+        title="Missing anti-MIME-sniffing header (ZAP passive, projected OpenAPI, read-only)",
+        activity=EngineActivity.PASSIVE,
+        supported_methods=("GET", "HEAD"),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=False,
+        required_approvals=("SYNTHETIC_LAB_SCOPE", "OPERATOR_ENABLE_ZAP"),
+        request_budget=4,
+        concurrency_budget=1,
+        time_budget_ms=120_000,
+        evidence_types=("ZAP_EXECUTION_CARD", "ZAP_ALERT_CARD", "VERIFIER_PROBE_CARD"),
+        verification_policy=VerificationPolicy.DETERMINISTIC_AEGIS_VERIFIER,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+        protocol="http",
+        verified_severity="LOW",
+    ),
+    # Catalogued ONLY to be refused: active scanning is not approved in Phase 1.3.
+    EngineCapability(
+        capability_id="zap_active_scan_v0",
+        engine=SecurityEngine.ZAP,
+        title="ZAP active scan (denied)",
+        activity=EngineActivity.ACTIVE,
+        supported_methods=("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=True,
+        required_approvals=("NEVER_APPROVED",),
+        request_budget=0,
+        concurrency_budget=1,
+        time_budget_ms=1,
+        evidence_types=(),
+        verification_policy=VerificationPolicy.NONE,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+        protocol="http",
     ),
     EngineCapability(
         capability_id="burp_dast_passive_v0",
@@ -320,19 +371,42 @@ PROFILE_CATALOG: tuple[EngineProfile, ...] = (
         ),
     ),
     EngineProfile(
+        profile_id="ZAP_LAB_PASSIVE_OPENAPI_V1",
+        engine=SecurityEngine.ZAP,
+        title="ZAP — lab passive OpenAPI (pinned, projected, read-only)",
+        capability_ids=("zap_passive_header_openapi_v1",),
+        enabled=True,
+        environment=EngineEnvironment.SYNTHETIC_LAB,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+        description=(
+            "ZAP 2.17.0 (pinned image digest and add-on inventory) running one fixed Automation "
+            "Framework plan: import a controller-projected local OpenAPI file of approved GET/HEAD "
+            "operations and passively analyse the responses with the admitted rule manifest. No "
+            "active scan, spider, script, authentication or remote OpenAPI source. Alerts enter "
+            "as TOOL_REPORTED; only the deterministic Aegis verifier promotes."
+        ),
+        isolation_boundary=(
+            "Separate zap-runner container built from the pinned ZAP image: non-root, read-only "
+            "root filesystem, bounded tmpfs for all ZAP state, all capabilities dropped, no shell, "
+            "no Docker socket, host mount, credential or published port. Reached only over the "
+            "internal zap-rpc network; its only outbound network contains just the scope "
+            "guard, which forwards only armed, allowlisted GET/HEAD requests to the synthetic "
+            "origin within a hard budget. Fixed argv, no shell."
+        ),
+    ),
+    EngineProfile(
         profile_id="zap-passive-synthetic",
         engine=SecurityEngine.ZAP,
-        title="ZAP — passive scan (disabled)",
+        title="ZAP — Phase 1.1 placeholder (retired, disabled)",
         capability_ids=("zap_passive_scan_v0",),
         enabled=False,
         environment=EngineEnvironment.SYNTHETIC_LAB,
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
-        description="Planned integration. Not installed, not connected, fail-closed.",
+        description="Retired Phase 1.1 placeholder. Superseded by ZAP_LAB_PASSIVE_OPENAPI_V1.",
         isolation_boundary=(
-            "FUTURE: ZAP runs as an isolated daemon reached over a pinned internal API; egress is "
-            "restricted to the approved origin; the ZAP API key lives only inside the ZAP "
-            "connector boundary; active scan is disabled — only passive analysis of "
-            "controller-driven traffic is permitted."
+            "SUPERSEDED: ZAP runs as an isolated daemon reached over a pinned internal API; egress "
+            "is restricted to the approved origin; active scan is disabled — only passive analysis "
+            "of controller-driven traffic is permitted."
         ),
     ),
     EngineProfile(

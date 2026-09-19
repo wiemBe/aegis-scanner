@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 
-from aegis import scm_verifier
+from aegis import scm_verifier, zap_verifier
 from aegis.budget import BudgetExceeded, ScanBudget
 from aegis.candidates import (
     build_context,
@@ -53,6 +53,13 @@ from aegis.engine.nuclei import (
     build_nuclei_job,
 )
 from aegis.engine.policy import EnginePolicyRejection, build_engine_job
+from aegis.engine.zap import (
+    ZapAdapter,
+    ZapAdapterResult,
+    ZapEngineJob,
+    ZapProjectionRejection,
+    build_zap_job,
+)
 from aegis.executor import TestExecutor, redact
 from aegis.http import bounded_body
 from aegis.models import (
@@ -84,6 +91,14 @@ from aegis_nuclei.parser import PARSER_VERSION as NUCLEI_PARSER_VERSION
 from aegis_nuclei.profile import PROFILE_ID as NUCLEI_PROFILE_ID
 from aegis_nuclei.profile import PROFILE_VERSION as NUCLEI_PROFILE_VERSION
 from aegis_nuclei.targets import NUCLEI_TARGETS, target_for_variant
+from aegis_zap.contracts import ZapRunResponse
+from aegis_zap.inventory import ZAP_TARGETS
+from aegis_zap.inventory import target_for_variant as zap_target_for_variant
+from aegis_zap.manifest import load_manifest as load_zap_manifest
+from aegis_zap.parser import PARSER_VERSION as ZAP_PARSER_VERSION
+from aegis_zap.profile import PROFILE_ID as ZAP_PROFILE_ID
+from aegis_zap.profile import PROFILE_VERSION as ZAP_PROFILE_VERSION
+from aegis_zap.projection import ProjectionResult
 
 # The one enabled engine profile in Phase 1.1. The controller selects it deterministically from the
 # capability the validated candidate names; the model never chooses an engine or profile.
@@ -100,6 +115,7 @@ class ScanService:
         transport: httpx.AsyncBaseTransport | None = None,
         *,
         nuclei_transport: httpx.AsyncBaseTransport | None = None,
+        zap_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
@@ -116,14 +132,23 @@ class ScanService:
             timeout_seconds=settings.nuclei_rpc_timeout_seconds,
             transport=nuclei_transport,
         )
+        # Phase 1.3: the controller-side RPC client for the isolated zap-runner. Disabled unless the
+        # operator sets ZAP_ENABLED; even then every job requires a READY runner attestation.
+        self.zap = ZapAdapter(
+            settings.zap_runner_url,
+            enabled=settings.zap_enabled,
+            timeout_seconds=settings.zap_rpc_timeout_seconds,
+            transport=zap_transport,
+        )
         # The security-tool integration kernel dispatcher: the enabled native adapter (wired to the
-        # exact same executor/safety), the Nuclei adapter when enabled (otherwise its fail-closed
-        # skeleton), and the ZAP/Burp skeletons. The controller constructs every job; the
+        # exact same executor/safety), the Nuclei and ZAP adapters when enabled (otherwise their
+        # fail-closed skeletons), and the Burp skeleton. The controller constructs every job; the
         # dispatcher never widens scope.
         self.dispatcher = build_dispatcher(
             self.executor,
             self.safety,
             nuclei=self.nuclei if settings.nuclei_enabled else None,
+            zap=self.zap if settings.zap_enabled else None,
         )
 
     def create(self, request: ScanCreate | None = None) -> ScanResult:
@@ -915,6 +940,9 @@ class ScanService:
         if result.engine == SecurityEngine.NUCLEI.value:
             await self._run_nuclei_scan(result)
             return
+        if result.engine == SecurityEngine.ZAP.value:
+            await self._run_zap_scan(result)
+            return
         result.status = ScanStatus.RUNNING
         self._audit(result, "SCAN_STARTED", {})
         budget = ScanBudget(self.settings, result.usage)
@@ -983,6 +1011,8 @@ class ScanService:
         no such field. The AI planner is not involved in this flow."""
 
         capability = get_engine_capability(request.capability or "")
+        if capability is not None and capability.engine is SecurityEngine.ZAP:
+            return self._create_zap_scan(request)
         if capability is None or capability.engine is not SecurityEngine.NUCLEI:
             raise ValueError("Unknown or unsupported engine capability")
         target_ref = request.target_ref or target_for_variant(request.variant).target_ref
@@ -1637,6 +1667,823 @@ class ScanService:
                     redaction_status="REDACTED",
                     content_digest=digest,
                     parser_version=scm_verifier.VERIFIER_VERSION,
+                    source_class=EvidenceSourceClass.VERIFIER_DERIVED,
+                    retention_class=RetentionClass.STANDARD,
+                )
+            )
+        return items
+
+    # --- Phase 1.3: controlled ZAP passive OpenAPI integration ---------------------------------
+
+    def _create_zap_scan(self, request: ScanCreate) -> ScanResult:
+        """Create a scan for an operator-requested ZAP capability.
+
+        The request names only a catalog capability and (optionally) an inventory target reference.
+        It cannot name a tool, plan, job, rule, OpenAPI document/URL, target URL, header, option or
+        credential — ScanCreate has no such field. The AI planner is not involved in this flow."""
+
+        capability = get_engine_capability(request.capability or "")
+        profile_capabilities = {"zap_passive_header_openapi_v1"}
+        if capability is None or capability.engine is not SecurityEngine.ZAP or not (
+            capability.capability_id in profile_capabilities
+            or "NEVER_APPROVED" in capability.required_approvals
+        ):
+            # The retired Phase 1.1 placeholder and unknown ids are refused outright.
+            raise ValueError("Unknown or unsupported engine capability")
+        target_ref = request.target_ref or zap_target_for_variant(request.variant).target_ref
+        known = ZAP_TARGETS.get(target_ref)
+        variant: Literal["vulnerable", "patched"] = (
+            "patched" if known is not None and known.variant == "patched" else "vulnerable"
+        )
+        if known is not None and known.purpose == "NEGATIVE_CONTROL":
+            scenario = (
+                ScenarioClass.STATE_CHANGING_ONLY
+                if known.negative_class == "STATE_CHANGING_OPERATION"
+                else ScenarioClass.OUT_OF_SCOPE
+            )
+        else:
+            scenario = (
+                ScenarioClass.PATCHED_NEGATIVE
+                if variant == "patched"
+                else ScenarioClass.POSITIVE_VULNERABLE
+            )
+        if request.retest_of:
+            original = self.store.get(request.retest_of)
+            if (
+                original is None
+                or original.engine != SecurityEngine.ZAP.value
+                or original.status != ScanStatus.FAIL
+                or not original.findings
+                or variant != "patched"
+            ):
+                raise ValueError("Retest requires a confirmed ZAP scan and the patched variant")
+        result = ScanResult(
+            id=f"scan-{uuid4().hex[:12]}",
+            target_name=(
+                known.title if known is not None else "Synthetic Lab — ZAP passive surface"
+            ),
+            target_base_url=self.settings.lab_base_url,
+            status=ScanStatus.QUEUED,
+            planner="NONE",
+            mode="OPERATOR_CAPABILITY",
+            model=None,
+            variant=variant,
+            scenario=scenario,
+            retest_of=request.retest_of,
+            engine=SecurityEngine.ZAP.value,
+            adapter_version=self.zap.adapter_version,
+            engine_kernel_version=ENGINE_KERNEL_VERSION,
+            capability_id=capability.capability_id,
+            target_ref=target_ref,
+        )
+        self.store.save(result)
+        self.store.add_audit(
+            result.id,
+            "SCAN_CREATED",
+            {
+                "planner": "NONE",
+                "variant": result.variant,
+                "scenario": result.scenario,
+                "retest_of": result.retest_of,
+                "engine": SecurityEngine.ZAP.value,
+                "capability": capability.capability_id,
+                "target_ref": target_ref,
+                "limits": {
+                    "requests_including_import": self.settings.max_requests_per_scan,
+                    "seconds": self.settings.scan_timeout_seconds,
+                },
+            },
+        )
+        return result
+
+    async def _run_zap_scan(self, result: ScanResult) -> None:
+        result.status = ScanStatus.RUNNING
+        self._audit(result, "SCAN_STARTED", {"engine": SecurityEngine.ZAP.value})
+        budget = ScanBudget(self.settings, result.usage)
+        try:
+            async with asyncio.timeout(
+                max(self.settings.scan_timeout_seconds, self.settings.zap_rpc_timeout_seconds + 30)
+            ):
+                await self._zap_flow(result, budget)
+        except SafetyViolation as exc:
+            result.status = ScanStatus.REVIEW
+            result.stop_reason = result.terminal_reason = "SAFETY_REJECTED"
+            result.safety_events.append(str(exc))
+            self._audit(result, "SAFETY_REJECTED", {"reason": str(exc)})
+        except (BudgetExceeded, TimeoutError) as exc:
+            result.status = ScanStatus.INCOMPLETE
+            result.stop_reason = str(exc) if isinstance(exc, BudgetExceeded) else "TIME_BUDGET"
+            result.terminal_reason = result.stop_reason
+            self._audit(result, "BUDGET_EXHAUSTED", {"reason": result.stop_reason})
+        except asyncio.CancelledError:
+            result.status = ScanStatus.INCOMPLETE
+            result.stop_reason = result.terminal_reason = "CANCELLED"
+            self._audit(result, "SCAN_CANCELLED", {})
+            raise
+        except Exception as exc:
+            result.status = ScanStatus.INCOMPLETE
+            result.error = type(exc).__name__
+            result.stop_reason = "SCAN_ERROR"
+            result.terminal_reason = f"SCAN_ERROR_{type(exc).__name__}"
+            self._audit(result, "SCAN_FAILED", {"reason": result.error})
+        finally:
+            # ZAP scans never fall through to PASS: an unfinished flow is INCOMPLETE. Findings
+            # exist only if the independent verifier promoted them inside the flow.
+            if result.status is ScanStatus.RUNNING:
+                result.status = ScanStatus.INCOMPLETE
+                result.terminal_reason = result.terminal_reason or "ZAP_FLOW_INCOMPLETE"
+            result.completed_at = datetime.now(UTC)
+            self._audit(
+                result,
+                "SCAN_COMPLETED",
+                {
+                    "status": result.status,
+                    "stop_reason": result.stop_reason,
+                    "usage": result.usage.model_dump(),
+                },
+            )
+
+    def _zap_terminal(self, result: ScanResult, reason: str, status: ScanStatus) -> None:
+        summaries = {
+            ScanStatus.FAIL: "Independent verifier confirmed the ZAP-reported condition.",
+            ScanStatus.PASS: "Complete passive coverage; independent verifier confirmed the patch.",
+            ScanStatus.REVIEW: "ZAP result needs review; nothing was auto-confirmed or passed.",
+            ScanStatus.INCOMPLETE: "ZAP execution or verification incomplete; never a PASS.",
+        }
+        self._terminal(result, reason, status, summaries.get(status, "Recorded."))
+
+    def _zap_provenance(
+        self,
+        job: ZapEngineJob,
+        outcome: ZapAdapterResult | None,
+    ) -> dict[str, Any]:
+        manifest = load_zap_manifest()
+        response: ZapRunResponse | None = outcome.response if outcome else None
+        attestation = outcome.attestation if outcome else None
+        engine = response.engine if response else attestation.engine if attestation else None
+        traffic = response.traffic if response else None
+        stages = response.stages if response else None
+        guard = attestation.guard if attestation else None
+        return {
+            "profile_id": job.profile_id,
+            "profile_version": ZAP_PROFILE_VERSION,
+            "adapter_version": job.adapter_version,
+            "parser_version": ZAP_PARSER_VERSION,
+            "projection_version": job.projection_version,
+            "runner_version": (
+                response.runner_version
+                if response
+                else attestation.runner_version
+                if attestation
+                else None
+            ),
+            "verifier_version": zap_verifier.VERIFIER_VERSION,
+            "kernel_version": ENGINE_KERNEL_VERSION,
+            "engine": {
+                "name": "zap",
+                "version": engine.zap_version if engine else None,
+                "pinned_version": manifest.engine.version,
+                "image_index_digest": manifest.engine.image.index_digest,
+                "image_platform_digests": dict(manifest.engine.image.platforms),
+                "jar_sha256": engine.jar_sha256 if engine else None,
+                "java_version": engine.java_version if engine else None,
+                "java_runtime_version": engine.java_runtime_version if engine else None,
+                "arch": engine.arch if engine else None,
+                "add_on_inventory_digest": engine.add_on_inventory_digest if engine else None,
+                "pinned": engine.pinned if engine else False,
+            },
+            "add_ons": [
+                {"id": a.id, "version": a.version, "status": a.status} for a in manifest.add_ons
+            ],
+            "rules": [
+                {"plugin_id": r.plugin_id, "name": r.name, "threshold": r.threshold}
+                for r in manifest.passive_rules
+                if r.plugin_id in job.rule_ids
+            ],
+            "manifest_version": manifest.manifest_version,
+            "manifest_digest": job.manifest_digest,
+            "projection": {
+                "ref": job.projection_ref,
+                "digest": job.projection_digest,
+                "allowlist_digest": job.allowlist_digest,
+                "source_sha256": job.source_sha256,
+                "operation_count": job.operation_count,
+                "path_count": job.path_count,
+                "redaction_status": job.redaction_status,
+                "operations": [
+                    {"method": op.method, "path": op.path, "operation_id": op.operation_id}
+                    for op in job.operations
+                ],
+            },
+            "job_id": job.job_id,
+            "execution_id": outcome.execution.execution_id if outcome else None,
+            "target_ref": job.target_ref,
+            "operation_id": job.target.operation_id,
+            "budgets": {
+                "requests": job.budget.max_requests,
+                "time_ms": job.budget.time_budget_ms,
+                "alerts": job.max_alerts,
+                "report_bytes": job.max_report_bytes,
+            },
+            "plan": {
+                "digest": response.plan.plan_digest if response else None,
+                "validated": bool(response and response.plan.validated),
+                "job_types": list(response.plan.job_types) if response else [],
+            },
+            "stages": stages.model_dump(mode="json") if stages else None,
+            "traffic": {
+                "expected_requests": job.operation_count,
+                "observed_requests": traffic.received if traffic else None,
+                "forwarded": traffic.forwarded if traffic else None,
+                "blocked": traffic.blocked if traffic else None,
+                "blocked_reasons": [list(r) for r in traffic.blocked_reasons] if traffic else [],
+                "redirects": traffic.redirects if traffic else None,
+                "upstream_failures": traffic.upstream_failures if traffic else None,
+                "upstream_timeouts": traffic.upstream_timeouts if traffic else None,
+                "budget_exceeded": traffic.budget_exceeded if traffic else None,
+                "guard_version": guard.guard_version if guard else None,
+            },
+            # Bounded, prose-free alert records: ids, manifest rule name, route, UNTRUSTED claims.
+            "alerts": [
+                {
+                    "plugin_id": a.plugin_id,
+                    "rule_name": a.rule_name,
+                    "method": a.method,
+                    "path": a.path,
+                    "param": a.param,
+                    "claimed_risk": a.claimed_risk,
+                    "claimed_confidence": a.claimed_confidence,
+                    "record_digest": a.record_digest,
+                }
+                for a in (response.alerts if response else ())
+            ],
+            "counts": {
+                "alerts": len(response.alerts) if response else 0,
+                "records": response.parse.records if response else 0,
+                "duplicates_collapsed": response.parse.duplicates_collapsed if response else 0,
+                "imported_urls": stages.urls_added if stages else None,
+            },
+            "timing": {
+                "started_at": response.started_at.isoformat() if response else None,
+                "completed_at": response.completed_at.isoformat() if response else None,
+                "duration_ms": response.duration_ms if response else None,
+            },
+            "exit": {
+                "status": response.status if response else "NOT_RUN",
+                "exit_class": response.exit_class if response else "NOT_RUN",
+                "exit_code": response.exit_code if response else None,
+                "error_code": (
+                    response.error_code.value if response and response.error_code else None
+                ),
+                "adapter_error": (
+                    outcome.execution.error.code.value
+                    if outcome and outcome.execution.error
+                    else None
+                ),
+                "validation_code": outcome.validation_code if outcome else None,
+            },
+            "output": {
+                "stdout_bytes": response.stdout_bytes if response else 0,
+                "stdout_sha256": response.stdout_sha256 if response else None,
+                "report_bytes": response.report_bytes if response else 0,
+                "report_sha256": response.report_sha256 if response else None,
+                "parse_status": response.parse.status if response else "NOT_PARSED",
+                "stripped_fields": list(response.parse.stripped_fields) if response else [],
+                "session_destroyed": bool(response and response.session_destroyed),
+            },
+            "coverage_complete": bool(response and response.coverage_complete),
+            "redaction_status": "REDACTED",
+        }
+
+    async def _zap_flow(self, result: ScanResult, budget: ScanBudget) -> None:
+        # 1) The controller projects the inventory and constructs the typed job (no runner yet).
+        try:
+            job, projection = build_zap_job(
+                profile_id=ZAP_PROFILE_ID,
+                capability_id=result.capability_id or "",
+                run_id=result.id,
+                environment=EngineEnvironment.SYNTHETIC_LAB,
+                target_ref=result.target_ref or "",
+                remaining_requests=self.settings.max_requests_per_scan - result.usage.requests,
+                allowed_origins=[self.settings.lab_base_url],
+                adapter_enabled=self.zap.enabled,
+            )
+        except ZapProjectionRejection as rejection:
+            error = rejection.error.model_dump(mode="json")
+            result.engine_job_rejections.append(error)
+            self._audit(
+                result,
+                "ZAP_PROJECTION_REJECTED",
+                {
+                    **error,
+                    "projection_code": rejection.projection_code,
+                    "capability": result.capability_id,
+                    "target_ref": result.target_ref,
+                    "runner_contacted": False,
+                    "target_requests": 0,
+                },
+            )
+            self._zap_terminal(
+                result, f"ZAP_PROJECTION_REJECTED_{rejection.projection_code}", ScanStatus.REVIEW
+            )
+            return
+        except EnginePolicyRejection as rejection:
+            error = rejection.error.model_dump(mode="json")
+            result.engine_job_rejections.append(error)
+            self._audit(
+                result,
+                "ZAP_JOB_REJECTED",
+                {
+                    **error,
+                    "capability": result.capability_id,
+                    "target_ref": result.target_ref,
+                    "runner_contacted": False,
+                    "target_requests": 0,
+                },
+            )
+            self._zap_terminal(
+                result, f"ZAP_JOB_REJECTED_{rejection.error.code.value}", ScanStatus.REVIEW
+            )
+            return
+        self._audit(result, "ZAP_PROJECTION_CREATED", self._projection_event(job, projection))
+        self._audit(
+            result,
+            "ZAP_JOB_ADMITTED",
+            {
+                "engine": job.engine.value,
+                "profile_id": job.profile_id,
+                "capability": job.capability_id,
+                "job_id": job.job_id,
+                "target_ref": job.target_ref,
+                "operation_id": job.target.operation_id,
+                "activity": job.activity.value,
+                "projection_digest": job.projection_digest,
+                "manifest_digest": job.manifest_digest,
+                "add_on_inventory_digest": job.add_on_inventory_digest,
+                "rule_ids": list(job.rule_ids),
+                "adapter_version": job.adapter_version,
+                "budgets": {
+                    "requests": job.budget.max_requests,
+                    "time_ms": job.budget.time_budget_ms,
+                    "alerts": job.max_alerts,
+                    "report_bytes": job.max_report_bytes,
+                },
+            },
+        )
+
+        # 2) Attest the isolated runner BEFORE any execution: pinned engine and add-ons, guard.
+        attestation = await self.zap.attest()
+        self._audit(
+            result,
+            "ZAP_RUNNER_STARTED",
+            {
+                "reachable": attestation is not None,
+                "ready": bool(attestation and attestation.ready),
+                "runner_version": attestation.runner_version if attestation else None,
+                "zap_version": attestation.engine.zap_version if attestation else None,
+                "jar_sha256": attestation.engine.jar_sha256 if attestation else None,
+                "java_version": attestation.engine.java_runtime_version if attestation else None,
+                "arch": attestation.engine.arch if attestation else None,
+                "pinned": bool(attestation and attestation.engine.pinned),
+                "add_on_inventory_digest": (
+                    attestation.engine.add_on_inventory_digest if attestation else None
+                ),
+                "addonlist_verified": bool(attestation and attestation.addonlist_verified),
+                "guard_version": attestation.guard.guard_version if attestation else None,
+                "guard_reachable": bool(attestation and attestation.guard.reachable),
+                "failure_codes": list(attestation.failure_codes) if attestation else [],
+            },
+        )
+        execution_id = f"exec-{uuid4().hex[:12]}"
+        if self.zap.attestation_problem(attestation, job) is not None:
+            outcome = await self.zap.run(
+                job, result.id, execution_id=execution_id, attestation=attestation
+            )
+            self._record_zap_failure(result, job, outcome, "RUNNER_NOT_ATTESTED")
+            return
+
+        # 3) Execute on the runner. Reserve the target-request budget first (fail closed).
+        for _ in range(job.budget.max_requests):
+            budget.request()
+        outcome = await self.zap.run(
+            job, result.id, execution_id=execution_id, attestation=attestation
+        )
+        self._emit_zap_stages(result, job, outcome.response)
+        if outcome.execution.status is EngineExecutionStatus.FAILED or outcome.response is None:
+            self._record_zap_failure(result, job, outcome, "EXECUTION")
+            return
+        response = outcome.response
+        result.zap_provenance = self._zap_provenance(job, outcome)
+        traffic = response.traffic
+        self._audit(
+            result,
+            "ZAP_EXECUTION_COMPLETED",
+            {
+                "execution_id": execution_id,
+                "job_id": job.job_id,
+                "exit_class": response.exit_class,
+                "exit_code": response.exit_code,
+                "duration_ms": response.duration_ms,
+                "expected_requests": job.operation_count,
+                "observed_requests": traffic.received if traffic else None,
+                "forwarded": traffic.forwarded if traffic else None,
+                "blocked": traffic.blocked if traffic else None,
+                "redirects": traffic.redirects if traffic else None,
+                "alerts": len(response.alerts),
+                "report_sha256": response.report_sha256,
+                "parse_status": response.parse.status,
+                "stripped_fields": list(response.parse.stripped_fields),
+                "session_destroyed": response.session_destroyed,
+                "coverage_complete": response.coverage_complete,
+            },
+        )
+
+        # 4) Tool alerts enter as TOOL_REPORTED observations; correlate them deterministically.
+        execution, evidence, correlated = self._zap_observations(result, job, outcome)
+        result.engine_executions.append(execution.model_dump(mode="json"))
+        result.engine_evidence.extend(item.model_dump(mode="json") for item in evidence)
+
+        # 5) Independent deterministic verification from fresh, controller-constructed requests.
+        target = ZAP_TARGETS[job.target_ref]
+        plan = zap_verifier.probe_plan(target, result.id)
+        if not plan:
+            # Negative-control inventory entries have no verifiable property: never a PASS.
+            self._zap_terminal(result, "NEGATIVE_CONTROL_NOT_VERIFIABLE", ScanStatus.INCOMPLETE)
+            return
+        self._audit(
+            result,
+            "ZAP_VERIFICATION_STARTED",
+            {
+                "verifier_version": zap_verifier.VERIFIER_VERSION,
+                "requests": [
+                    {"name": name, "method": "GET", "path": path} for name, _, path in plan
+                ],
+                "independent": True,
+                "zap_inputs_used": [],
+            },
+        )
+        for _ in plan:
+            budget.request()
+        facts = await zap_verifier.collect(
+            target=target,
+            scan_id=result.id,
+            safety=self.safety,
+            transport=self.transport,
+            timeout_seconds=self.settings.request_timeout_seconds,
+        )
+        verdict = zap_verifier.evaluate(facts)
+        result.verifier_evidence = [f.model_dump(mode="json") for f in facts]
+        result.engine_evidence.extend(
+            item.model_dump(mode="json")
+            for item in self._zap_verifier_evidence(result, job, execution.execution_id, facts)
+        )
+        result.verification = Verification(
+            status=verdict.status,
+            summary=verdict.summary,
+            evidence_names=verdict.evidence_names,
+        )
+
+        finding: Finding | None = None
+        capability = get_engine_capability(job.capability_id)
+        for normalized in correlated:
+            if normalized.lifecycle_state is not FindingLifecycleState.AEGIS_CORRELATED:
+                result.normalized_findings.append(normalized.model_dump(mode="json"))
+                continue
+            if verdict.status == "CONFIRMED" and finding is None and capability:
+                finding = Finding(
+                    id=f"finding-{result.id}-zap-header",
+                    title="Anti-MIME-sniffing header missing on a synthetic API route",
+                    severity=capability.verified_severity,
+                    category="Security misconfiguration: missing X-Content-Type-Options header",
+                    confidence="CONFIRMED",
+                    description=(
+                        "An anonymous read-only GET of the synthetic catalog route returned JSON "
+                        "without X-Content-Type-Options: nosniff. Confirmed by the independent "
+                        "Aegis verifier from fresh evidence, not by ZAP."
+                    ),
+                    remediation="Set X-Content-Type-Options: nosniff on every API response.",
+                    evidence_names=list(verdict.evidence_names),
+                )
+            conclusion = VerifierConclusion(
+                status=verdict.status,
+                summary=verdict.summary,
+                aegis_finding_id=finding.id if finding and verdict.status == "CONFIRMED" else None,
+                evidence_ids=[f"{result.id}:{name}" for name in verdict.evidence_names],
+            )
+            normalized = record_verifier_conclusion(
+                normalized,
+                conclusion,
+                inconclusive_state=FindingLifecycleState.REVIEW_REQUIRED,
+            )
+            result.normalized_findings.append(normalized.model_dump(mode="json"))
+        if finding is not None:
+            result.findings = [finding]
+
+        lifecycle = [str(n.get("lifecycle_state")) for n in result.normalized_findings]
+        self._audit(
+            result,
+            "ZAP_VERIFICATION_COMPLETED",
+            {
+                "verifier_version": zap_verifier.VERIFIER_VERSION,
+                "status": verdict.status,
+                "verification_status": verdict.status,
+                "evidence_ids": [f"{result.id}:{name}" for name in verdict.evidence_names],
+                "lifecycle_states": lifecycle,
+                "finding_id": finding.id if finding else None,
+                "tool_reported": len(correlated),
+            },
+        )
+
+        # 6) Terminal decision. Zero ZAP alerts is never PASS on its own.
+        in_scope = [
+            n for n in correlated if n.lifecycle_state is FindingLifecycleState.AEGIS_CORRELATED
+        ]
+        if len(in_scope) != len(correlated):
+            self._zap_terminal(result, "UNCORRELATED_TOOL_ALERT", ScanStatus.REVIEW)
+        elif in_scope and finding is not None:
+            self._zap_terminal(result, "DETERMINISTIC_CONFIRMED", ScanStatus.FAIL)
+        elif in_scope and verdict.status == "PASS":
+            self._zap_terminal(result, "TOOL_FINDING_REJECTED_BY_VERIFIER", ScanStatus.REVIEW)
+        elif in_scope:
+            self._zap_terminal(result, "VERIFICATION_INCONCLUSIVE", ScanStatus.REVIEW)
+        elif verdict.status == "PASS" and response.coverage_complete and not response.alerts:
+            self._zap_terminal(result, "COVERAGE_COMPLETE", ScanStatus.PASS)
+        elif verdict.status == "CONFIRMED":
+            self._zap_terminal(result, "ENGINE_VERIFIER_DISAGREEMENT", ScanStatus.REVIEW)
+        else:
+            self._zap_terminal(result, "VERIFICATION_INCONCLUSIVE", ScanStatus.INCOMPLETE)
+
+    @staticmethod
+    def _projection_event(job: ZapEngineJob, projection: ProjectionResult) -> dict[str, Any]:
+        return {
+            "target_ref": job.target_ref,
+            "projection_ref": job.projection_ref,
+            "projection_version": projection.projection_version,
+            "projection_digest": projection.digest,
+            "allowlist_digest": projection.allowlist_digest,
+            "source_sha256": projection.source_sha256,
+            "operation_count": projection.operation_count,
+            "path_count": projection.path_count,
+            "removed_operations": projection.removed_operations,
+            "stripped_fields": list(projection.stripped_categories),
+            "redaction_status": projection.redaction_status,
+            "methods": sorted({op.method for op in projection.operations}),
+            "origin_source": "CONTROLLER_INVENTORY",
+        }
+
+    def _emit_zap_stages(
+        self, result: ScanResult, job: ZapEngineJob, response: ZapRunResponse | None
+    ) -> None:
+        """Record the fixed-plan stages ZAP reached, as reported by the runner from ZAP's own
+        output. Emitted after the synchronous RPC returns; each event names its source."""
+
+        if response is None or response.status == "REJECTED":
+            return
+        stages = response.stages
+        common = {"job_id": job.job_id, "source": "RUNNER_DERIVED_STAGE_FACT"}
+        if response.plan.validated:
+            self._audit(
+                result,
+                "ZAP_PLAN_VALIDATED",
+                {
+                    **common,
+                    "plan_digest": response.plan.plan_digest,
+                    "job_types": list(response.plan.job_types),
+                    "rule_ids": list(response.plan.admitted_rule_ids),
+                    "validated": True,
+                },
+            )
+        if stages.import_started:
+            self._audit(
+                result,
+                "ZAP_OPENAPI_IMPORT_STARTED",
+                {**common, "projection_digest": job.projection_digest, "api_source": "LOCAL_FILE"},
+            )
+        if stages.import_completed:
+            self._audit(
+                result,
+                "ZAP_OPENAPI_IMPORT_COMPLETED",
+                {
+                    **common,
+                    "urls_added": stages.urls_added,
+                    "expected_requests": job.operation_count,
+                    "import_test_passed": stages.urls_test_passed,
+                    "observed_requests": response.traffic.received if response.traffic else None,
+                },
+            )
+        if stages.pscan_wait_started:
+            self._audit(
+                result,
+                "ZAP_PASSIVE_SCAN_WAIT_STARTED",
+                {**common, "rules_set": [list(r) for r in stages.rules_set]},
+            )
+        if stages.pscan_drained:
+            self._audit(
+                result,
+                "ZAP_PASSIVE_SCAN_DRAINED",
+                {**common, "drained": True, "max_duration": "UNLIMITED_UNTIL_EMPTY"},
+            )
+
+    def _record_zap_failure(
+        self,
+        result: ScanResult,
+        job: ZapEngineJob,
+        outcome: ZapAdapterResult,
+        stage: str,
+    ) -> None:
+        """A failed/rejected/incomplete execution is recorded and ends INCOMPLETE — never PASS."""
+
+        result.zap_provenance = self._zap_provenance(job, outcome)
+        result.engine_executions.append(outcome.execution.model_dump(mode="json"))
+        error = outcome.execution.error
+        response = outcome.response
+        traffic = response.traffic if response else None
+        self._audit(
+            result,
+            "ZAP_EXECUTION_FAILED",
+            {
+                "stage": stage,
+                "job_id": job.job_id,
+                "execution_id": outcome.execution.execution_id,
+                "code": error.code.value if error else "UNKNOWN",
+                "detail": error.detail if error else "",
+                "error_code": (
+                    response.error_code.value if response and response.error_code else None
+                ),
+                "exit_class": response.exit_class if response else "NOT_RUN",
+                "exit_code": response.exit_code if response else None,
+                "expected_requests": job.operation_count,
+                "observed_requests": traffic.received if traffic else None,
+                "forwarded": traffic.forwarded if traffic else None,
+                "blocked": traffic.blocked if traffic else None,
+                "blocked_reasons": [list(r) for r in traffic.blocked_reasons] if traffic else [],
+                "redirects": traffic.redirects if traffic else None,
+                "session_destroyed": bool(response and response.session_destroyed),
+                "runner_contacted_for_execution": outcome.request is not None,
+            },
+        )
+        code = (error.detail or error.code.value) if error else "UNKNOWN"
+        self._zap_terminal(
+            result, f"ZAP_EXECUTION_INCOMPLETE_{code}"[:120], ScanStatus.INCOMPLETE
+        )
+
+    def _zap_observations(
+        self,
+        result: ScanResult,
+        job: ZapEngineJob,
+        outcome: ZapAdapterResult,
+    ) -> tuple[EngineExecution, list[NormalizedEvidence], list[Any]]:
+        """Turn parsed runner alert records into kernel observations, provenance-complete evidence
+        and correlated normalized findings (TOOL_REPORTED -> AEGIS_CORRELATED or REJECTED)."""
+
+        response = outcome.response
+        assert response is not None
+        target = ZAP_TARGETS[job.target_ref]
+        by_path = {op.path: op for op in job.operations}
+        scenario = next(
+            (op for op in job.operations if op.operation_id == target.scenario_operation_id), None
+        )
+        observations: list[EngineObservation] = []
+        reported: list[EngineReportedFinding] = []
+        evidence: list[NormalizedEvidence] = []
+        rule_names = {r.plugin_id: r.name for r in load_zap_manifest().passive_rules}
+        record_by_key: dict[str, Any] = {}
+        for record in response.alerts:
+            name = f"zap-{record.plugin_id}-{record.record_digest[:12]}"
+            observations.append(
+                EngineObservation(
+                    request_name=name,
+                    method=record.method,
+                    path=record.path,
+                    credential_profile="anonymous",
+                    status_code=None,  # the report does not carry it; the guard counted 2xx
+                    duration_ms=0,
+                    content_digest=record.record_digest,
+                    has_error=False,
+                )
+            )
+            evidence.append(
+                NormalizedEvidence(
+                    evidence_id=f"{result.id}:{name}",
+                    engine=SecurityEngine.ZAP,
+                    adapter_version=job.adapter_version,
+                    engine_execution_id=outcome.execution.execution_id,
+                    run_id=job.run_id,
+                    scan_id=result.id,
+                    timestamp=response.completed_at,
+                    capability_id=job.capability_id,
+                    target_ref=job.target_ref,
+                    request_refs=[name],
+                    artifact_refs=[f"{outcome.execution.execution_id}:{record.plugin_id}"],
+                    redaction_status="REDACTED",
+                    content_digest=record.record_digest,
+                    parser_version=ZAP_PARSER_VERSION,
+                    source_class=EvidenceSourceClass.ENGINE_OBSERVATION,
+                    retention_class=RetentionClass.STANDARD,
+                )
+            )
+            operation = by_path.get(record.path)
+            report_key = (
+                f"{job.capability_id}:{record.plugin_id}:{job.target_ref}:"
+                f"{operation.operation_id if operation else 'unknown'}"
+            )
+            record_by_key.setdefault(report_key, record)
+            reported.append(
+                EngineReportedFinding(
+                    report_key=report_key,
+                    engine=SecurityEngine.ZAP,
+                    capability_id=job.capability_id,
+                    claimed_category="Missing anti-MIME-sniffing header (tool claim)",
+                    target_operation_id=operation.operation_id if operation else "unknown",
+                    principal_profile="anonymous",
+                    observation_names=[name],
+                    signal=(
+                        f"Passive rule {record.plugin_id} flagged {record.method} {record.path} "
+                        "(unverified raw tool signal)."
+                    )[:200],
+                )
+            )
+        execution = outcome.execution.model_copy(
+            update={"observations": observations, "reported_findings": reported}
+        )
+        correlated = []
+        for item in dedupe_reported(reported):
+            plugin_id = int(item.report_key.split(":")[1])
+            record = record_by_key[item.report_key]
+            in_scope = (
+                item.capability_id == job.capability_id
+                and plugin_id in job.rule_ids
+                and scenario is not None
+                and item.target_operation_id == scenario.operation_id
+                and record.path == scenario.path
+            )
+            self._audit(
+                result,
+                "ZAP_ALERT_REPORTED",
+                {
+                    "engine": item.engine.value,
+                    "capability": item.capability_id,
+                    "report_key": item.report_key,
+                    "plugin_id": plugin_id,
+                    "rule_name": rule_names.get(plugin_id),
+                    "operation_id": item.target_operation_id,
+                    "method": record.method,
+                    "claimed_risk": record.claimed_risk,
+                    "claimed_confidence": record.claimed_confidence,
+                    "claim_trust": "UNTRUSTED_TOOL_METADATA",
+                    "provenance": "TOOL_REPORTED",
+                    "lifecycle_state": FindingLifecycleState.TOOL_REPORTED.value,
+                },
+            )
+            normalized = correlate_reported_finding(
+                item,
+                job,
+                ai_hypothesis="None - operator-requested capability; no AI involvement.",
+                in_scope=in_scope,
+            )
+            self._audit(
+                result,
+                "ZAP_ALERT_CORRELATED",
+                {
+                    "normalized_id": normalized.normalized_id,
+                    "lifecycle_state": normalized.lifecycle_state.value,
+                    "capability": normalized.capability_id,
+                    "target_ref": job.target_ref,
+                    "operation_id": item.target_operation_id,
+                    "correlation": "IN_SCOPE" if in_scope else "OUT_OF_SCOPE",
+                },
+            )
+            correlated.append(normalized)
+        return execution, evidence, correlated
+
+    def _zap_verifier_evidence(
+        self,
+        result: ScanResult,
+        job: ZapEngineJob,
+        execution_id: str,
+        facts: list[zap_verifier.ZapProbeFacts],
+    ) -> list[NormalizedEvidence]:
+        items = []
+        for fact in facts:
+            digest = fact.body_sha256 or hashlib.sha256(
+                json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
+            ).hexdigest()
+            items.append(
+                NormalizedEvidence(
+                    evidence_id=f"{result.id}:{fact.name}",
+                    engine=SecurityEngine.ZAP,
+                    adapter_version=job.adapter_version,
+                    engine_execution_id=execution_id,
+                    run_id=job.run_id,
+                    scan_id=result.id,
+                    timestamp=datetime.now(UTC),
+                    capability_id=job.capability_id,
+                    target_ref=job.target_ref,
+                    request_refs=[fact.name],
+                    artifact_refs=[f"{result.id}:{fact.name}"],
+                    redaction_status="REDACTED",
+                    content_digest=digest,
+                    parser_version=zap_verifier.VERIFIER_VERSION,
                     source_class=EvidenceSourceClass.VERIFIER_DERIVED,
                     retention_class=RetentionClass.STANDARD,
                 )

@@ -1,16 +1,47 @@
 # Canonical project state
 
 Updated: 2026-09-19 (Europe/Istanbul)
-Phase: **1.2 Controlled Nuclei Integration. Earlier GO phases remain intact. Nuclei v3.11.1 is now
-operational only through `NUCLEI_LAB_SAFE_HTTP_V1`: one official signed, byte-pinned `git-config`
-template; one anonymous read-only synthetic-lab capability; strict typed controller/runner RPC; an
-isolated non-root/read-only/no-shell runner with no public egress, planner/model access, credentials,
-host mount or published port; bounded fail-closed JSONL parsing; TOOL_REPORTED correlation; and a
-fresh deterministic Aegis verifier as the only automated finding/PASS authority. Real binary
-acceptance is vulnerable 5/5 and patched-negative 5/5; every negative matrix is 3/3 with zero
-unauthorized executions/traffic. ZAP and Burp remain disabled. GO only for this bounded synthetic
-profile — no production readiness or broad vulnerability coverage is claimed.**
-Version: 1.2.0
+Phase: **1.3 Controlled ZAP Passive OpenAPI Integration. Earlier GO phases remain intact. ZAP 2.17.0
+is operational only through `ZAP_LAB_PASSIVE_OPENAPI_V1`: a digest-pinned image with exactly eight
+verified add-ons, one admitted release passive rule (10021), a controller-projected read-only
+OpenAPI file (GET only, from controller-owned inventory), one fixed Automation Framework plan, an
+isolated non-root/read-only/no-shell runner whose only network path is an independent scope guard,
+bounded fail-closed report parsing, TOOL_REPORTED correlation and a fresh deterministic Aegis
+verifier as the only finding/PASS authority. Real pinned-image acceptance is vulnerable 5/5 and
+patched 5/5; every negative control fails closed with zero unauthorized target traffic. No active
+scanning. Burp DAST remains disabled. GO only for this bounded synthetic passive profile — no
+production readiness, authenticated testing or broad vulnerability coverage is claimed.**
+Version: 1.3.0
+
+## Phase 1.3 — Controlled ZAP Passive OpenAPI Integration
+
+Full detail: [Phase 1.3](docs/phase-1.3-zap-passive-openapi.md). Also:
+[isolation](docs/zap-runner-isolation.md); [projection](docs/zap-openapi-projection.md);
+[supply chain and rule manifest](docs/zap-passive-rule-manifest.md);
+[evidence and verification](docs/zap-evidence-and-verification.md);
+[Phase 1.4 prerequisites](docs/phase-1.4-zap-active-staging-prerequisites.md).
+
+Pins: ZAP `2.17.0`, image index `sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef`
+(arm64 `sha256:05cbf4cab5d2fdaef55b0cd0b586f22d0ce4f75e0995f3cea2db23afbbdfd2f8`, amd64
+`sha256:71db37cd5b75663b35758d10aaec05bf6fbac23f5020e3046c70e628a5f84efa`); jar
+`015dda4709b5ef79736086bb41e8e2a4e95b04cf6625f14d6bcc02b197c99c0c`; OpenJDK
+`17.0.20+8-1-deb12u1-Debian`; add-ons automation 0.60.0, callhome 0.23.0, commonlib 1.43.0, network
+0.29.0, openapi 57.0.0, pscan 0.6.0, pscanrules 75.0.0, reports 0.46.0 (inventory digest
+`56c67a0d4ddf3c541de9e9fef411e51b8503aeb5fcf731e759215fee9ceca55c`); passive rule 10021; manifest
+SHA-256 `94933d15c53dea51591573b4959f4f4655fbc54586b43a5da03427a78dcf2ba3`; vulnerable projection
+`ca9a56e8b29ac37150dbd448b28aa2e535299205981c068dec550d3af13d1389`.
+
+Acceptance (arm64): Ruff PASS; strict mypy PASS across 69 source files; **721 offline tests PASS**;
+frontend typecheck/lint PASS, **8 frontend tests PASS**, Vite build PASS, npm audit 0; real pinned
+ZAP vulnerable 5/5 and patched complete-coverage PASS 5/5 (2 expected = 2 observed requests each);
+state-changing, alternate-server and external-`$ref` projections 3/3 each with zero runner calls;
+injected jobs/options/remote definitions all rejected with zero executions; redirect, extra-request
+and timeout runtime controls 3/3 each fail closed; parser controls fail closed in the runner image;
+exactly 19 authorized executions, 6 guard refusals, **0 unauthorized target requests** by the target's
+own access log. Nuclei Phase 1.2 regression GO; AEGIS_NATIVE regression 3/3 (heuristic planner);
+Burp DAST DISABLED; topology, hardening, secret and visual gates PASS; all 136 prior artifacts
+byte-identical. A first live run exposed (via host sleep) a runner response-bound bug that was
+fixed and re-run. The rule-manifest review is AI-assisted and not operator-countersigned.
 
 ## Phase 1.2 — Controlled Nuclei Integration
 

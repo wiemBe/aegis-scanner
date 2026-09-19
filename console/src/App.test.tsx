@@ -90,3 +90,45 @@ describe('Operator Console', () => {
     await waitFor(() => expect(screen.getByText('The system proves.')).toBeInTheDocument())
   })
 })
+
+describe('Operator Console — Phase 1.3 ZAP passive integration', () => {
+  const zapRun = { ...run, id: 'scan-zzzzzzzzzzzz', engine: 'ZAP', adapter_version: 'zap-adapter/1.3.0', target_name: 'Synthetic ZAP passive header scenario (vulnerable)', finding_count: 1, zap: { profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', profile_version: '1.3.0', engine_version: '2.17.0', image_index_digest: 'sha256:781a2bdaea47', projection_digest: 'd'.repeat(64), operation_count: 2, imported_urls: 2, expected_requests: 2, observed_requests: 2, blocked_requests: 0, passive_queue_drained: true, plan_validated: true, tool_reported_alerts: 1, correlated_alerts: 1, verifier_confirmed: 1, coverage_state: 'COMPLETE', exit_class: 'OK', error_code: null, rules: [{ plugin_id: 10021, name: 'X-Content-Type-Options Header Missing' }] } }
+  const zapEvent = { ...event, event_id: 'evt-000000000009', scan_id: zapRun.id, run_id: zapRun.id, actor_type: 'TOOL_RUNNER', event_type: 'ZAP_ALERT_REPORTED', stage: 'TOOL_FINDING', engine: 'ZAP', summary: 'ZAP reported an untrusted passive alert (TOOL_REPORTED only).' }
+  const alertCard = { artifact_type: 'ZAP_ALERT_CARD', artifact_id: `${zapRun.id}:zap-alert-0`, scan_id: zapRun.id, method: 'GET', normalized_route: '/lab/zap/vulnerable/catalog/synthetic-catalog-1', principal_profile_name: 'anonymous', object_reference: 'synthetic-zap-vulnerable', response_status: null, response_size: null, response_characteristics: { bounded: true, body_redacted: true }, timestamp: zapRun.completed_at, request_id: 'e'.repeat(24), evidence_hash: 'f'.repeat(64), control_probe_role: 'TOOL ALERT · UNTRUSTED', provenance: 'TOOL_REPORTED', plugin_id: 10021, rule_name: hostile, claimed_risk: 'high', claimed_confidence: 'medium' }
+  const probeCard = { ...alertCard, artifact_type: 'VERIFIER_PROBE_CARD', artifact_id: `${zapRun.id}:verify-header`, provenance: 'VERIFIER', control_probe_role: 'VERIFIER PROBE', response_status: 200, property_observed: 'HEADER_ABSENT', rule_name: undefined }
+  const zapEngine = { engine: 'ZAP', name: 'ZAP — lab passive OpenAPI (pinned, projected, read-only)', adapter_version: 'zap-adapter/1.3.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'Isolated runner attested', profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', environment: 'SYNTHETIC_LAB', isolation_boundary: 'isolated runner + scope guard', capabilities: [], kernel_version: 1, provenance: { pinned_engine_version: '2.17.0', pinned_image_index_digest: 'sha256:781a2bdaea47324e7bab583e2263f21d', add_on_inventory_digest: 'a'.repeat(64), attested_add_on_inventory_digest: 'a'.repeat(64), profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', profile_version: '1.3.0', approved_rule_count: 1, guard_version: 'zap-scope-guard/1.3.0', guard_reachable: true, last_health_check: zapRun.completed_at, latest_execution: { scan_id: zapRun.id, status: 'PASS', projection_digest: 'd'.repeat(64), operation_count: 2, imported_urls: 2, expected_requests: 2, observed_requests: 2, passive_queue_drained: true, tool_reported: 0, correlated: 0, verifier_confirmed: 0, coverage_state: 'COMPLETE' }, responsibility: 'ZAP passively analyzes responses from controller-approved read-only API operations. ZAP alerts are independently correlated and verified by Aegis.' } }
+
+  const stub = () => vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input)
+    const payload = path.includes('/runs/') ? { run: zapRun, events: [zapEvent], evidence: [alertCard, probeCard], lifecycle: [], execution_policy: { engine: 'ZAP', adapter_version: 'zap-adapter/1.3.0', engine_kernel_version: 1, execution_policy_version: 1, jobs_created: [], jobs_rejected: [] } } : path.includes('/runs') ? { items: [zapRun] } : path.includes('/audit') ? { items: [zapEvent] } : path.includes('/findings') ? { items: [] } : path.includes('/engines') ? { items: [zapEngine] } : path.includes('/integrations') ? { items: [{ name: 'ZAP', engine: 'ZAP', state: 'CONNECTED' }] } : path.includes('/health') ? { checked_at: run.completed_at } : { enabled: false }
+    return { ok: true, json: async () => payload } as Response
+  }))
+
+  it('shows ZAP pins, passive coverage and the responsibility boundary', async () => {
+    stub()
+    render(<App />)
+    expect(await screen.findByText('Passive analysis of approved read-only operations')).toBeInTheDocument()
+    expect(screen.getByText('COVERAGE COMPLETE')).toBeInTheDocument()
+    expect(screen.getByText('OPENAPI PROJECTION')).toBeInTheDocument()
+    expect(screen.getByText('PASSIVE SCAN')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Integrations/ }))
+    expect(await screen.findByText("ZAP 2.17.0 · sha256:781a2bdaea47324…")).toBeInTheDocument()
+    expect(screen.getByText('ZAP_LAB_PASSIVE_OPENAPI_V1 · v1.3.0')).toBeInTheDocument()
+    expect(screen.getByText(/2 observed \/ 2 expected · queue drained YES/)).toBeInTheDocument()
+    expect(screen.getAllByText(/ZAP alerts are independently correlated and verified by Aegis/).length).toBeGreaterThan(0)
+    expect(screen.queryByText(/active scan(ning)? (is )?enabled/i)).toBeNull()
+  })
+
+  it('renders untrusted ZAP alert content as text, never markup', async () => {
+    stub()
+    const { container } = render(<App />)
+    await screen.findByText('Passive analysis of approved read-only operations')
+    fireEvent.click(screen.getByRole('button', { name: /Runs/ }))
+    fireEvent.click(await screen.findByText(/scan-zzzzzzzzzzzz/))
+    expect(await screen.findByText(`10021 · ${hostile}`)).toBeInTheDocument()
+    expect(screen.getByText('risk high · confidence medium')).toBeInTheDocument()
+    expect(screen.getByText('HEADER_ABSENT')).toBeInTheDocument()
+    expect(screen.getByText('ZAP_ALERT_CARD')).toBeInTheDocument()
+    expect(container.querySelector('img')).toBeNull()
+  })
+})

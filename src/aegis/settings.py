@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     nuclei_runner_url: str = "http://nuclei-runner:8090"
     nuclei_rpc_timeout_seconds: float = Field(default=60.0, gt=0, le=180)
 
+    # --- Phase 1.3 ZAP passive OpenAPI integration (operator-enabled; OFF by default) ------------
+    # Enabling only lets the controller talk to the isolated zap-runner over the internal
+    # zap-rpc network. The runner must still attest READY (pinned ZAP image, jar, JVM and add-on
+    # inventory; silent mode; attested scope guard) before any job executes. No ZAP API key,
+    # credential or remote OpenAPI source exists anywhere.
+    zap_enabled: bool = False
+    zap_runner_url: str = "http://zap-runner:8092"
+    zap_rpc_timeout_seconds: float = Field(default=150.0, gt=0, le=330)
+
     @property
     def allowed_hosts(self) -> frozenset[str]:
         return frozenset(host.strip().lower() for host in self.allowed_target_hosts.split(","))

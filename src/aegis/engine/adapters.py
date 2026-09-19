@@ -356,14 +356,16 @@ def build_dispatcher(
     safety: SafetyController,
     *,
     nuclei: SecurityEngineAdapter | None = None,
+    zap: SecurityEngineAdapter | None = None,
 ) -> EngineDispatcher:
-    """Wire the adapter fleet: the enabled native adapter, the Phase 1.2 Nuclei adapter when the
-    operator enabled it (otherwise its fail-closed skeleton), and the ZAP/Burp skeletons."""
+    """Wire the adapter fleet: the enabled native adapter, the Phase 1.2 Nuclei and Phase 1.3 ZAP
+    adapters when the operator enabled them (otherwise their fail-closed skeletons), and the Burp
+    skeleton."""
 
     adapters: dict[SecurityEngine, SecurityEngineAdapter] = {
         SecurityEngine.AEGIS_NATIVE: AegisNativeAdapter(executor, safety),
         SecurityEngine.NUCLEI: nuclei or DisabledEngineAdapter(SecurityEngine.NUCLEI),
-        SecurityEngine.ZAP: DisabledEngineAdapter(SecurityEngine.ZAP),
+        SecurityEngine.ZAP: zap or DisabledEngineAdapter(SecurityEngine.ZAP),
         SecurityEngine.BURP_DAST: DisabledEngineAdapter(SecurityEngine.BURP_DAST),
     }
     return EngineDispatcher(adapters)

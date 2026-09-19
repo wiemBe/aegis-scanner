@@ -94,3 +94,16 @@ New console projections: `/api/console/engines` (four-state readiness), run-deta
 See [Phase 1.1](phase-1.1-security-tool-kernel.md), [adapter contract](engine-adapter-contract.md),
 [schema](normalized-finding-evidence-schema.md) and
 [threat model](threat-model-tool-integrations.md).
+
+## Phase 1.3 ZAP additions
+
+Additive only. Run projections carry a `zap` summary (pins, projection digest, operation/import and
+expected/observed request counts, passive-queue completion, tool-reported/correlated/verifier counts,
+coverage state). `/api/console/engines` adds ZAP readiness provenance (pinned version and image
+digest, add-on inventory digest, profile, approved rule count, scope-guard state, latest execution).
+Mission Control selects a ZAP workflow for ZAP runs and shows a coverage panel; Run Replay adds ZAP
+jump targets and comparison; evidence adds `ZAP_EXECUTION_CARD` and `ZAP_ALERT_CARD` (untrusted) next
+to `VERIFIER_PROBE_CARD`; the Management view states: “ZAP passively analyzes responses from
+controller-approved read-only API operations. ZAP alerts are independently correlated and verified by
+Aegis.” All alert content renders as React text. See
+[ZAP evidence and verification](zap-evidence-and-verification.md).

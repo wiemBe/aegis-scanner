@@ -100,6 +100,25 @@ _ACTORS: dict[str, ActorType] = {
     "NUCLEI_FINDING_CORRELATED": ActorType.CONTROLLER,
     "NUCLEI_VERIFICATION_STARTED": ActorType.VERIFIER,
     "NUCLEI_VERIFICATION_COMPLETED": ActorType.VERIFIER,
+    # Phase 1.3 ZAP. The controller projects, authorizes and correlates; runner boot/attestation is
+    # lifecycle infrastructure (SYSTEM); ZAP's execution and its untrusted alerts belong to the tool
+    # runner; only the verifier reaches a security conclusion. None is the AI.
+    "ZAP_JOB_ADMITTED": ActorType.CONTROLLER,
+    "ZAP_JOB_REJECTED": ActorType.CONTROLLER,
+    "ZAP_PROJECTION_CREATED": ActorType.CONTROLLER,
+    "ZAP_PROJECTION_REJECTED": ActorType.CONTROLLER,
+    "ZAP_RUNNER_STARTED": ActorType.SYSTEM,
+    "ZAP_PLAN_VALIDATED": ActorType.TOOL_RUNNER,
+    "ZAP_OPENAPI_IMPORT_STARTED": ActorType.TOOL_RUNNER,
+    "ZAP_OPENAPI_IMPORT_COMPLETED": ActorType.TOOL_RUNNER,
+    "ZAP_PASSIVE_SCAN_WAIT_STARTED": ActorType.TOOL_RUNNER,
+    "ZAP_PASSIVE_SCAN_DRAINED": ActorType.TOOL_RUNNER,
+    "ZAP_EXECUTION_COMPLETED": ActorType.TOOL_RUNNER,
+    "ZAP_EXECUTION_FAILED": ActorType.TOOL_RUNNER,
+    "ZAP_ALERT_REPORTED": ActorType.TOOL_RUNNER,
+    "ZAP_ALERT_CORRELATED": ActorType.CONTROLLER,
+    "ZAP_VERIFICATION_STARTED": ActorType.VERIFIER,
+    "ZAP_VERIFICATION_COMPLETED": ActorType.VERIFIER,
 }
 
 _STAGES: dict[str, str] = {
@@ -147,6 +166,22 @@ _STAGES: dict[str, str] = {
     "NUCLEI_FINDING_CORRELATED": "CORRELATION",
     "NUCLEI_VERIFICATION_STARTED": "VERIFICATION",
     "NUCLEI_VERIFICATION_COMPLETED": "VERIFICATION",
+    "ZAP_JOB_ADMITTED": "ENGINE_JOB",
+    "ZAP_JOB_REJECTED": "EXECUTION_POLICY",
+    "ZAP_PROJECTION_CREATED": "OPENAPI_PROJECTION",
+    "ZAP_PROJECTION_REJECTED": "OPENAPI_PROJECTION",
+    "ZAP_RUNNER_STARTED": "RUNNER_ATTESTATION",
+    "ZAP_PLAN_VALIDATED": "PLAN_VALIDATION",
+    "ZAP_OPENAPI_IMPORT_STARTED": "OPENAPI_IMPORT",
+    "ZAP_OPENAPI_IMPORT_COMPLETED": "OPENAPI_IMPORT",
+    "ZAP_PASSIVE_SCAN_WAIT_STARTED": "PASSIVE_SCAN",
+    "ZAP_PASSIVE_SCAN_DRAINED": "PASSIVE_SCAN",
+    "ZAP_EXECUTION_COMPLETED": "EXECUTION",
+    "ZAP_EXECUTION_FAILED": "FAILED",
+    "ZAP_ALERT_REPORTED": "TOOL_FINDING",
+    "ZAP_ALERT_CORRELATED": "CORRELATION",
+    "ZAP_VERIFICATION_STARTED": "VERIFICATION",
+    "ZAP_VERIFICATION_COMPLETED": "VERIFICATION",
 }
 
 _SUMMARIES: dict[str, str] = {
@@ -195,6 +230,22 @@ _SUMMARIES: dict[str, str] = {
     "NUCLEI_FINDING_CORRELATED": "Controller correlated the tool result to target and capability.",
     "NUCLEI_VERIFICATION_STARTED": "Independent verifier issued fresh read-only requests.",
     "NUCLEI_VERIFICATION_COMPLETED": "Independent verifier reached its authoritative conclusion.",
+    "ZAP_JOB_ADMITTED": "Controller admitted a typed ZAP passive job for an approved capability.",
+    "ZAP_JOB_REJECTED": "Execution policy rejected the ZAP job before any runner call.",
+    "ZAP_PROJECTION_CREATED": "Controller projected a read-only OpenAPI surface from inventory.",
+    "ZAP_PROJECTION_REJECTED": "Controller refused the OpenAPI source; no runner call or traffic.",
+    "ZAP_RUNNER_STARTED": "Isolated zap-runner attested its pinned engine, add-ons and guard.",
+    "ZAP_PLAN_VALIDATED": "Runner validated the fixed controller-owned Automation Framework plan.",
+    "ZAP_OPENAPI_IMPORT_STARTED": "ZAP began importing the local projected OpenAPI file.",
+    "ZAP_OPENAPI_IMPORT_COMPLETED": "ZAP imported the approved read-only operations.",
+    "ZAP_PASSIVE_SCAN_WAIT_STARTED": "ZAP began waiting for the passive scan queue.",
+    "ZAP_PASSIVE_SCAN_DRAINED": "ZAP passive scan queue fully drained.",
+    "ZAP_EXECUTION_COMPLETED": "Isolated runner completed the bounded passive ZAP execution.",
+    "ZAP_EXECUTION_FAILED": "ZAP execution failed closed; no PASS or finding is possible.",
+    "ZAP_ALERT_REPORTED": "ZAP reported an untrusted passive alert (TOOL_REPORTED only).",
+    "ZAP_ALERT_CORRELATED": "Controller correlated the alert to the approved operation.",
+    "ZAP_VERIFICATION_STARTED": "Independent verifier issued fresh read-only requests.",
+    "ZAP_VERIFICATION_COMPLETED": "Independent verifier reached its authoritative conclusion.",
 }
 
 _DENIED_KEYS = re.compile(
@@ -316,6 +367,50 @@ _SAFE_KEYS = {
     "runner_contacted",
     "runner_contacted_for_execution",
     "target_requests",
+    # Phase 1.3 ZAP metadata (ids, digests, versions, counts, codes and labels only).
+    "projection_ref",
+    "projection_version",
+    "projection_digest",
+    "projection_code",
+    "allowlist_digest",
+    "source_sha256",
+    "operation_count",
+    "path_count",
+    "removed_operations",
+    "methods",
+    "origin_source",
+    "add_on_inventory_digest",
+    "addonlist_verified",
+    "rule_ids",
+    "zap_version",
+    "jar_sha256",
+    "java_version",
+    "guard_version",
+    "guard_reachable",
+    "plan_digest",
+    "job_types",
+    "source",
+    "api_source",
+    "urls_added",
+    "expected_requests",
+    "observed_requests",
+    "import_test_passed",
+    "rules_set",
+    "drained",
+    "max_duration",
+    "forwarded",
+    "blocked",
+    "blocked_reasons",
+    "redirects",
+    "alerts",
+    "report_sha256",
+    "session_destroyed",
+    "plugin_id",
+    "rule_name",
+    "claimed_risk",
+    "claimed_confidence",
+    "claim_trust",
+    "zap_inputs_used",
 }
 
 
@@ -349,9 +444,9 @@ def safe_metadata(details: Any) -> dict[str, Any]:
 def _event_status(event: str, details: dict[str, Any]) -> str:
     if event in {"SAFETY_REJECTED", "SCAN_FAILED", "SCAN_CANCELLED"}:
         return "REJECTED" if event == "SAFETY_REJECTED" else "FAILED"
-    if event == "NUCLEI_JOB_REJECTED":
+    if event in {"NUCLEI_JOB_REJECTED", "ZAP_JOB_REJECTED", "ZAP_PROJECTION_REJECTED"}:
         return "REJECTED"
-    if event == "NUCLEI_EXECUTION_FAILED":
+    if event in {"NUCLEI_EXECUTION_FAILED", "ZAP_EXECUTION_FAILED"}:
         return "FAILED"
     if event in {"BUDGET_EXHAUSTED", "PLANNER_REJECTED"}:
         return "REVIEW"
@@ -416,6 +511,8 @@ def project_event(
         engine=(
             Engine.NUCLEI
             if event.startswith("NUCLEI_") or (scan is not None and scan.engine == "NUCLEI")
+            else Engine.ZAP
+            if event.startswith("ZAP_") or (scan is not None and scan.engine == "ZAP")
             else Engine.AEGIS_NATIVE
         ),
         stage=_STAGES.get(event, "REVIEW"),
@@ -439,6 +536,7 @@ def scan_projection(
 
     model_digest = scan.provider_metadata.model_digest if scan.provider_metadata else None
     nuclei = scan.engine == Engine.NUCLEI.value
+    zap = scan.engine == Engine.ZAP.value
     return {
         "id": scan.id,
         "status": scan.status.value,
@@ -446,6 +544,8 @@ def scan_projection(
         "scope": (
             "Synthetic lab / SCM metadata route (read-only)"
             if nuclei
+            else "Synthetic lab / projected read-only OpenAPI (passive)"
+            if zap
             else "Synthetic Bank API / approved account routes"
         ),
         "planner": scan.planner,
@@ -497,6 +597,8 @@ def scan_projection(
         "capability_id": scan.capability_id,
         "target_ref": scan.target_ref,
         "nuclei": nuclei_summary(scan) if nuclei else None,
+        # --- Phase 1.3 (additive) --------------------------------------------------------------
+        "zap": zap_summary(scan) if zap else None,
     }
 
 
@@ -542,6 +644,81 @@ def nuclei_summary(scan: ScanResult) -> dict[str, Any] | None:
         "error_code": exit_info.get("error_code") or exit_info.get("validation_code"),
         "duration_ms": (provenance.get("timing") or {}).get("duration_ms"),
         "coverage_complete": bool(provenance.get("coverage_complete")),
+        "redaction_status": provenance.get("redaction_status", "REDACTED"),
+    }
+
+
+def zap_summary(scan: ScanResult) -> dict[str, Any] | None:
+    """Console-safe ZAP provenance and coverage: versions, digests, counts and states only. No URL
+    origin, HTTP body, header value, report prose or raw ZAP output."""
+
+    provenance = scan.zap_provenance
+    if not provenance:
+        return None
+    engine = provenance.get("engine") or {}
+    projection = provenance.get("projection") or {}
+    traffic = provenance.get("traffic") or {}
+    stages = provenance.get("stages") or {}
+    exit_info = provenance.get("exit") or {}
+    output = provenance.get("output") or {}
+    counts = provenance.get("counts") or {}
+    plan = provenance.get("plan") or {}
+    lifecycle = _lifecycle_counts(scan)
+    return {
+        "profile_id": provenance.get("profile_id"),
+        "profile_version": provenance.get("profile_version"),
+        "adapter_version": provenance.get("adapter_version"),
+        "parser_version": provenance.get("parser_version"),
+        "projection_version": provenance.get("projection_version"),
+        "runner_version": provenance.get("runner_version"),
+        "verifier_version": provenance.get("verifier_version"),
+        "engine_version": engine.get("version"),
+        "image_index_digest": engine.get("image_index_digest"),
+        "jar_sha256": engine.get("jar_sha256"),
+        "java_runtime_version": engine.get("java_runtime_version"),
+        "arch": engine.get("arch"),
+        "add_on_inventory_digest": engine.get("add_on_inventory_digest"),
+        "engine_pinned": bool(engine.get("pinned")),
+        "manifest_digest": provenance.get("manifest_digest"),
+        "rules": [
+            {"plugin_id": r.get("plugin_id"), "name": r.get("name")}
+            for r in provenance.get("rules", [])[:8]
+        ],
+        "target_ref": provenance.get("target_ref"),
+        "projection_digest": projection.get("digest"),
+        "allowlist_digest": projection.get("allowlist_digest"),
+        "operation_count": projection.get("operation_count"),
+        "path_count": projection.get("path_count"),
+        "operations": [
+            {"method": o.get("method"), "path": o.get("path")}
+            for o in projection.get("operations", [])[:8]
+        ],
+        "plan_digest": plan.get("digest"),
+        "plan_validated": bool(plan.get("validated")),
+        "imported_urls": counts.get("imported_urls"),
+        "expected_requests": traffic.get("expected_requests"),
+        "observed_requests": traffic.get("observed_requests"),
+        "forwarded_requests": traffic.get("forwarded"),
+        "blocked_requests": traffic.get("blocked"),
+        "redirects": traffic.get("redirects"),
+        "guard_version": traffic.get("guard_version"),
+        "passive_queue_drained": bool(stages.get("pscan_drained")),
+        "plan_succeeded": bool(stages.get("plan_succeeded")),
+        "silent_mode": bool(stages.get("silent_mode")),
+        "tool_reported_alerts": counts.get("alerts", 0),
+        "correlated_alerts": lifecycle["AEGIS_CORRELATED"]
+        + lifecycle["VERIFIED"]
+        + lifecycle["REVIEW_REQUIRED"],
+        "verifier_confirmed": lifecycle["VERIFIED"],
+        "exit_status": exit_info.get("status"),
+        "exit_class": exit_info.get("exit_class"),
+        "error_code": exit_info.get("error_code") or exit_info.get("validation_code"),
+        "duration_ms": (provenance.get("timing") or {}).get("duration_ms"),
+        "report_sha256": output.get("report_sha256"),
+        "stripped_fields": list(output.get("stripped_fields") or [])[:12],
+        "session_destroyed": bool(output.get("session_destroyed")),
+        "coverage_complete": bool(provenance.get("coverage_complete")),
+        "coverage_state": "COMPLETE" if provenance.get("coverage_complete") else "INCOMPLETE",
         "redaction_status": provenance.get("redaction_status", "REDACTED"),
     }
 
@@ -753,9 +930,119 @@ def nuclei_evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
     return cards
 
 
+_HEADER_PROPERTY = {
+    "ABSENT": "HEADER_ABSENT",
+    "PRESENT_NOSNIFF": "NOSNIFF_PRESENT",
+    "INVALID": "HEADER_INVALID",
+    "NOT_OBSERVED": "NOT_ESTABLISHED",
+}
+
+
+def zap_evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
+    """Safe rendered cards for a ZAP run: one execution card (tool, untrusted), one card per
+    tool-reported alert (untrusted claims) and one card per independent verifier probe. Never a
+    screenshot, response body, header value, alert prose or raw URL."""
+
+    timestamp = (scan.completed_at or scan.created_at).isoformat()
+    cards: list[dict[str, Any]] = []
+    summary = zap_summary(scan)
+    provenance = scan.zap_provenance or {}
+    if summary is not None:
+        cards.append(
+            _hashed(
+                {
+                    "artifact_type": "ZAP_EXECUTION_CARD",
+                    "artifact_id": f"{scan.id}:zap-execution",
+                    "scan_id": scan.id,
+                    "method": "GET",
+                    "normalized_route": "projected OpenAPI (local apiFile)",
+                    "principal_profile_name": "anonymous",
+                    "object_reference": str(scan.target_ref),
+                    "response_status": None,
+                    "response_size": None,
+                    "response_characteristics": {"bounded": True, "body_redacted": True},
+                    "timestamp": timestamp,
+                    "request_id": f"{scan.id}:zap",
+                    "control_probe_role": "TOOL EXECUTION · UNTRUSTED",
+                    "provenance": "TOOL_REPORTED",
+                    "engine_version": summary.get("engine_version"),
+                    "projection_digest": summary.get("projection_digest"),
+                    "operation_count": summary.get("operation_count"),
+                    "imported_urls": summary.get("imported_urls"),
+                    "expected_requests": summary.get("expected_requests"),
+                    "observed_requests": summary.get("observed_requests"),
+                    "blocked_requests": summary.get("blocked_requests"),
+                    "passive_queue_drained": summary.get("passive_queue_drained"),
+                    "coverage_state": summary.get("coverage_state"),
+                    "exit_class": summary.get("exit_class"),
+                }
+            )
+        )
+    for index, alert in enumerate(provenance.get("alerts", [])[:8]):
+        cards.append(
+            _hashed(
+                {
+                    "artifact_type": "ZAP_ALERT_CARD",
+                    "artifact_id": f"{scan.id}:zap-alert-{index}",
+                    "scan_id": scan.id,
+                    "method": alert.get("method"),
+                    "normalized_route": alert.get("path"),
+                    "principal_profile_name": "anonymous",
+                    "object_reference": str(scan.target_ref),
+                    "response_status": None,
+                    "response_size": None,
+                    "response_characteristics": {"bounded": True, "body_redacted": True},
+                    "timestamp": timestamp,
+                    "request_id": str(alert.get("record_digest", ""))[:24],
+                    "control_probe_role": "TOOL ALERT · UNTRUSTED",
+                    "provenance": "TOOL_REPORTED",
+                    "plugin_id": alert.get("plugin_id"),
+                    "rule_name": alert.get("rule_name"),
+                    "param": alert.get("param"),
+                    "claimed_risk": alert.get("claimed_risk"),
+                    "claimed_confidence": alert.get("claimed_confidence"),
+                    "claim_trust": "UNTRUSTED_TOOL_METADATA",
+                }
+            )
+        )
+    for fact in scan.verifier_evidence:
+        role = str(fact.get("role", ""))
+        cards.append(
+            _hashed(
+                {
+                    "artifact_type": "VERIFIER_PROBE_CARD",
+                    "artifact_id": f"{scan.id}:{fact.get('name')}",
+                    "scan_id": scan.id,
+                    "method": fact.get("method"),
+                    "normalized_route": fact.get("path"),
+                    "principal_profile_name": "anonymous",
+                    "object_reference": str(scan.target_ref),
+                    "response_status": fact.get("status_code"),
+                    "response_size": fact.get("body_bytes"),
+                    "response_characteristics": {"bounded": True, "body_redacted": True},
+                    "timestamp": timestamp,
+                    "request_id": str(fact.get("name")),
+                    "control_probe_role": (
+                        "VERIFIER CONTROL" if role == "BASE_CONTROL" else "VERIFIER PROBE"
+                    ),
+                    "provenance": "VERIFIER",
+                    "content_class": fact.get("content_class"),
+                    "property_observed": (
+                        _HEADER_PROPERTY.get(str(fact.get("nosniff_header")), "NOT_ESTABLISHED")
+                        if fact.get("synthetic_marker_ok")
+                        else "NOT_ESTABLISHED"
+                    ),
+                }
+            )
+        )
+    return cards
+
+
 def evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
     if scan.engine == Engine.NUCLEI.value:
         return nuclei_evidence_cards(scan)
+    if scan.engine == Engine.ZAP.value:
+        return zap_evidence_cards(scan)
     cards: list[dict[str, Any]] = []
     for index, evidence in enumerate(scan.evidence):
         role = ("OWNER CONTROL" if index == 0 else "ALTERNATE CONTROL" if index == 1 else "PROBE")
@@ -830,11 +1117,62 @@ def _nuclei_finding_projection(
     }
 
 
+def _zap_finding_projection(
+    scan: ScanResult, finding_index: int, linked_retests: list[ScanResult]
+) -> dict[str, Any]:
+    finding = scan.findings[finding_index]
+    retest = linked_retests[0] if linked_retests else None
+    summary = zap_summary(scan) or {}
+    remediated = bool(retest and retest.status.value == "PASS")
+    rule = (summary.get("rules") or [{}])[0]
+    return {
+        "id": finding.id,
+        "severity": finding.severity,
+        "confidence": finding.confidence,
+        "status": "REMEDIATED" if remediated else "CONFIRMED",
+        "vulnerability_class": finding.category,
+        "owasp_mapping": "Not mapped (no automatic OWASP coverage claim)",
+        "source_engine": Engine.ZAP,
+        "affected_operation": "GET /lab/zap/vulnerable/catalog/{catalog_id}",
+        "principal_object_direction": "anonymous → synthetic catalog response header",
+        "discovery_scan": scan.id,
+        "linked_retest": retest.id if retest else None,
+        "evidence_completeness": "COMPLETE" if len(finding.evidence_names) >= 2 else "PARTIAL",
+        "created_at": (scan.completed_at or scan.created_at).isoformat(),
+        "updated_at": (
+            retest.completed_at.isoformat()
+            if retest and retest.completed_at
+            else (scan.completed_at or scan.created_at).isoformat()
+        ),
+        "title": finding.title,
+        "provenance": "VERIFIER",
+        "ai_hypothesis": "None — operator-requested capability; the AI was not involved.",
+        "controller_execution": (
+            f"Projected {summary.get('operation_count', '—')} read-only operations; isolated "
+            f"ZAP {summary.get('engine_version', '—')} passively analysed them with rule "
+            f"{rule.get('plugin_id', '—')} (TOOL_REPORTED)."
+        ),
+        "deterministic_evidence": (
+            "Verifier: control 200 with nosniff · catalog 200 JSON without X-Content-Type-Options"
+        ),
+        "verifier_conclusion": (
+            "Independent verifier confirmed the missing header from fresh evidence; ZAP did not "
+            "confirm."
+        ),
+        "patched_retest": (
+            "Patched: complete passive coverage · catalog 200 with nosniff" if retest else "Not run"
+        ),
+        "final_state": "PASS" if remediated else "FAIL",
+    }
+
+
 def finding_projection(
     scan: ScanResult, finding_index: int, linked_retests: list[ScanResult]
 ) -> dict[str, Any]:
     if scan.engine == Engine.NUCLEI.value:
         return _nuclei_finding_projection(scan, finding_index, linked_retests)
+    if scan.engine == Engine.ZAP.value:
+        return _zap_finding_projection(scan, finding_index, linked_retests)
     finding = scan.findings[finding_index]
     retest = linked_retests[0] if linked_retests else None
     return {

@@ -1,0 +1,287 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Aegis synthetic lab - ZAP passive scenario inventory",
+    "version": "1.3.0",
+    "description": "Controller-owned inventory source. Only projected, allowlisted GET/HEAD operations ever reach ZAP.",
+    "contact": {
+      "name": "Aegis lab operator",
+      "email": "operator@lab.invalid"
+    }
+  },
+  "externalDocs": {
+    "description": "Internal note",
+    "url": "https://docs.lab.invalid/zap"
+  },
+  "servers": [
+    {
+      "url": "http://lab-api:8001"
+    }
+  ],
+  "tags": [
+    {
+      "name": "synthetic-zap-lab",
+      "description": "Synthetic routes"
+    }
+  ],
+  "security": [
+    {
+      "labBearer": []
+    }
+  ],
+  "x-aegis-inventory-note": "Descriptions, tags, security and extensions are stripped by the projection.",
+  "paths": {
+    "/lab/zap/vulnerable/status": {
+      "get": {
+        "operationId": "labZapVulnerableStatus",
+        "summary": "Vulnerable scenario control route.",
+        "description": "Vulnerable scenario control route. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lab/zap/vulnerable/catalog/{catalog_id}": {
+      "get": {
+        "operationId": "labZapVulnerableCatalog",
+        "summary": "Vulnerable scenario catalog route.",
+        "description": "Vulnerable scenario catalog route. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CatalogId"
+          }
+        ]
+      },
+      "put": {
+        "operationId": "labZapVulnerableCatalogReplace",
+        "summary": "State-changing; never approved.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CatalogId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Replaced."
+          }
+        }
+      }
+    },
+    "/lab/zap/patched/status": {
+      "get": {
+        "operationId": "labZapPatchedStatus",
+        "summary": "Patched scenario control route.",
+        "description": "Patched scenario control route. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lab/zap/patched/catalog/{catalog_id}": {
+      "get": {
+        "operationId": "labZapPatchedCatalog",
+        "summary": "Patched scenario catalog route.",
+        "description": "Patched scenario catalog route. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CatalogId"
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "labZapPatchedCatalogDelete",
+        "summary": "State-changing; never approved.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CatalogId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          }
+        }
+      }
+    },
+    "/lab/zap/redirect/status": {
+      "get": {
+        "operationId": "labZapRedirectStatus",
+        "summary": "Negative control: answers with an unexpected redirect.",
+        "description": "Negative control: answers with an unexpected redirect. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lab/zap/unstable/status": {
+      "get": {
+        "operationId": "labZapUnstableStatus",
+        "summary": "Negative control: drops the connection mid-response.",
+        "description": "Negative control: drops the connection mid-response. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lab/zap/slow/status": {
+      "get": {
+        "operationId": "labZapSlowStatus",
+        "summary": "Negative control: answers slower than the engine timeout.",
+        "description": "Negative control: answers slower than the engine timeout. Synthetic lab route; no business data.",
+        "tags": [
+          "synthetic-zap-lab"
+        ],
+        "responses": {
+          "200": {
+            "description": "Synthetic status marker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LabMarker"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lab/zap/admin/purge": {
+      "post": {
+        "operationId": "labZapAdminPurge",
+        "summary": "State-changing; never approved.",
+        "responses": {
+          "202": {
+            "description": "Accepted."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "CatalogId": {
+        "name": "catalog_id",
+        "in": "path",
+        "required": true,
+        "description": "Synthetic catalog identifier.",
+        "schema": {
+          "type": "string"
+        },
+        "example": "synthetic-catalog-1"
+      }
+    },
+    "schemas": {
+      "LabMarker": {
+        "type": "object",
+        "properties": {
+          "lab": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "synthetic": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "labBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Never used by the projection."
+      }
+    }
+  }
+}
