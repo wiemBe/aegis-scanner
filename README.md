@@ -1,7 +1,23 @@
-# Aegis AI Security Lab — Phase 1.1
+# Aegis AI Security Lab — Phase 1.2
 
 A bounded, guardrailed security-testing demonstration for the included synthetic banking API.
 **Not production-ready. No external or production targets are authorized.**
+
+Phase 1.2 adds one operational, tightly constrained
+[Nuclei integration](docs/phase-1.2-nuclei-integration.md). Nuclei `v3.11.1` runs in a separate
+non-root, read-only, no-shell container with no public egress, planner/model access, credential,
+host mount or published port. It can reach only the synthetic target and can execute only the one
+checked-in official signed `git-config` template from nuclei-templates `v10.4.8`. The controller
+owns target/profile/template selection and constructs a strict typed RPC; Nuclei output is
+TOOL_REPORTED and only a fresh deterministic Aegis verifier can confirm a finding or patched PASS.
+Real pinned-binary acceptance is vulnerable 5/5 and patched-negative 5/5 with every negative control
+passing and zero unauthorized traffic. **GO only for this one synthetic, anonymous, read-only HTTP
+capability.** No broad template scan, Nuclei AI/DAST/OAST, authentication, production target, ZAP,
+Burp DAST or automatic OWASP coverage is enabled.
+
+Supply chain and operations: [template pins](docs/nuclei-template-supply-chain.md),
+[runner isolation](docs/nuclei-runner-isolation.md), [operations](docs/nuclei-operations.md), and
+[evidence/verification](docs/nuclei-evidence-and-verification.md).
 
 Phase 1.1 adds a provider-independent [security-tool integration kernel](docs/phase-1.1-security-tool-kernel.md)
 (`src/aegis/engine/`): typed engine contracts, a model-immutable capability/profile catalog, a
@@ -10,7 +26,8 @@ deterministic execution policy that rejects disallowed jobs before any tool traf
 disabled skeletons for `NUCLEI`, `ZAP` and `BURP_DAST`. Engine observations are untrusted; only the
 deterministic verifier or explicit human review promotes a result. Phase 1.1 verdict: **GO for the
 bounded synthetic-lab and the single read-only BOLA capability, executed through the new engine
-interface**. Nuclei/ZAP/Burp DAST are **not** operational; no production readiness is claimed.
+interface**. At that Phase 1.1 baseline, Nuclei/ZAP/Burp DAST were not operational; Phase 1.2 now
+enables only the bounded Nuclei profile described above. ZAP and Burp remain disabled.
 
 Phase 1.0 added the [Aegis Operator Console](docs/phase-1.0.md), a distinct local React/TypeScript
 surface over the completed Phase 0.9 scan, audit, finding, retest, and evidence contracts. It adds
@@ -19,8 +36,8 @@ dashboard remains at `/`; the console is at `/console/`; the Phase 0.9 focused v
 `/demo`.
 
 Phase 1.0 verdict: **GO for the localhost operator console over the bounded synthetic-lab
-capability**. This is not a production-readiness or broad-coverage verdict. Nuclei, ZAP, and Burp
-DAST are planned/not connected and must not be described as operational.
+capability**. This is not a production-readiness or broad-coverage verdict. Its historical Nuclei,
+ZAP and Burp state is superseded only by the Phase 1.2 Nuclei profile; ZAP and Burp remain disabled.
 
 Phase 0.9 verdict: **GO for the reproducible synthetic-lab demonstration** after two consecutive
 fresh `qwen3:8b` runs. This is not a production-readiness or broad-coverage verdict.
@@ -283,7 +300,8 @@ docker build --build-arg INSTALL_DEV=true -t aegis-check .
 docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
   -e PYTHONPATH=/workspace/src -e MYPYPATH=/workspace/src aegis-check \
   sh -c 'ruff check src tests scripts && \
-         mypy --explicit-package-bases -p aegis -p lab_api && pytest -q'
+         mypy --explicit-package-bases -p aegis -p lab_api -p aegis_nuclei -p nuclei_runner && \
+         pytest -q'
 ```
 
 See [canonical project state](PROJECT_STATE.md), [Phase 0.2](docs/phase-0.2.md) and

@@ -3,6 +3,7 @@ from urllib.parse import urljoin, urlsplit
 from aegis.models import Hypothesis, PlannedRequest
 from aegis.settings import Settings
 from aegis.surface import OBJECTS, Variant, account_path
+from aegis_nuclei.targets import NUCLEI_TARGETS
 
 
 class SafetyViolation(ValueError):
@@ -75,5 +76,21 @@ class SafetyController:
         if request.path not in permitted:
             raise SafetyViolation("Request is outside the authorized synthetic object surface")
         absolute_url = urljoin(base_url.rstrip("/") + "/", request.path.lstrip("/"))
+        self.validate_absolute_url(absolute_url)
+        return absolute_url
+
+    def approve_scm_verification(self, base_url: str, path: str) -> str:
+        """Approve ONE of the fixed Phase 1.2 verifier requests (a synthetic route base or its
+        ``/.git/config``). Anything else — another path, host or scheme — is a SafetyViolation."""
+
+        permitted = {
+            candidate
+            for target in NUCLEI_TARGETS.values()
+            if target.origin.rstrip("/") == base_url.rstrip("/")
+            for candidate in (target.base_path, f"{target.base_path}/.git/config")
+        }
+        if path not in permitted:
+            raise SafetyViolation("Verifier request is outside the fixed synthetic SCM surface")
+        absolute_url = base_url.rstrip("/") + path
         self.validate_absolute_url(absolute_url)
         return absolute_url

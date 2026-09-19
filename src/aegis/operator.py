@@ -86,6 +86,20 @@ _ACTORS: dict[str, ActorType] = {
     "VERIFICATION_STARTED": ActorType.VERIFIER,
     "VERIFICATION_COMPLETED": ActorType.VERIFIER,
     "HUMAN_REVIEW_REQUIRED": ActorType.CONTROLLER,
+    # Phase 1.2 Nuclei. The controller admits/rejects and correlates; the isolated runner attests,
+    # executes and reports (untrusted); only the verifier verifies. None is the AI.
+    "NUCLEI_JOB_ADMITTED": ActorType.CONTROLLER,
+    "NUCLEI_JOB_REJECTED": ActorType.CONTROLLER,
+    "NUCLEI_RUNNER_STARTED": ActorType.TOOL_RUNNER,
+    "NUCLEI_TEMPLATE_MANIFEST_VERIFIED": ActorType.TOOL_RUNNER,
+    "NUCLEI_EXECUTION_STARTED": ActorType.TOOL_RUNNER,
+    "NUCLEI_EXECUTION_COMPLETED": ActorType.TOOL_RUNNER,
+    "NUCLEI_EXECUTION_FAILED": ActorType.TOOL_RUNNER,
+    "NUCLEI_RESULT_PARSED": ActorType.CONTROLLER,
+    "NUCLEI_FINDING_REPORTED": ActorType.TOOL_RUNNER,
+    "NUCLEI_FINDING_CORRELATED": ActorType.CONTROLLER,
+    "NUCLEI_VERIFICATION_STARTED": ActorType.VERIFIER,
+    "NUCLEI_VERIFICATION_COMPLETED": ActorType.VERIFIER,
 }
 
 _STAGES: dict[str, str] = {
@@ -121,6 +135,18 @@ _STAGES: dict[str, str] = {
     "SCAN_CANCELLED": "FAILED",
     "BUDGET_EXHAUSTED": "REVIEW",
     "PLANNER_REJECTED": "REVIEW",
+    "NUCLEI_JOB_ADMITTED": "ENGINE_JOB",
+    "NUCLEI_JOB_REJECTED": "EXECUTION_POLICY",
+    "NUCLEI_RUNNER_STARTED": "RUNNER_ATTESTATION",
+    "NUCLEI_TEMPLATE_MANIFEST_VERIFIED": "RUNNER_ATTESTATION",
+    "NUCLEI_EXECUTION_STARTED": "EXECUTION",
+    "NUCLEI_EXECUTION_COMPLETED": "EXECUTION",
+    "NUCLEI_EXECUTION_FAILED": "FAILED",
+    "NUCLEI_RESULT_PARSED": "RESULT_PARSING",
+    "NUCLEI_FINDING_REPORTED": "TOOL_FINDING",
+    "NUCLEI_FINDING_CORRELATED": "CORRELATION",
+    "NUCLEI_VERIFICATION_STARTED": "VERIFICATION",
+    "NUCLEI_VERIFICATION_COMPLETED": "VERIFICATION",
 }
 
 _SUMMARIES: dict[str, str] = {
@@ -157,6 +183,18 @@ _SUMMARIES: dict[str, str] = {
     "BUDGET_EXHAUSTED": "A bounded budget was exhausted.",
     "PLANNER_REJECTED": "Planner output was rejected by deterministic validation.",
     "PROCESS_RESTART": "Interrupted work was closed conservatively after restart.",
+    "NUCLEI_JOB_ADMITTED": "Controller admitted a typed Nuclei job for an approved capability.",
+    "NUCLEI_JOB_REJECTED": "Execution policy rejected the Nuclei job before any runner call.",
+    "NUCLEI_RUNNER_STARTED": "Isolated nuclei-runner attested its pinned engine and readiness.",
+    "NUCLEI_TEMPLATE_MANIFEST_VERIFIED": "Runner attested the pinned, signed template manifest.",
+    "NUCLEI_EXECUTION_STARTED": "Isolated runner began the fixed-profile Nuclei execution.",
+    "NUCLEI_EXECUTION_COMPLETED": "Isolated runner completed the bounded Nuclei execution.",
+    "NUCLEI_EXECUTION_FAILED": "Nuclei execution failed closed; no PASS or finding is possible.",
+    "NUCLEI_RESULT_PARSED": "Controller accepted the strict, redacted Nuclei result parse.",
+    "NUCLEI_FINDING_REPORTED": "Nuclei reported an untrusted result (TOOL_REPORTED only).",
+    "NUCLEI_FINDING_CORRELATED": "Controller correlated the tool result to target and capability.",
+    "NUCLEI_VERIFICATION_STARTED": "Independent verifier issued fresh read-only requests.",
+    "NUCLEI_VERIFICATION_COMPLETED": "Independent verifier reached its authoritative conclusion.",
 }
 
 _DENIED_KEYS = re.compile(
@@ -225,6 +263,59 @@ _SAFE_KEYS = {
     "detail",
     "environment",
     "activity",
+    # Phase 1.2 Nuclei metadata (ids, digests, versions, counts, codes and labels only).
+    "target_ref",
+    "template_set_id",
+    "manifest_version",
+    "manifest_digest",
+    "controller_manifest_match",
+    "template_ids",
+    "template_id",
+    "templates",
+    "sha256",
+    "signature_status",
+    "signature_probe",
+    "unexpected_template_files",
+    "budgets",
+    "time_ms",
+    "results",
+    "output_bytes",
+    "reachable",
+    "ready",
+    "runner_version",
+    "nuclei_version",
+    "binary_sha256",
+    "arch",
+    "pinned",
+    "failure_codes",
+    "exit_class",
+    "exit_code",
+    "error_code",
+    "duration_ms",
+    "http_connections",
+    "signed_templates_executed",
+    "output_sha256",
+    "coverage_complete",
+    "parser_version",
+    "parse_status",
+    "lines",
+    "records",
+    "matched",
+    "unmatched",
+    "errored",
+    "duplicates_collapsed",
+    "stripped_fields",
+    "redaction_status",
+    "correlation",
+    "verifier_version",
+    "evidence_ids",
+    "lifecycle_states",
+    "tool_reported",
+    "independent",
+    "nuclei_inputs_used",
+    "runner_contacted",
+    "runner_contacted_for_execution",
+    "target_requests",
 }
 
 
@@ -258,6 +349,10 @@ def safe_metadata(details: Any) -> dict[str, Any]:
 def _event_status(event: str, details: dict[str, Any]) -> str:
     if event in {"SAFETY_REJECTED", "SCAN_FAILED", "SCAN_CANCELLED"}:
         return "REJECTED" if event == "SAFETY_REJECTED" else "FAILED"
+    if event == "NUCLEI_JOB_REJECTED":
+        return "REJECTED"
+    if event == "NUCLEI_EXECUTION_FAILED":
+        return "FAILED"
     if event in {"BUDGET_EXHAUSTED", "PLANNER_REJECTED"}:
         return "REVIEW"
     raw = details.get("status")
@@ -318,6 +413,11 @@ def project_event(
         ),
         actor_type=_ACTORS.get(event, ActorType.CONTROLLER),
         event_type=event,
+        engine=(
+            Engine.NUCLEI
+            if event.startswith("NUCLEI_") or (scan is not None and scan.engine == "NUCLEI")
+            else Engine.AEGIS_NATIVE
+        ),
         stage=_STAGES.get(event, "REVIEW"),
         status=_event_status(event, metadata),
         summary=_SUMMARIES.get(event, "Controller recorded a structured audit event."),
@@ -338,11 +438,16 @@ def scan_projection(
     """Build a console-safe scan record without target URLs, errors, or response content."""
 
     model_digest = scan.provider_metadata.model_digest if scan.provider_metadata else None
+    nuclei = scan.engine == Engine.NUCLEI.value
     return {
         "id": scan.id,
         "status": scan.status.value,
         "target_name": scan.target_name,
-        "scope": "Synthetic Bank API / approved account routes",
+        "scope": (
+            "Synthetic lab / SCM metadata route (read-only)"
+            if nuclei
+            else "Synthetic Bank API / approved account routes"
+        ),
         "planner": scan.planner,
         "mode": scan.mode,
         "model": scan.model,
@@ -388,6 +493,56 @@ def scan_projection(
         "verifier_confirmed_count": len(
             [n for n in scan.normalized_findings if n.get("lifecycle_state") == "VERIFIED"]
         ),
+        # --- Phase 1.2 (additive) --------------------------------------------------------------
+        "capability_id": scan.capability_id,
+        "target_ref": scan.target_ref,
+        "nuclei": nuclei_summary(scan) if nuclei else None,
+    }
+
+
+def nuclei_summary(scan: ScanResult) -> dict[str, Any] | None:
+    """Console-safe Nuclei provenance: versions, digests, counts and states. No URL, no output."""
+
+    provenance = scan.nuclei_provenance
+    if not provenance:
+        return None
+    engine = provenance.get("engine") or {}
+    counts = provenance.get("counts") or {}
+    exit_info = provenance.get("exit") or {}
+    return {
+        "profile_id": provenance.get("profile_id"),
+        "profile_version": provenance.get("profile_version"),
+        "adapter_version": provenance.get("adapter_version"),
+        "parser_version": provenance.get("parser_version"),
+        "runner_version": provenance.get("runner_version"),
+        "verifier_version": provenance.get("verifier_version"),
+        "engine_version": engine.get("version"),
+        "binary_sha256": engine.get("binary_sha256"),
+        "engine_pinned": bool(engine.get("pinned")),
+        "template_set_id": provenance.get("template_set_id"),
+        "manifest_version": provenance.get("manifest_version"),
+        "manifest_digest": provenance.get("manifest_digest"),
+        "templates": [
+            {
+                "template_id": t.get("template_id"),
+                "sha256": t.get("sha256"),
+                "signature_status": t.get("signature_status"),
+            }
+            for t in provenance.get("templates", [])[:8]
+        ],
+        "target_ref": provenance.get("target_ref"),
+        "request_budget": (provenance.get("budgets") or {}).get("requests"),
+        "http_connections": counts.get("http_connections"),
+        "records": counts.get("records"),
+        "matched": counts.get("matched"),
+        "unmatched": counts.get("unmatched"),
+        "errored": counts.get("errored"),
+        "exit_status": exit_info.get("status"),
+        "exit_class": exit_info.get("exit_class"),
+        "error_code": exit_info.get("error_code") or exit_info.get("validation_code"),
+        "duration_ms": (provenance.get("timing") or {}).get("duration_ms"),
+        "coverage_complete": bool(provenance.get("coverage_complete")),
+        "redaction_status": provenance.get("redaction_status", "REDACTED"),
     }
 
 
@@ -476,7 +631,10 @@ def execution_policy_projection(scan: ScanResult) -> dict[str, Any]:
     }
 
 
-def engine_readiness(healths: list[EngineHealth]) -> list[dict[str, Any]]:
+def engine_readiness(
+    healths: list[EngineHealth],
+    extras: dict[SecurityEngine, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Build honest, four-state engine readiness cards for the console.
 
     The four states — ``configured``, ``reachable``, ``enabled`` and ``authorized`` — are reported
@@ -508,12 +666,96 @@ def engine_readiness(healths: list[EngineHealth]) -> list[dict[str, Any]]:
                 "isolation_boundary": profile.isolation_boundary if profile else "",
                 "capabilities": caps,
                 "kernel_version": ENGINE_KERNEL_VERSION,
+                "provenance": (extras or {}).get(engine),
             }
         )
     return cards
 
 
+def _hashed(content: dict[str, Any]) -> dict[str, Any]:
+    content["evidence_hash"] = hashlib.sha256(
+        json.dumps(content, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return content
+
+
+def nuclei_evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
+    """Safe rendered cards for a Nuclei run: one execution card (tool, untrusted) and one card per
+    independent verifier probe. Never a screenshot, response body, header or raw URL."""
+
+    timestamp = (scan.completed_at or scan.created_at).isoformat()
+    cards: list[dict[str, Any]] = []
+    summary = nuclei_summary(scan)
+    if summary is not None:
+        template = (summary.get("templates") or [{}])[0]
+        cards.append(
+            _hashed(
+                {
+                    "artifact_type": "NUCLEI_EXECUTION_CARD",
+                    "artifact_id": f"{scan.id}:nuclei-execution",
+                    "scan_id": scan.id,
+                    "method": "GET",
+                    "normalized_route": "{BaseURL}/.git/config",
+                    "principal_profile_name": "anonymous",
+                    "object_reference": str(scan.target_ref),
+                    "response_status": None,
+                    "response_size": None,
+                    "response_characteristics": {"bounded": True, "body_redacted": True},
+                    "timestamp": timestamp,
+                    "request_id": f"{scan.id}:nuclei",
+                    "control_probe_role": "TOOL RESULT · UNTRUSTED",
+                    "provenance": "TOOL_REPORTED",
+                    "template_id": template.get("template_id"),
+                    "signature_status": template.get("signature_status"),
+                    "engine_version": summary.get("engine_version"),
+                    "manifest_digest": summary.get("manifest_digest"),
+                    "matched": summary.get("matched"),
+                    "unmatched": summary.get("unmatched"),
+                    "http_connections": summary.get("http_connections"),
+                    "exit_class": summary.get("exit_class"),
+                }
+            )
+        )
+    for fact in scan.verifier_evidence:
+        role = str(fact.get("role", ""))
+        cards.append(
+            _hashed(
+                {
+                    "artifact_type": "VERIFIER_PROBE_CARD",
+                    "artifact_id": f"{scan.id}:{fact.get('name')}",
+                    "scan_id": scan.id,
+                    "method": fact.get("method"),
+                    "normalized_route": fact.get("path"),
+                    "principal_profile_name": "anonymous",
+                    "object_reference": str(scan.target_ref),
+                    "response_status": fact.get("status_code"),
+                    "response_size": fact.get("body_bytes"),
+                    "response_characteristics": {"bounded": True, "body_redacted": True},
+                    "timestamp": timestamp,
+                    "request_id": str(fact.get("name")),
+                    "control_probe_role": (
+                        "VERIFIER CONTROL" if role == "BASE_CONTROL" else "VERIFIER PROBE"
+                    ),
+                    "provenance": "VERIFIER",
+                    "content_class": fact.get("content_class"),
+                    "property_observed": (
+                        "REPOSITORY_METADATA_SERVED"
+                        if fact.get("git_config_structure")
+                        else "DETERMINISTIC_DENIAL"
+                        if fact.get("deliberate_denial")
+                        else "SYNTHETIC_ROUTE_MARKER"
+                        if fact.get("synthetic_marker_ok")
+                        else "NOT_ESTABLISHED"
+                    ),
+                }
+            )
+        )
+    return cards
+
+
 def evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
+    if scan.engine == Engine.NUCLEI.value:
+        return nuclei_evidence_cards(scan)
     cards: list[dict[str, Any]] = []
     for index, evidence in enumerate(scan.evidence):
         role = ("OWNER CONTROL" if index == 0 else "ALTERNATE CONTROL" if index == 1 else "PROBE")
@@ -543,9 +785,56 @@ def evidence_cards(scan: ScanResult) -> list[dict[str, Any]]:
     return cards
 
 
+def _nuclei_finding_projection(
+    scan: ScanResult, finding_index: int, linked_retests: list[ScanResult]
+) -> dict[str, Any]:
+    finding = scan.findings[finding_index]
+    retest = linked_retests[0] if linked_retests else None
+    summary = nuclei_summary(scan) or {}
+    remediated = bool(retest and retest.status.value == "PASS")
+    return {
+        "id": finding.id,
+        "severity": finding.severity,
+        "confidence": finding.confidence,
+        "status": "REMEDIATED" if remediated else "CONFIRMED",
+        "vulnerability_class": finding.category,
+        "owasp_mapping": "Not mapped (no automatic OWASP coverage claim)",
+        "source_engine": Engine.NUCLEI,
+        "affected_operation": "GET /lab/nuclei/vulnerable/.git/config",
+        "principal_object_direction": "anonymous → synthetic repository metadata",
+        "discovery_scan": scan.id,
+        "linked_retest": retest.id if retest else None,
+        "evidence_completeness": "COMPLETE" if len(finding.evidence_names) >= 2 else "PARTIAL",
+        "created_at": (scan.completed_at or scan.created_at).isoformat(),
+        "updated_at": (
+            retest.completed_at.isoformat()
+            if retest and retest.completed_at
+            else (scan.completed_at or scan.created_at).isoformat()
+        ),
+        "title": finding.title,
+        "provenance": "VERIFIER",
+        "ai_hypothesis": "None — operator-requested capability; the AI was not involved.",
+        "controller_execution": (
+            f"Admitted typed job; isolated runner executed signed template "
+            f"{(summary.get('templates') or [{}])[0].get('template_id', '—')} "
+            f"with Nuclei {summary.get('engine_version', '—')} (TOOL_REPORTED)."
+        ),
+        "deterministic_evidence": "Verifier: control 200 · metadata 200 (git core config section)",
+        "verifier_conclusion": (
+            "Independent verifier confirmed exposure from fresh evidence; Nuclei did not confirm."
+        ),
+        "patched_retest": (
+            "Patched: control 200 · metadata 404 (deterministic denial)" if retest else "Not run"
+        ),
+        "final_state": "PASS" if remediated else "FAIL",
+    }
+
+
 def finding_projection(
     scan: ScanResult, finding_index: int, linked_retests: list[ScanResult]
 ) -> dict[str, Any]:
+    if scan.engine == Engine.NUCLEI.value:
+        return _nuclei_finding_projection(scan, finding_index, linked_retests)
     finding = scan.findings[finding_index]
     retest = linked_retests[0] if linked_retests else None
     return {

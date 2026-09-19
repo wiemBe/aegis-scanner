@@ -25,9 +25,10 @@ beforeEach(() => {
     const executionPolicy = { engine: 'AEGIS_NATIVE', adapter_version: 'aegis-native/1.1.0', engine_kernel_version: 1, execution_policy_version: 1, jobs_created: [{ engine: 'AEGIS_NATIVE', job_id: 'job-000000000001', execution_id: 'exec-000000000001', status: 'COMPLETED', observation_count: 3, reported_finding_count: 1 }], jobs_rejected: [] }
     const engines = { items: [
       { engine: 'AEGIS_NATIVE', name: 'Aegis Native — synthetic BOLA', adapter_version: 'aegis-native/1.1.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'native', profile_id: 'aegis-native-bola-synthetic', environment: 'SYNTHETIC_LAB', isolation_boundary: 'in-process', capabilities: [], kernel_version: 1 },
-      { engine: 'NUCLEI', name: 'Nuclei — passive templates (disabled)', adapter_version: 'nuclei-adapter/0.0.0-disabled', configured: true, reachable: null, enabled: false, authorized: false, state: 'DISABLED', detail: 'planned', profile_id: 'nuclei-passive-synthetic', environment: 'SYNTHETIC_LAB', isolation_boundary: 'FUTURE isolated sidecar', capabilities: [], kernel_version: 1 },
+      { engine: 'NUCLEI', name: 'Nuclei — lab-safe HTTP', adapter_version: 'nuclei-adapter/1.2.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'Pinned runner attested', profile_id: 'NUCLEI_LAB_SAFE_HTTP_V1', environment: 'SYNTHETIC_LAB', isolation_boundary: 'isolated sidecar', capabilities: [], kernel_version: 1, provenance: { pinned_engine_version: 'v3.11.1', attested_binary_sha256: 'f'.repeat(64), manifest_version: '1.2.0', manifest_digest: 'c'.repeat(64), admitted_template_count: 1, signature_probe: 'SIGNED_VERIFIED', last_health_check: run.completed_at, latest_execution: { scan_id: 'scan-nucleinuclei', status: 'FAIL', http_connections: 1, request_budget: 1, records: 1, tool_reported: 1, verifier_confirmed: 1 }, responsibility: 'Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.' } },
+      { engine: 'ZAP', name: 'ZAP — passive scan (disabled)', adapter_version: 'zap-adapter/0.0.0-disabled', configured: true, reachable: null, enabled: false, authorized: false, state: 'DISABLED', detail: 'planned', profile_id: 'zap-passive-synthetic', environment: 'SYNTHETIC_LAB', isolation_boundary: 'FUTURE isolated sidecar', capabilities: [], kernel_version: 1 },
     ] }
-    const payload = path.includes('/runs/') ? { run, events: [event], evidence: [], lifecycle, execution_policy: executionPolicy } : path.includes('/runs') ? { items: [run] } : path.includes('/audit') ? { items: [event] } : path.includes('/findings') ? { items: [finding] } : path.includes('/engines') ? engines : path.includes('/integrations') ? { items: [{ name: 'Aegis Native', engine: 'AEGIS_NATIVE', state: 'CONNECTED' }, { name: 'Nuclei', engine: 'NUCLEI', state: 'PLANNED_NOT_CONNECTED' }] } : path.includes('/health') ? { checked_at: run.completed_at, control_plane: 'HEALTHY', gateway: 'HEALTHY', ollama: 'HEALTHY', lab: 'HEALTHY', dashboard_api: 'HEALTHY', database: 'HEALTHY', network_isolation: 'CONFIGURED_NOT_RUNTIME_ATTESTED', last_topology_test: 'NOT_AVAILABLE_IN_RUNTIME', last_secret_scan: 'NOT_AVAILABLE_IN_RUNTIME', event_stream: {}, evidence_storage: {} } : { enabled: false }
+    const payload = path.includes('/runs/') ? { run, events: [event], evidence: [], lifecycle, execution_policy: executionPolicy } : path.includes('/runs') ? { items: [run] } : path.includes('/audit') ? { items: [event] } : path.includes('/findings') ? { items: [finding] } : path.includes('/engines') ? engines : path.includes('/integrations') ? { items: [{ name: 'Aegis Native', engine: 'AEGIS_NATIVE', state: 'CONNECTED' }, { name: 'Nuclei', engine: 'NUCLEI', state: 'CONNECTED' }, { name: 'ZAP', engine: 'ZAP', state: 'PLANNED_NOT_CONNECTED' }] } : path.includes('/health') ? { checked_at: run.completed_at, control_plane: 'HEALTHY', gateway: 'HEALTHY', ollama: 'HEALTHY', lab: 'HEALTHY', dashboard_api: 'HEALTHY', database: 'HEALTHY', network_isolation: 'CONFIGURED_NOT_RUNTIME_ATTESTED', last_topology_test: 'NOT_AVAILABLE_IN_RUNTIME', last_secret_scan: 'NOT_AVAILABLE_IN_RUNTIME', event_stream: {}, evidence_storage: {} } : { enabled: false }
     return { ok: true, json: async () => payload } as Response
   }))
 })
@@ -61,10 +62,13 @@ describe('Operator Console', () => {
     await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
     fireEvent.click(screen.getByRole('button', { name: /Integrations/ }))
     expect(await screen.findByText('Engine adapters')).toBeInTheDocument()
-    expect(screen.getByText('ENABLED')).toBeInTheDocument()
+    expect(screen.getAllByText('ENABLED')).toHaveLength(2)
     expect(screen.getByText('DISABLED')).toBeInTheDocument()
     expect(screen.getAllByText('Authorized').length).toBeGreaterThan(0)
     expect(screen.getByText(/Future isolation boundary/)).toBeInTheDocument()
+    expect(screen.getByText('v3.11.1 · ffffffffffffffffffff…')).toBeInTheDocument()
+    expect(screen.getByText(/1 tool-reported · 1 verifier-confirmed/)).toBeInTheDocument()
+    expect(screen.getByText(/Nuclei does not directly confirm/)).toBeInTheDocument()
   })
 
   it('separates tool-reported from verifier-confirmed in the run replay lifecycle', async () => {

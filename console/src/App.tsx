@@ -54,6 +54,34 @@ type EngineReadiness = {
   isolation_boundary: string
   capabilities: Record<string, unknown>[]
   kernel_version: number
+  provenance?: {
+    pinned_engine_version?: string
+    pinned_binary_sha256?: Record<string, string>
+    attested_engine_version?: string | null
+    attested_binary_sha256?: string | null
+    template_set_id?: string
+    manifest_version?: string
+    manifest_digest?: string
+    attested_manifest_digest?: string | null
+    admitted_template_count?: number
+    upstream_templates?: string
+    signature_probe?: string | null
+    last_health_check?: string | null
+    latest_execution?: {
+      scan_id?: string
+      status?: string
+      terminal_reason?: string | null
+      http_connections?: number | null
+      request_budget?: number | null
+      matched?: number | null
+      records?: number | null
+      lifecycle_states?: string[]
+      tool_reported?: number
+      verifier_confirmed?: number
+      completed_at?: string | null
+    } | null
+    responsibility?: string
+  } | null
 }
 
 type LifecycleCard = {
@@ -104,7 +132,7 @@ type EventRecord = {
 }
 
 type Evidence = {
-  artifact_type: 'API_EVIDENCE_CARD'
+  artifact_type: 'API_EVIDENCE_CARD' | 'NUCLEI_EXECUTION_CARD' | 'VERIFIER_PROBE_CARD'
   artifact_id: string
   scan_id: string
   method: string
@@ -327,8 +355,12 @@ function ReadyDot({ label, value }: { label: string; value: boolean | null }) {
 
 function IntegrationsView({ integrations, engines }: { integrations: Integration[]; engines: EngineReadiness[] }) {
   return <div className="view-stack">
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">ENGINE REGISTRY</p><h2>Integrations</h2></div><span className="muted">Only Aegis Native is operational in Phase 1.1</span></div><div className="integration-grid">{integrations.map((item) => <article className={`integration-card ${item.state.toLowerCase()}`} key={item.name}><div className="integration-mark">{item.name.slice(0, 1)}</div><div><h3>{item.name}</h3><p>{item.engine}</p>{item.model && <p className="mono">{item.model} · {short(item.digest, 14)}</p>}</div><Badge tone={item.state === 'CONNECTED' ? 'good' : item.state.startsWith('PLANNED') ? 'neutral' : 'warning'}>{item.state.replaceAll('_', ' ')}</Badge></article>)}</div></section>
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">INTEGRATION READINESS · SECURITY-TOOL KERNEL</p><h2>Engine adapters</h2></div><Badge tone="scope">CONFIGURED ≠ ENABLED ≠ REACHABLE ≠ AUTHORIZED</Badge></div><div className="engine-grid">{engines.map((engine) => <article className={`engine-card ${engine.enabled ? 'enabled' : 'disabled'}`} key={engine.engine}><div className="engine-head"><div><h3>{engine.name}</h3><p className="mono">{engine.engine} · {engine.adapter_version ?? '—'}</p></div><Badge tone={engine.enabled ? 'good' : 'neutral'}>{engine.state}</Badge></div><div className="ready-grid"><ReadyDot label="Configured" value={engine.configured} /><ReadyDot label="Reachable" value={engine.reachable} /><ReadyDot label="Enabled" value={engine.enabled} /><ReadyDot label="Authorized" value={engine.authorized} /></div><p className="engine-detail">{engine.detail}</p>{!engine.enabled && <p className="isolation-note"><b>Future isolation boundary:</b> {engine.isolation_boundary}</p>}</article>)}</div></section>
+    <section className="panel"><div className="section-head"><div><p className="eyebrow">ENGINE REGISTRY</p><h2>Integrations</h2></div><span className="muted">Aegis Native and the bounded Nuclei profile are operational in Phase 1.2</span></div><div className="integration-grid">{integrations.map((item) => <article className={`integration-card ${item.state.toLowerCase()}`} key={item.name}><div className="integration-mark">{item.name.slice(0, 1)}</div><div><h3>{item.name}</h3><p>{item.engine}</p>{item.model && <p className="mono">{item.model} · {short(item.digest, 14)}</p>}</div><Badge tone={item.state === 'CONNECTED' ? 'good' : item.state.startsWith('PLANNED') ? 'neutral' : 'warning'}>{item.state.replaceAll('_', ' ')}</Badge></article>)}</div></section>
+    <section className="panel"><div className="section-head"><div><p className="eyebrow">INTEGRATION READINESS · SECURITY-TOOL KERNEL</p><h2>Engine adapters</h2></div><Badge tone="scope">CONFIGURED ≠ ENABLED ≠ REACHABLE ≠ AUTHORIZED</Badge></div><div className="engine-grid">{engines.map((engine) => {
+      const provenance = engine.engine === 'NUCLEI' ? engine.provenance : null
+      const latest = provenance?.latest_execution
+      return <article className={`engine-card ${engine.enabled ? 'enabled' : 'disabled'}`} key={engine.engine}><div className="engine-head"><div><h3>{engine.name}</h3><p className="mono">{engine.engine} · {engine.adapter_version ?? '—'}</p></div><Badge tone={engine.enabled ? 'good' : 'neutral'}>{engine.state}</Badge></div><div className="ready-grid"><ReadyDot label="Configured" value={engine.configured} /><ReadyDot label="Reachable" value={engine.reachable} /><ReadyDot label="Enabled" value={engine.enabled} /><ReadyDot label="Authorized" value={engine.authorized} /></div><p className="engine-detail">{engine.detail}</p>{provenance && <div className="nuclei-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">{provenance.pinned_engine_version ?? '—'} · {short(provenance.attested_binary_sha256, 20)}</dd></div><div><dt>Template manifest</dt><dd className="mono">{provenance.manifest_version ?? '—'} · {short(provenance.manifest_digest, 20)}</dd></div><div><dt>Admitted templates</dt><dd>{provenance.admitted_template_count ?? 0} · signature {provenance.signature_probe ?? '—'}</dd></div><div><dt>Last health check</dt><dd>{when(provenance.last_health_check)}</dd></div><div><dt>Latest execution</dt><dd>{latest ? <><span className="mono">{short(latest.scan_id, 18)}</span> · {latest.status} · {latest.http_connections ?? 0}/{latest.request_budget ?? 0} requests · {latest.records ?? 0} results</> : 'No execution recorded'}</dd></div><div><dt>Finding authority</dt><dd>{latest ? `${latest.tool_reported ?? 0} tool-reported · ${latest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div></dl><p className="responsibility-note">{provenance.responsibility}</p></div>}{!engine.enabled && <p className="isolation-note"><b>Future isolation boundary:</b> {engine.isolation_boundary}</p>}</article>
+    })}</div></section>
   </div>
 }
 
@@ -339,7 +371,7 @@ function HealthView({ health }: { health: Record<string, unknown> | null }) {
 }
 
 function ManagementView({ finding, onClose }: { finding?: Finding; onClose: () => void }) {
-  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.0</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">The local AI model analyzes a projected API surface and independently proposes an object-authorization attack hypothesis. A deterministic policy layer validates scope and safety, compiles approved read-only requests, and executes the test. A deterministic verifier confirms the result from fresh evidence. After remediation, the controller repeats the same access direction and verifies that the unauthorized request is denied.</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Projected API metadata only. Zero external model egress.</p></article><article className="controller"><span>02</span><h2>Deterministic controls</h2><p>Scope, safety, compilation and bounded execution.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh 200 / 200 / 200 evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Remediation verified</h2><p>Linked retest observes 200 / 200 / 403 and reaches PASS.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>RETEST</span><strong className="good-text">{finding.final_state} · 200 / 200 / 403</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Synthetic lab</li><li>One read-only BOLA capability</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
+  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.2</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">The local AI model analyzes a projected API surface and independently proposes an object-authorization attack hypothesis. A deterministic policy layer validates scope and safety, compiles approved read-only requests, and executes the test. A deterministic verifier confirms the result from fresh evidence. After remediation, the controller repeats the same access direction and verifies that the unauthorized request is denied.</p><p className="management-narrative">Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Projected API metadata only. Zero external model egress.</p></article><article className="controller"><span>02</span><h2>Deterministic controls</h2><p>Scope, safety, compilation and bounded execution.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Remediation verified</h2><p>Linked retests require independently verified patched evidence before PASS.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Synthetic lab</li><li>One read-only BOLA capability</li><li>One signed Nuclei template</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
 }
 
 export function App() {

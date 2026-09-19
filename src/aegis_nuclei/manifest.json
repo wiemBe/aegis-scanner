@@ -1,0 +1,66 @@
+{
+  "schema": "aegis.nuclei.template-manifest/1",
+  "template_set_id": "aegis-nuclei-lab-safe-http-v1",
+  "manifest_version": "1.2.0",
+  "profile_id": "NUCLEI_LAB_SAFE_HTTP_V1",
+  "engine": {
+    "name": "nuclei",
+    "version": "v3.11.1",
+    "upstream_repository": "https://github.com/projectdiscovery/nuclei",
+    "upstream_tag_commit": "a8c88feb4a1c8e961b7902534ce3af97e9d524a4",
+    "release_published_at": "2026-08-08T12:21:32Z",
+    "license": "MIT",
+    "release_checksums_asset": "nuclei_3.11.1_checksums.txt",
+    "artifacts": {
+      "linux_arm64": {
+        "asset": "nuclei_3.11.1_linux_arm64.zip",
+        "asset_sha256": "8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07",
+        "binary_sha256": "f27098e0be0cc370af52274611608ad61896d7f0a024e35b136327d39e725477"
+      },
+      "linux_amd64": {
+        "asset": "nuclei_3.11.1_linux_amd64.zip",
+        "asset_sha256": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+        "binary_sha256": "c49588140f357cbdddd5436dec11201953a4c5390faeec90777f9ee2cfd70251"
+      }
+    }
+  },
+  "upstream_templates": {
+    "repository": "https://github.com/projectdiscovery/nuclei-templates",
+    "release": "v10.4.8",
+    "commit": "e5f19e6144135e107962bb943231413796fd7fe7",
+    "license": "MIT",
+    "license_file": "LICENSE.md",
+    "license_sha256": "5fa6644d2dd1987a79c06f4af210d2cf8cfc4ee799999029d0f9980c9cf95a2c"
+  },
+  "templates": [
+    {
+      "template_id": "git-config",
+      "path": "http/exposures/configs/git-config.yaml",
+      "sha256": "bd8bdfa0b5ed5bf4d3712edb793adfd0987d9282e51c6f7d673bf14b9e4dd524",
+      "upstream_path": "http/exposures/configs/git-config.yaml",
+      "name": "Git Configuration - Detect",
+      "license": "MIT (projectdiscovery/nuclei-templates)",
+      "signature": {
+        "expected_status": "SIGNED_VERIFIED",
+        "signer": "projectdiscovery/nuclei-templates",
+        "digest_fingerprint": "922c64590222798bb761d5b6d8e72950"
+      },
+      "protocol": "http",
+      "methods": ["GET"],
+      "request_paths": ["{{BaseURL}}/.git/config"],
+      "max_requests": 1,
+      "redirects": "DISABLED",
+      "allowed_matcher_names": [],
+      "expected_severity": "medium",
+      "capability_id": "nuclei_scm_metadata_exposure_v1",
+      "verification_policy": "DETERMINISTIC_AEGIS_VERIFIER",
+      "verifier": "aegis-scm-metadata-verifier/1.2.0",
+      "review": {
+        "reviewed_on": "2026-09-19",
+        "reviewer": "Claude (AI coding assistant) - technical admission review",
+        "operator_countersigned": false,
+        "notes": "Single anonymous GET of {{BaseURL}}/.git/config; body word + DSL + status matchers; no payloads, raw requests, redirects, OAST, flow, code or variables. Its credential-regex extractors are admitted only because extracted values are stripped by the Aegis parser and never persisted."
+      }
+    }
+  ]
+}

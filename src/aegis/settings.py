@@ -89,6 +89,14 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     max_response_bytes: int = Field(default=131072, ge=1024, le=1048576)
 
+    # --- Phase 1.2 Nuclei integration (operator-enabled; OFF by default) -------------------------
+    # Enabling only lets the controller talk to the isolated nuclei-runner over the internal
+    # engine-rpc network. The runner must still attest READY (pinned binary, admitted signed
+    # templates) before any job executes. No Nuclei/ProjectDiscovery credential exists anywhere.
+    nuclei_enabled: bool = False
+    nuclei_runner_url: str = "http://nuclei-runner:8090"
+    nuclei_rpc_timeout_seconds: float = Field(default=60.0, gt=0, le=180)
+
     @property
     def allowed_hosts(self) -> frozenset[str]:
         return frozenset(host.strip().lower() for host in self.allowed_target_hosts.split(","))

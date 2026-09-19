@@ -690,6 +690,14 @@ class ScanResult(BaseModel):
     engine_evidence: list[dict[str, Any]] = Field(default_factory=list)
     normalized_findings: list[dict[str, Any]] = Field(default_factory=list)
     engine_job_rejections: list[dict[str, Any]] = Field(default_factory=list)
+    # --- Phase 1.2 Nuclei integration (additive) ----------------------------------------------
+    # The operator-requested capability (None = the unchanged AEGIS_NATIVE BOLA flow), the target
+    # REFERENCE the controller resolved, the typed Nuclei execution provenance, and body-free
+    # verifier facts. Stored as plain JSON for the same import-cycle reason as above.
+    capability_id: str | None = None
+    target_ref: str | None = None
+    nuclei_provenance: dict[str, Any] | None = None
+    verifier_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ScanCreate(StrictModel):
@@ -697,3 +705,8 @@ class ScanCreate(StrictModel):
     variant: Literal["vulnerable", "patched"] = "vulnerable"
     scenario: ScenarioClass = Field(default=ScenarioClass.POSITIVE_VULNERABLE, strict=False)
     retest_of: str | None = Field(default=None, pattern=r"^scan-[a-f0-9]{12}$")
+    # Phase 1.2: an operator may request an approved CAPABILITY by id (never a tool, template, flag
+    # or URL). Omitted -> the unchanged AEGIS_NATIVE flow. ``target_ref`` names an inventory entry;
+    # the controller resolves it (unknown references are rejected before any engine traffic).
+    capability: str | None = Field(default=None, pattern=r"^[a-z0-9_]{3,100}$")
+    target_ref: str | None = Field(default=None, pattern=r"^[a-z0-9-]{3,64}$")

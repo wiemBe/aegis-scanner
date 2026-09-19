@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 app = FastAPI(
     title="Synthetic Banking API",
@@ -72,3 +73,40 @@ def get_patched_account(
     if account["owner_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden")
     return dict(account)
+
+
+# --- Phase 1.2 synthetic Nuclei scenario: source-control metadata exposure ------------------------
+# Two explicitly synthetic, read-only route families. They are excluded from the OpenAPI document so
+# the planner's imported surface (and every AEGIS_NATIVE projection) stays byte-identical, and they
+# share no state or switch with the BOLA routes above. The fixture holds no remote, URL or
+# credential: it is a minimal, fake repository config that exists only to be detected.
+SYNTHETIC_GIT_CONFIG = (
+    "# SYNTHETIC AEGIS LAB FIXTURE - not a real repository\n"
+    "[core]\n"
+    "\trepositoryformatversion = 0\n"
+    "\tfilemode = true\n"
+    "\tbare = false\n"
+)
+_SCM_LAB = "scm-metadata-exposure"
+
+
+@app.get("/lab/nuclei/vulnerable", include_in_schema=False)
+def scm_lab_vulnerable() -> dict[str, str | bool]:
+    return {"lab": _SCM_LAB, "variant": "vulnerable", "synthetic": True}
+
+
+@app.get("/lab/nuclei/vulnerable/.git/config", include_in_schema=False)
+def scm_lab_vulnerable_git_config() -> PlainTextResponse:
+    # Deliberate misconfiguration: repository metadata is served from the web root.
+    return PlainTextResponse(SYNTHETIC_GIT_CONFIG)
+
+
+@app.get("/lab/nuclei/patched", include_in_schema=False)
+def scm_lab_patched() -> dict[str, str | bool]:
+    return {"lab": _SCM_LAB, "variant": "patched", "synthetic": True}
+
+
+@app.get("/lab/nuclei/patched/.git/config", include_in_schema=False)
+def scm_lab_patched_git_config() -> JSONResponse:
+    # Remediated: the metadata path is explicitly denied with a deterministic body.
+    return JSONResponse(status_code=404, content={"detail": "Repository metadata is not served"})

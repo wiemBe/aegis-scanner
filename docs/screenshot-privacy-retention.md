@@ -1,5 +1,12 @@
 # Browser screenshot privacy and retention policy
 
+## Phase 1.2 tool evidence
+
+Nuclei does not enable browser capture. Its evidence is a structured, redacted API card containing
+only fixed identifiers, versions/digests, counts, lifecycle state and verifier-owned facts. Raw
+Nuclei request/response bytes, curl commands, extracted values, stderr and target URLs are not
+persisted or projected. The existing screenshot policy and retention behavior are unchanged.
+
 Browser screenshot capture is **disabled** in Phase 1.0. No approved browser runner is connected,
 and no fixture is presented as scan evidence. The console labels the future placeholder
 `BROWSER_SCREENSHOT · FIXTURE · NOT SCAN EVIDENCE`.
