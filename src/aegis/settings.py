@@ -14,9 +14,14 @@ PROVIDER_MODE_LABELS: dict[str, str] = {
     "ollama": "LOCAL_LLM",
     "internal_openai_compatible": "INTERNAL_LLM",
     "openai_responses": "PUBLIC_LLM_DEPRECATED",
+    # DeepSeek is a public hosted API: the label is honest about the egress and the loss of the
+    # digest-pinned, reproducible provenance that local Ollama runs carry.
+    "deepseek": "PUBLIC_LLM_DEEPSEEK",
 }
 
-ProviderName = Literal["demo", "ollama", "internal_openai_compatible", "openai_responses"]
+ProviderName = Literal[
+    "demo", "ollama", "internal_openai_compatible", "openai_responses", "deepseek"
+]
 AuthMode = Literal["none", "bearer"]
 # Structured-output negotiation for OpenAI-compatible backends. "json_schema" uses the provider's
 # strict JSON-Schema response_format (OpenAI); "json_object" uses plain JSON mode and embeds the
@@ -62,6 +67,10 @@ class Settings(BaseSettings):
     # Route the internal_openai_compatible provider through the constrained CONNECT egress proxy
     # (used for public backends like DeepSeek) instead of a direct internal-network connection.
     ai_use_egress_proxy: bool = False
+    # DeepSeek hosted-API key (AI_PROVIDER=deepseek). Like ai_auth_token it is mounted ONLY into the
+    # llm-gateway service, never the control plane or the beast sandbox, and is redacted everywhere.
+    # Never commit it; export DEEPSEEK_API_KEY in the shell that runs compose.
+    deepseek_api_key: SecretStr | None = None
 
     # Control plane -> llm-gateway RPC over the internal planner-rpc network (no secret in transit).
     llm_gateway_url: str = "http://llm-gateway:8080"

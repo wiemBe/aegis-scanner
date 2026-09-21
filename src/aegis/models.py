@@ -518,6 +518,9 @@ class ProviderRunMetadata(BaseModel):
     total_duration_ms: int | None = None
     load_duration_ms: int | None = None
     stop_reason: str | None = None
+    # Hosted-provider response id (e.g. DeepSeek). Cloud runs have no content digest or reproducible
+    # seed, so this id plus the recorded params/token counts is the provenance handle instead.
+    response_id: str | None = None
     planner_contract_version: int = PLANNER_CONTRACT_VERSION
     # Set when a decision was produced by a bounded schema-repair call (Part D). None/False on a
     # first-pass decision. Records only that a repair happened, never any repaired prose.
