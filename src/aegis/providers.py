@@ -521,8 +521,57 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             self._token = token.get_secret_value()
         self._temperature = settings.ai_temperature
         self._seed = settings.ai_seed
+        # Structured-output negotiation. Backends supporting the OpenAI strict json_schema feature
+        # use it directly; backends that only support JSON mode (e.g. DeepSeek) embed the same
+        # strict schema in the prompt. Local Pydantic validation is identical for both.
+        self._response_mode = settings.ai_response_format
+        # Whether the backend accepts the OpenAI 'seed' field. When False we omit it and never claim
+        # deterministic behaviour we did not request.
+        self._supports_seed = settings.ai_supports_seed
+        # Optional constrained CONNECT egress proxy for public backends (e.g. DeepSeek). TLS stays
+        # end-to-end through the tunnel, so certificate verification remains gateway<->provider.
+        self._use_proxy = settings.ai_use_egress_proxy
+        self._proxy_url = settings.provider_proxy_url
+        self._verify = settings.provider_ca_bundle or True
         self._output_cap = settings.max_completion_tokens
         self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    def _client(self) -> httpx.AsyncClient:
+        # Direct connection by default; through the constrained CONNECT proxy for public backends.
+        if not self._use_proxy:
+            return super()._client()
+        kwargs: dict[str, Any] = {
+            "timeout": self._timeout,
+            "follow_redirects": False,
+            "trust_env": False,
+        }
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        else:
+            kwargs["proxy"] = self._proxy_url
+            kwargs["verify"] = self._verify
+        return httpx.AsyncClient(**kwargs)
+
+    def _system_prompt(self, system_prompt: str, schema: dict[str, Any]) -> str:
+        # json_object mode has no provider-side schema enforcement, so we hand the model the exact
+        # strict schema in the prompt. The word "json" is present as JSON mode requires. Local
+        # Pydantic validation remains the authority regardless of what the model returns.
+        if self._response_mode != "json_object":
+            return system_prompt
+        return (
+            system_prompt
+            + "\nReturn only a single JSON object that validates against this JSON Schema "
+            "(no markdown, no commentary, no extra keys):\n"
+            + json.dumps(schema, ensure_ascii=True)
+        )
+
+    def _response_format(self, schema: dict[str, Any]) -> dict[str, Any]:
+        if self._response_mode == "json_object":
+            return {"type": "json_object"}
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "security_decision", "strict": True, "schema": schema},
+        }
 
     def _payload(
         self,
@@ -531,25 +580,20 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
         max_output_tokens: int,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": self._system_prompt(system_prompt, schema)},
                 {"role": "user", "content": json.dumps(content, ensure_ascii=True)},
             ],
             "temperature": self._temperature,
-            "seed": self._seed,
             "stream": False,
             "max_tokens": min(max_output_tokens, self._output_cap),
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "security_decision",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
+            "response_format": self._response_format(schema),
         }
+        if self._supports_seed:
+            payload["seed"] = self._seed
+        return payload
 
     async def _chat(
         self,
@@ -572,8 +616,10 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
         finish = choice.get("finish_reason")
         if finish not in (None, "stop"):
             raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}")
-        message = choice["message"]["content"]
-        if not isinstance(message, str):
+        # Use ONLY the structured content field. Any provider reasoning field (e.g. DeepSeek's
+        # 'reasoning_content') is deliberately never read, persisted, returned or logged.
+        message = choice["message"].get("content")
+        if not isinstance(message, str) or not message.strip():
             raise PlannerFailure("MISSING_MODEL_OUTPUT")
         usage = self._usage(data.get("usage") or {})
         metadata = ProviderRunMetadata(
@@ -581,7 +627,8 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             runtime=self.provider_type,
             model=self.model,
             temperature=self._temperature,
-            seed=self._seed,
+            # Record the actual parameter sent: None means seed was omitted (no determinism claim).
+            seed=self._seed if self._supports_seed else None,
             prompt_eval_count=usage.input_tokens,
             eval_count=usage.output_tokens,
             stop_reason=finish,
@@ -714,6 +761,9 @@ class DeepSeekProvider(InternalOpenAICompatibleProvider):
         self._token = key.get_secret_value()
         self._temperature = settings.ai_temperature
         self._seed = settings.ai_seed
+        self._use_proxy = settings.ai_use_egress_proxy
+        self._proxy_url = settings.provider_proxy_url
+        self._verify = settings.provider_ca_bundle or True
         self._output_cap = settings.max_completion_tokens
         self._per_call_token_ceiling = settings.max_tokens_per_scan
 

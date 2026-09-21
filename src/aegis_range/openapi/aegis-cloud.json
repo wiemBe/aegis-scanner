@@ -1,0 +1,17 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Aegis Cloud API", "version": "1.0.0"},
+  "servers": [{"url": "http://aegis-cloud:8104"}],
+  "paths": {
+    "/api/integrations": {"get": {"operationId": "listIntegrations", "summary": "List configured integrations", "responses": {"200": {"description": "Integrations"}}}},
+    "/api/integrations/check": {"post": {"operationId": "checkIntegration", "summary": "Check an integration endpoint", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["url"], "properties": {"url": {"type": "string", "maxLength": 240}}}}}}, "responses": {"200": {"description": "Check result"}, "400": {"description": "Destination not approved"}, "502": {"description": "Check failed"}}}},
+    "/api/regions": {"get": {"operationId": "listRegions", "summary": "List service regions", "responses": {"200": {"description": "Regions"}}}},
+    "/api/imports/xml": {"post": {"operationId": "importIntegrationXml", "summary": "Import an integration document", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["document"], "properties": {"document": {"type": "string", "maxLength": 4000}}}}}}, "responses": {"200": {"description": "Import result"}, "400": {"description": "Document rejected"}}}},
+    "/api/workspaces/current": {
+      "get": {"operationId": "getCurrentWorkspace", "summary": "Get the current workspace", "parameters": [{"name": "cloud_session", "in": "cookie", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Workspace"}, "401": {"description": "Session unavailable"}}},
+      "options": {"operationId": "preflightCurrentWorkspace", "summary": "Check workspace request options", "responses": {"204": {"description": "Request options"}}}
+    },
+    "/api/operations/summary": {"get": {"operationId": "getOperationsSummary", "summary": "Get operations summary", "responses": {"200": {"description": "Operations summary"}, "502": {"description": "Service unavailable"}}}},
+    "/api/integrations/execute": {"post": {"operationId": "executeIntegrationOperation", "summary": "Execute an integration operation", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["access_token"], "properties": {"access_token": {"type": "string", "maxLength": 240}}}}}}, "responses": {"200": {"description": "Operation result"}, "403": {"description": "Access denied"}}}}
+  }
+}

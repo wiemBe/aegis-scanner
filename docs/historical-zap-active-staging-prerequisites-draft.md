@@ -1,4 +1,14 @@
-# Phase 1.4 — ZAP active scanning in staging: prerequisites
+# HISTORICAL DRAFT — ZAP active scanning prerequisites (superseded)
+
+> **Historical prerequisite draft. Not the current phase plan.** This note was written during
+> Phase 1.3 and speculatively labelled "Phase 1.4"; that number was later assigned to **Beast Mode**
+> ([Phase 1.4](phase-1.4-beast-mode.md)). Controlled ZAP active scanning is **Phase 1.5**
+> ([Phase 1.5](phase-1.5-zap-active-reflected-xss.md)), and it targets the **synthetic lab only** —
+> not the "staging" environment this draft assumed. Several assumptions here are now stale (for
+> example, the pinned base image *does* contain a release reflected-XSS active rule; it was pruned
+> from the passive runner image, and the admitted rule's add-on transitively requires the `oast` and
+> `database` add-ons, which Phase 1.5 includes only as neutralised forced dependencies). This file is
+> retained unchanged below for provenance; follow Phase 1.5 for the actual, implemented plan.
 
 Phase 1.3 ships **passive** ZAP analysis of controller-projected read-only operations against the
 synthetic lab only. Active scanning is structurally impossible in 1.3: no active-rule add-on is in

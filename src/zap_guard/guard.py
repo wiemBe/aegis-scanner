@@ -23,6 +23,7 @@ only running while the guard is armed) cannot re-arm or widen it.
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import json
 import re
@@ -35,11 +36,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 GUARD_VERSION = "zap-scope-guard/1.3.0"
 GUARD_SCHEMA = "aegis.zap.guard/1"
 ALLOWED_ORIGINS: tuple[str, ...] = ("http://lab-api:8001",)
+# Phase 1.5 active mode: a much larger but still hard-capped request budget, and query mutation
+# allowed only on an explicit set of projected parameters. The passive mode is unchanged.
+ACTIVE_MAX_REQUESTS = 512
 UPSTREAM_TIMEOUT_SECONDS = 5.0
 MAX_RELAY_BYTES = 1_048_576
 MAX_CONTROL_BYTES = 4_096
@@ -60,11 +64,34 @@ _HOP_BY_HOP = frozenset(
     }
 )
 _PATH = re.compile(r"^/[A-Za-z0-9/_-]{1,200}$")
+_PARAM_NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _EXEC = re.compile(r"^exec-[a-f0-9]{12}$")
 _TOKEN = re.compile(r"^[a-f0-9]{32}$")
 _ARM_KEYS = frozenset(
     {"schema_version", "execution_id", "origin", "allowlist", "max_requests", "ttl_ms"}
 )
+_ACTIVE_ARM_KEYS = frozenset(
+    {
+        "schema_version",
+        "execution_id",
+        "origin",
+        "allowlist",
+        "max_requests",
+        "ttl_ms",
+        "mode",
+        "allowed_query_params",
+        # Phase 1.5 lease binding. The guard does not verify the lease signature — that belongs to
+        # the root-owned admission component — but it records the identity and the bindings the
+        # runner consumed, echoes them back so the runner can confirm both sides agree, and stops
+        # forwarding the moment the lease expires or is revoked.
+        "lease_id",
+        "lease_expires_at",
+        "projection_digest",
+        "allowlist_digest",
+    }
+)
+_LEASE_ID = re.compile(r"^lease-[a-f0-9]{16}$")
+_DIGEST = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _now() -> str:
@@ -79,6 +106,7 @@ class GuardState:
         allowed_origins: tuple[str, ...] = ALLOWED_ORIGINS,
         upstream_timeout: float = UPSTREAM_TIMEOUT_SECONDS,
         resolver: Callable[[str, int], tuple[str, int]] | None = None,
+        control_secret: bytes = b"",
     ) -> None:
         self.allowed_origins = allowed_origins
         self.upstream_timeout = upstream_timeout
@@ -86,6 +114,7 @@ class GuardState:
         # the admitted host itself (Docker DNS on zap-target); the offline suite maps the fixed
         # inventory origin onto a loopback test server. Admission decisions never use it.
         self.resolve = resolver or (lambda host, port: (host, port))
+        self.control_secret = control_secret
         self.lock = threading.Lock()
         self.booted_at = _now()
         self.executions_total = 0
@@ -96,10 +125,17 @@ class GuardState:
 
     def _reset(self) -> None:
         self.armed = False
+        self.mode = "PASSIVE"
+        self.lease_id: str | None = None
+        self.lease_expires_at: int | None = None
+        self.projection_digest: str | None = None
+        self.allowlist_digest: str | None = None
+        self.lease_revoked = False
         self.execution_id: str | None = None
         self.token: str | None = None
         self.origin: str | None = None
         self.allowlist: frozenset[tuple[str, str]] = frozenset()
+        self.allowed_params: frozenset[str] = frozenset()
         self.max_requests = 0
         self.deadline = 0.0
         self.received = 0
@@ -115,10 +151,24 @@ class GuardState:
     # --- control ------------------------------------------------------------------------------
 
     def is_armed(self) -> bool:
-        return self.armed and time.monotonic() < self.deadline
+        """Armed AND inside both the arm TTL and the lease expiry, and not revoked.
+
+        Expiry and revocation are checked here rather than only at arm time, so a lease that runs
+        out or is revoked mid-scan stops forwarding on the very next request without anyone having
+        to remember to disarm."""
+
+        if not self.armed or self.lease_revoked or time.monotonic() >= self.deadline:
+            return False
+        if self.lease_expires_at is not None and time.time() >= self.lease_expires_at:
+            return False
+        return True
 
     def arm(self, payload: Any) -> tuple[int, dict[str, Any]]:
-        if not isinstance(payload, dict) or set(payload) != _ARM_KEYS:
+        if not isinstance(payload, dict):
+            return 400, {"error": "INVALID_ARM"}
+        if payload.get("mode") == "ACTIVE":
+            return self._arm_active(payload)
+        if set(payload) != _ARM_KEYS:
             return 400, {"error": "INVALID_ARM"}
         execution_id, origin = payload["execution_id"], payload["origin"]
         allowlist, max_requests = payload["allowlist"], payload["max_requests"]
@@ -167,6 +217,145 @@ class GuardState:
                 "execution_id": execution_id,
             }
 
+    def _arm_active(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Arm for one active scan: a larger hard request budget and query mutation on an explicit
+        parameter allowlist only. The passive arm path is untouched."""
+
+        if set(payload) != _ACTIVE_ARM_KEYS:
+            return 400, {"error": "INVALID_ARM"}
+        execution_id, origin = payload["execution_id"], payload["origin"]
+        allowlist, max_requests, ttl = (
+            payload["allowlist"],
+            payload["max_requests"],
+            payload["ttl_ms"],
+        )
+        params = payload["allowed_query_params"]
+        lease_id, lease_expires_at = payload["lease_id"], payload["lease_expires_at"]
+        projection_digest = payload["projection_digest"]
+        allowlist_digest = payload["allowlist_digest"]
+        if (
+            not isinstance(lease_id, str)
+            or not _LEASE_ID.fullmatch(lease_id)
+            or type(lease_expires_at) is not int
+            or not 1_600_000_000 <= lease_expires_at <= 4_102_444_800
+            or not isinstance(projection_digest, str)
+            or not _DIGEST.fullmatch(projection_digest)
+            or not isinstance(allowlist_digest, str)
+            or not _DIGEST.fullmatch(allowlist_digest)
+        ):
+            return 400, {"error": "INVALID_ARM"}
+        if lease_expires_at <= time.time():
+            # An already-expired lease is never armed: the guard refuses before ZAP is started.
+            return 400, {"error": "LEASE_EXPIRED"}
+        if (
+            payload["schema_version"] != GUARD_SCHEMA
+            or not isinstance(execution_id, str)
+            or not _EXEC.fullmatch(execution_id)
+            or origin not in self.allowed_origins
+            or not isinstance(allowlist, list)
+            or not 1 <= len(allowlist) <= 4
+            or type(max_requests) is not int
+            or not 1 <= max_requests <= ACTIVE_MAX_REQUESTS
+            or type(ttl) is not int
+            or not 1_000 <= ttl <= 660_000
+            or not isinstance(params, list)
+            or not 1 <= len(params) <= 4
+        ):
+            return 400, {"error": "INVALID_ARM"}
+        pairs: set[tuple[str, str]] = set()
+        for item in allowlist:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"method", "path"}
+                or item["method"] not in {"GET", "HEAD"}
+                or not isinstance(item["path"], str)
+                or not _PATH.fullmatch(item["path"])
+            ):
+                return 400, {"error": "INVALID_ARM"}
+            pairs.add((item["method"], item["path"]))
+        param_set: set[str] = set()
+        for name in params:
+            if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
+                return 400, {"error": "INVALID_ARM"}
+            param_set.add(name)
+        with self.lock:
+            if self.is_armed():
+                return 409, {"error": "BUSY"}
+            self._reset()
+            self.armed = True
+            self.mode = "ACTIVE"
+            self.execution_id = execution_id
+            self.token = secrets.token_hex(16)
+            self.origin = origin
+            self.allowlist = frozenset(pairs)
+            self.allowed_params = frozenset(param_set)
+            self.max_requests = max_requests
+            self.lease_id = lease_id
+            self.lease_expires_at = lease_expires_at
+            self.projection_digest = projection_digest
+            self.allowlist_digest = allowlist_digest
+            self.lease_revoked = False
+            # The guard never outlives the lease, whatever TTL the runner asked for.
+            self.deadline = min(
+                time.monotonic() + ttl / 1000,
+                time.monotonic() + max(0.0, lease_expires_at - time.time()),
+            )
+            return 200, {
+                "schema_version": GUARD_SCHEMA,
+                "token": self.token,
+                "execution_id": execution_id,
+                "lease_id": lease_id,
+                "lease_expires_at": lease_expires_at,
+                "projection_digest": projection_digest,
+                "allowlist_digest": allowlist_digest,
+                "max_requests": max_requests,
+            }
+
+    def revoke(self, payload: Any) -> tuple[int, dict[str, Any]]:
+        """Immediate, terminal disarm for one lease. Step 2 of the emergency-stop order.
+
+        Unlike ``/v1/disarm`` this does not require the arm token: the operator's stop path must
+        work even if the runner has lost it. It is still bound to the exact armed lease id, so it
+        can only ever stop the run that is actually in flight."""
+
+        lease_id = payload.get("lease_id") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - {"lease_id", "reason"}
+            or not isinstance(lease_id, str)
+            or not _LEASE_ID.fullmatch(lease_id)
+        ):
+            return 400, {"error": "INVALID_REVOKE"}
+        with self.lock:
+            if self.lease_id != lease_id:
+                return 404, {"error": "UNKNOWN_LEASE"}
+            self.lease_revoked = True
+            counters = self._counters()
+            return 200, {
+                "schema_version": GUARD_SCHEMA,
+                "lease_id": lease_id,
+                "state": "REVOKED",
+                "counters": counters,
+            }
+
+    def binding(self) -> dict[str, Any]:
+        """What the guard believes it is armed for. The runner compares this with the lease."""
+
+        with self.lock:
+            return {
+                "schema_version": GUARD_SCHEMA,
+                "armed": self.is_armed(),
+                "mode": self.mode,
+                "execution_id": self.execution_id,
+                "lease_id": self.lease_id,
+                "lease_expires_at": self.lease_expires_at,
+                "projection_digest": self.projection_digest,
+                "allowlist_digest": self.allowlist_digest,
+                "origin": self.origin,
+                "max_requests": self.max_requests,
+                "lease_revoked": self.lease_revoked,
+            }
+
     def _counters(self) -> dict[str, Any]:
         return {
             "received": self.received,
@@ -186,8 +375,10 @@ class GuardState:
         if not isinstance(payload, dict) or set(payload) != {"token"} or not isinstance(token, str):
             return 400, {"error": "INVALID_TOKEN"}
         with self.lock:
-            if not _TOKEN.fullmatch(token) or self.token is None or not secrets.compare_digest(
-                token, self.token
+            if (
+                not _TOKEN.fullmatch(token)
+                or self.token is None
+                or not secrets.compare_digest(token, self.token)
             ):
                 return 403, {"error": "INVALID_TOKEN"}
             body = {
@@ -198,7 +389,12 @@ class GuardState:
             }
             if disarm:
                 self.executions_total += 1
+                # A stop-side revocation is durable evidence: disarming the (already dead) run
+                # must not erase the fact that this lease was revoked before the kill. The next
+                # arm calls _reset() and starts clean, so the marker never leaks across runs.
+                revoked = self.lease_revoked
                 self._reset()
+                self.lease_revoked = revoked
             return 200, body
 
     def attestation(self) -> dict[str, Any]:
@@ -245,23 +441,32 @@ class GuardState:
                 or not parsed.hostname
                 or parsed.username
                 or parsed.password
-                or parsed.query
                 or parsed.fragment
                 or port is None
+                or (parsed.query and self.mode != "ACTIVE")
             ):
+                # A query string is only ever allowed in active mode, on the projected parameter.
                 return block("MALFORMED_TARGET")
             origin = f"http://{parsed.hostname.lower()}:{port}"
             if origin != self.origin or origin not in self.allowed_origins:
                 return block("ORIGIN")
             if not _PATH.fullmatch(parsed.path) or (method, parsed.path) not in self.allowlist:
                 return block("PATH")
+            if parsed.query and not (
+                set(parse_qs(parsed.query, keep_blank_values=True)) <= self.allowed_params
+            ):
+                # ZAP tried to mutate a parameter other than the projected one.
+                return block("PARAM")
             if self.forwarded >= self.max_requests:
                 self.budget_exceeded = True
                 return block("BUDGET")
             self.forwarded += 1
             self.forwarded_total += 1
+            # Traffic is accounted by the bare path; the query (active mode only) is forwarded so
+            # ZAP's payload reaches the target, but never widens the per-path/allowlist accounting.
             self.per_path[(method, parsed.path)] += 1
-            return None, (parsed.hostname.lower(), port, parsed.path)
+            forward_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            return None, (parsed.hostname.lower(), port, forward_path)
 
     def record_response(self, status: int) -> None:
         with self.lock:
@@ -307,6 +512,9 @@ def _proxy_handler(state: GuardState) -> type[BaseHTTPRequestHandler]:
             host, port, path = target
             headers = {name: self.headers[name] for name in FORWARD_HEADERS if self.headers[name]}
             headers["Host"] = f"{host}:{port}"
+            # Active-mode forwarding carries ZAP's payload in the query string; only the bare path
+            # is ever logged, so a raw attack string is never written to the guard's output.
+            logged = path.split("?", 1)[0]
             connect_host, connect_port = state.resolve(host, port)
             connection = http.client.HTTPConnection(
                 connect_host, connect_port, timeout=state.upstream_timeout
@@ -318,23 +526,23 @@ def _proxy_handler(state: GuardState) -> type[BaseHTTPRequestHandler]:
                 if len(body) > MAX_RELAY_BYTES:
                     raise http.client.HTTPException("oversized upstream body")
                 status = response.status
-                relay = [
-                    (k, v) for k, v in response.getheaders() if k.lower() not in _HOP_BY_HOP
-                ]
+                relay = [(k, v) for k, v in response.getheaders() if k.lower() not in _HOP_BY_HOP]
             except TimeoutError:
                 state.record_failure(timeout=True)
                 self.close_connection = True  # mirror the failure: no response is fabricated
-                sys.stderr.write(f"guard UPSTREAM_TIMEOUT method={self.command} path={path}\n")
+                sys.stderr.write(f"guard UPSTREAM_TIMEOUT method={self.command} path={logged}\n")
                 return
             except (http.client.HTTPException, OSError):
                 state.record_failure(timeout=False)
                 self.close_connection = True
-                sys.stderr.write(f"guard UPSTREAM_FAILURE method={self.command} path={path}\n")
+                sys.stderr.write(f"guard UPSTREAM_FAILURE method={self.command} path={logged}\n")
                 return
             finally:
                 connection.close()
             state.record_response(status)
-            sys.stderr.write(f"guard FORWARDED method={self.command} path={path} status={status}\n")
+            sys.stderr.write(
+                f"guard FORWARDED method={self.command} path={logged} status={status}\n"
+            )
             self.send_response(status)
             for key, value in relay:
                 self.send_header(key, value)
@@ -374,17 +582,30 @@ def _control_handler(state: GuardState) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _authorized(self) -> bool:
+            if not state.control_secret:  # in-process legacy fixture only; entrypoint rejects this
+                return True
+            supplied = self.headers.get("X-Aegis-Guard-Control", "").encode()
+            return bool(supplied) and hmac.compare_digest(supplied, state.control_secret)
+
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
                 self._send(200, {"status": "READY"})
+            elif not self._authorized():
+                self._send(403, {"error": "CONTROL_UNAUTHORIZED"})
             elif self.path == "/v1/attestation":
                 self._send(200, state.attestation())
+            elif self.path == "/v1/binding":
+                self._send(200, state.binding())
             else:
                 self._send(404, {"error": "NOT_FOUND"})
 
         def do_POST(self) -> None:  # noqa: N802
-            if self.path not in {"/v1/arm", "/v1/counters", "/v1/disarm"}:
+            if self.path not in {"/v1/arm", "/v1/counters", "/v1/disarm", "/v1/revoke"}:
                 self._send(404, {"error": "NOT_FOUND"})
+                return
+            if not self._authorized():
+                self._send(403, {"error": "CONTROL_UNAUTHORIZED"})
                 return
             if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
                 self._send(415, {"error": "INVALID_REQUEST"})
@@ -404,13 +625,25 @@ def _control_handler(state: GuardState) -> type[BaseHTTPRequestHandler]:
                 return
             if self.path == "/v1/arm":
                 self._send(*state.arm(payload))
+            elif self.path == "/v1/revoke":
+                self._send(*state.revoke(payload))
             else:
                 self._send(*state.counters(payload, disarm=self.path == "/v1/disarm"))
 
     return ControlHandler
 
 
-_ROUTES = frozenset({"/health", "/v1/attestation", "/v1/arm", "/v1/counters", "/v1/disarm"})
+_ROUTES = frozenset(
+    {
+        "/health",
+        "/v1/attestation",
+        "/v1/binding",
+        "/v1/arm",
+        "/v1/counters",
+        "/v1/disarm",
+        "/v1/revoke",
+    }
+)
 
 
 def serve(

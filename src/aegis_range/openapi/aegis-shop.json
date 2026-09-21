@@ -1,0 +1,18 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Aegis Shop API", "version": "1.0.0"},
+  "servers": [{"url": "http://aegis-shop:8102"}],
+  "paths": {
+    "/api/products": {"get": {"operationId": "searchProducts", "summary": "Search the product catalog", "parameters": [{"name": "q", "in": "query", "required": false, "schema": {"type": "string", "maxLength": 120}}], "responses": {"200": {"description": "Products"}}}},
+    "/api/categories": {"get": {"operationId": "listCategories", "summary": "List product categories", "responses": {"200": {"description": "Categories"}}}},
+    "/api/promotions/preview": {"get": {"operationId": "previewPromotion", "summary": "Preview promotion copy", "parameters": [{"name": "message", "in": "query", "required": true, "schema": {"type": "string", "maxLength": 240}}], "responses": {"200": {"description": "HTML preview", "content": {"text/html": {"schema": {"type": "string"}}}}}}},
+    "/api/reviews": {
+      "get": {"operationId": "listProductReviews", "summary": "List product reviews", "responses": {"200": {"description": "Review page", "content": {"text/html": {"schema": {"type": "string"}}}}}},
+      "post": {"operationId": "createProductReview", "summary": "Create a product review", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["product_id", "content"], "properties": {"product_id": {"type": "string", "maxLength": 40}, "content": {"type": "string", "maxLength": 1000}}}}}}, "responses": {"200": {"description": "Review accepted"}}}
+    },
+    "/api/profile/form": {"get": {"operationId": "getPreferenceForm", "summary": "Get customer preference form", "responses": {"200": {"description": "Preference form"}}}},
+    "/api/profile/preferences": {"post": {"operationId": "updatePreferences", "summary": "Update customer preferences", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["newsletter"], "properties": {"newsletter": {"type": "boolean"}}}}}}, "responses": {"200": {"description": "Updated preferences"}, "403": {"description": "Request rejected"}}}},
+    "/api/attachments": {"post": {"operationId": "createSupportAttachment", "summary": "Create a support attachment", "parameters": [{"name": "X-Filename", "in": "header", "required": true, "schema": {"type": "string", "maxLength": 120}}], "requestBody": {"required": true, "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}, "text/plain": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "Attachment created"}, "400": {"description": "Attachment rejected"}}}},
+    "/api/attachments/{attachment_id}": {"get": {"operationId": "getSupportAttachment", "summary": "Get a support attachment", "parameters": [{"name": "attachment_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Attachment"}, "404": {"description": "Attachment not found"}}}}
+  }
+}

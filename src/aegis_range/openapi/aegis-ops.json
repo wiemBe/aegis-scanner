@@ -1,0 +1,13 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Aegis Ops API", "version": "1.0.0"},
+  "servers": [{"url": "http://aegis-ops:8103"}],
+  "paths": {
+    "/api/reports": {"get": {"operationId": "listReports", "summary": "List operational reports", "responses": {"200": {"description": "Reports"}}}},
+    "/api/reports/download": {"get": {"operationId": "downloadReport", "summary": "Download an operational report", "parameters": [{"name": "file", "in": "query", "required": true, "schema": {"type": "string", "maxLength": 160}}], "responses": {"200": {"description": "Report text", "content": {"text/plain": {"schema": {"type": "string"}}}}, "404": {"description": "Report not found"}}}},
+    "/api/teams": {"get": {"operationId": "listTeams", "summary": "List operating teams", "responses": {"200": {"description": "Teams"}}}},
+    "/api/diagnostics/run": {"post": {"operationId": "runServiceDiagnostic", "summary": "Run a service diagnostic", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["target", "reference"], "properties": {"target": {"type": "string", "maxLength": 120}, "reference": {"type": "string", "maxLength": 80}}}}}}, "responses": {"200": {"description": "Diagnostic result"}, "400": {"description": "Input rejected"}, "502": {"description": "Diagnostic unavailable"}}}},
+    "/api/reports/preview": {"post": {"operationId": "previewOperationalReport", "summary": "Preview an operational report", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["content"], "properties": {"content": {"type": "string", "maxLength": 1000}}}}}}, "responses": {"200": {"description": "Report preview"}, "400": {"description": "Input rejected"}}}},
+    "/api/support/status": {"get": {"operationId": "getSupportStatus", "summary": "Get service support status", "responses": {"200": {"description": "Support status"}}}}
+  }
+}

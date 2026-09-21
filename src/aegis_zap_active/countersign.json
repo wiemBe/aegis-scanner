@@ -1,0 +1,33 @@
+{
+  "authorization": {
+    "add_on_digests": {
+      "ascanrules": "9c1b64c2fceda629f7c0ab0c21b5901035494f78da51d584972eaf85e94e91cc",
+      "database": "4c58ca142288d9ddc6ae3fd8fe6815e3894462bae67eb0776e540a2d9ddaf87d",
+      "oast": "f06ecea02e2c1df4a164e737dd632afba4430225b2fdc2feb6042bdb1e976b3d"
+    },
+    "admitted_rule": {
+      "name": "Cross Site Scripting (Reflected)",
+      "plugin_id": 40012,
+      "strength": "LOW",
+      "threshold": "MEDIUM"
+    },
+    "allowed_methods": [
+      "GET"
+    ],
+    "capability_id": "zap_active_reflected_xss_v1",
+    "environment": "SYNTHETIC_LAB",
+    "expires_at": null,
+    "issued_at": "2026-09-21T18:10:50Z",
+    "manifest_sha256": "0a7b38a165c05d1fe9bae3ecfc11f1716ff55d0d88c34f146641ae4af0745e15",
+    "profile_id": "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1",
+    "record_id": "countersign-zap-active-reflected-xss-v2",
+    "release_version": "1.5.1",
+    "schema": "aegis.zap.active-authorization/2",
+    "signer_key_id": "efe-phase15-operator-20260921",
+    "target_refs": [
+      "synthetic-zap-active-vulnerable",
+      "synthetic-zap-active-patched"
+    ]
+  },
+  "signature": "RDVEeoUACcz9pixmkvUNhNB4yJWlNHnhl_p3DS5-NCJYw8u4NTzXnQW-TUwF0Gei74tU9dSBZM4VfvrpMr7gCQ"
+}

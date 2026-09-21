@@ -1,0 +1,48 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Synthetic reflected-XSS search surface",
+    "version": "1.5.0",
+    "description": "Controller-owned source inventory. INTENTIONALLY VULNERABLE. Lab use only."
+  },
+  "servers": [{ "url": "http://lab-api:8001" }],
+  "paths": {
+    "/lab/zap-active/vulnerable/search": {
+      "get": {
+        "operationId": "labZapActiveVulnerableSearch",
+        "summary": "Synthetic reflected-XSS search (vulnerable variant)",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 256 }
+          }
+        ],
+        "responses": { "200": { "description": "Synthetic HTML search response" } }
+      }
+    },
+    "/lab/zap-active/patched/search": {
+      "get": {
+        "operationId": "labZapActivePatchedSearch",
+        "summary": "Synthetic reflected-XSS search (patched variant)",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 256 }
+          }
+        ],
+        "responses": { "200": { "description": "Synthetic HTML search response" } }
+      }
+    },
+    "/lab/zap-active/vulnerable/admin/purge": {
+      "post": {
+        "operationId": "labZapActiveAdminPurge",
+        "summary": "State-changing operation (never admitted)",
+        "responses": { "200": { "description": "Synthetic" } }
+      }
+    }
+  }
+}

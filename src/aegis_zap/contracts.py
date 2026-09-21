@@ -150,6 +150,21 @@ class GuardArmResponse(_Strict):
     schema_version: Literal["aegis.zap.guard/1"] = GUARD_SCHEMA
     token: str = Field(pattern=r"^[a-f0-9]{32}$")
     execution_id: str = Field(pattern=r"^exec-[a-f0-9]{12}$")
+    # Phase 1.5 ACTIVE mode only: the guard echoes the lease binding it recorded so the runner can
+    # confirm that both sides are armed for the same lease, target and digests. Absent (and left at
+    # None) on the unchanged Phase 1.3 passive arm path.
+    lease_id: str | None = Field(default=None, pattern=r"^lease-[a-f0-9]{16}$")
+    lease_expires_at: int | None = Field(default=None, ge=1_600_000_000, le=4_102_444_800)
+    projection_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    allowlist_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    max_requests: int | None = Field(default=None, ge=1, le=512)
+
+
+class GuardRevokeResponse(_Strict):
+    schema_version: Literal["aegis.zap.guard/1"] = GUARD_SCHEMA
+    lease_id: str = Field(pattern=r"^lease-[a-f0-9]{16}$")
+    state: Literal["REVOKED"]
+    counters: GuardCounters
 
 
 class GuardCountersResponse(_Strict):

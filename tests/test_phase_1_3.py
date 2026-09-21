@@ -1002,7 +1002,14 @@ def test_vulnerable_execution_reports_one_alert_on_the_scenario_route(
     assert response.session_destroyed and not any(executor.state.paths.work_root.iterdir())
     argv = fake.run_calls()[0]["argv"]
     assert "-autorun" in argv and "-silent" in argv and "-notel" in argv
-    assert set(fake.run_calls()[0]["env"]) <= {"PATH", "LANG", "LC_ALL", "HOME"}
+    assert set(fake.run_calls()[0]["env"]) <= {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "HOME",
+        # macOS injects this process-local encoding hint even with a constructed subprocess env.
+        "__CF_USER_TEXT_ENCODING",
+    }
 
 
 def test_patched_execution_has_complete_coverage_and_zero_alerts(
@@ -1364,8 +1371,13 @@ def test_controller_builds_job_from_catalog_inventory_and_projection() -> None:
     assert capability and capability.verified_severity == "LOW"
     profile = get_engine_profile(PROFILE_ID)
     assert profile and profile.enabled and profile.capability_ids == (CAPABILITY,)
+    # Phase 1.5 enables a second, separate ZAP profile (active reflected XSS); the passive profile
+    # is unchanged and is still the only PASSIVE one.
     zap_profiles = [p for p in PROFILE_CATALOG if p.engine is SecurityEngine.ZAP and p.enabled]
-    assert [p.profile_id for p in zap_profiles] == [PROFILE_ID]
+    assert [p.profile_id for p in zap_profiles] == [
+        PROFILE_ID,
+        "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -1,17 +1,75 @@
 # Canonical project state
 
-Updated: 2026-09-19 (Europe/Istanbul)
-Phase: **1.3 Controlled ZAP Passive OpenAPI Integration. Earlier GO phases remain intact. ZAP 2.17.0
-is operational only through `ZAP_LAB_PASSIVE_OPENAPI_V1`: a digest-pinned image with exactly eight
-verified add-ons, one admitted release passive rule (10021), a controller-projected read-only
-OpenAPI file (GET only, from controller-owned inventory), one fixed Automation Framework plan, an
-isolated non-root/read-only/no-shell runner whose only network path is an independent scope guard,
-bounded fail-closed report parsing, TOOL_REPORTED correlation and a fresh deterministic Aegis
-verifier as the only finding/PASS authority. Real pinned-image acceptance is vulnerable 5/5 and
-patched 5/5; every negative control fails closed with zero unauthorized target traffic. No active
-scanning. Burp DAST remains disabled. GO only for this bounded synthetic passive profile — no
-production readiness, authenticated testing or broad vulnerability coverage is claimed.**
-Version: 1.3.0
+Updated: 2026-09-21 (Europe/Istanbul)
+Phase: **1.6 Aegis Vulnerable Application Range — VULNERABILITY CATALOG AND THREE ATTACK CHAINS
+IMPLEMENTED, NOT a GO. Four isolated applications, 19 vulnerable/patched scenarios, independent
+fresh-evidence verifiers, controller-owned ground truth, three end-to-end chains and private
+ops/browser/metadata/admin workers are operational. Container acceptance confirms 19/19 vulnerable,
+19/19 patched, 3/3 vulnerable-chain and 3/3 patched-chain outcomes plus scanner-network isolation.
+Evaluation aggregation, engine integration/AI benchmarking and the Range UI remain unimplemented.
+Phase 1.5 is now a final GO (see below) and remains preserved.**
+Version: 1.6.0-dev (Phase 1.5 is the newest ZAP profile with a GO verdict)
+
+## Phase 1.6 — Aegis Vulnerable Application Range (active, not a GO)
+
+Full specification and current evidence:
+[Phase 1.6 — Aegis Vulnerable Application Range](docs/phase-1.6-aegis-vulnerable-application-range.md).
+The completed catalog covers all 19 specified vulnerable/patched scenarios across `aegis-bank`,
+`aegis-shop`, `aegis-ops` and `aegis-cloud`, plus the bank recovery, cloud internal-service and shop
+privileged-viewer chains. Phase 1.5 behavior remains preserved, and ZAP Active was not run against
+the range.
+
+## Phase 1.5 — Controlled ZAP Active Reflected-XSS Scanning (GO)
+
+Full detail and final evidence: [Phase 1.5](docs/phase-1.5-zap-active-reflected-xss.md).
+
+**Verdict: GO.** Maximum claim: *"GO for one controller-owned reflected-XSS active rule against one
+anonymous, read-only, resettable synthetic-lab endpoint under a runner-validated single-use lease,
+fixed network and traffic budgets, emergency stop, independently verified evidence and verified
+cleanup."* No broader claim is made.
+
+Pins: base image unchanged from Phase 1.3 — ZAP `2.17.0`, index
+`sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef`, jar
+`015dda47…`, OpenJDK `17.0.20+8-1-deb12u1-Debian`. Add-ons (11) = the eight Phase 1.3 add-ons plus
+`ascanrules-release-83.zap` `9c1b64c2fceda629f7c0ab0c21b5901035494f78da51d584972eaf85e94e91cc`,
+`oast-beta-0.24.0.zap` `f06ecea02e2c1df4a164e737dd632afba4430225b2fdc2feb6042bdb1e976b3d` and
+`database-alpha-0.9.0.zap` `4c58ca142288d9ddc6ae3fd8fe6815e3894462bae67eb0776e540a2d9ddaf87d`
+(inventory digest `933320c1637bedf51227fb139c0776263e0ad65ce01287283c8b1a29253119b9`); active rule
+`40012`; active manifest SHA-256
+`0a7b38a165c05d1fe9bae3ecfc11f1716ff55d0d88c34f146641ae4af0745e15` — **operator-countersigned
+2026-09-21** (record `countersign-zap-active-reflected-xss-v1`; any digest change fails closed);
+runner image `aegis-zap-active-runner:1.5.0` (`sha256:ea3cfe03fb29…`), guard
+`aegis-zap-scope-guard:1.5.0` (`sha256:dc09296b7b18…`), admission
+`aegis-zap-active-admission:1.5.0` (`sha256:d46bb154f3e1…`); vulnerable projection
+`ca0cb0123641b73b…`, patched projection `0691f1f13961e623…`.
+
+Offline gate: Ruff PASS; strict mypy PASS across **135 source files**; **1028 offline tests PASS**,
+0 failed (incl. the dedicated lease suite, the countersign drift suite and the executor-level lease
+behaviours); frontend typecheck/lint PASS, **20 frontend tests PASS**, Vite production build PASS,
+npm audit 0; `docker compose config` validates for every overlay (active and Beast fail closed
+without their operator secrets); secret scans clean; prior evidence byte-identical (112+136+27).
+
+Live acceptance (arm64, real pinned image, compose project `aegis-phase15-live`, torn down):
+**5/5 vulnerable** (COMPLETED, rule 40012 only, `VERIFIED` by the fresh-marker verifier, verdict
+`VERIFIED_VULNERABLE` owner `AEGIS_VERIFIER`, 3 forwarded/0 blocked each) and **5/5 patched**
+(COMPLETED, complete coverage and drained queues, zero alerts, verifier `PASS` `ENTITY_ENCODED`,
+verdict `PASS` owner `AEGIS_VERIFIER`, 7 forwarded/0 blocked each); one real mid-scan emergency
+stop (lease consumed → engine killed: `STOPPED`/`EMERGENCY_STOP`/`KILLED_BY_GUARD`, ordered steps
+all true, never a PASS); 8 live negatives all refused with zero target traffic (unknown target,
+projection/allowlist digest mismatch, unexpected query parameter, expired lease, invalid signature,
+unarmed lease, replayed lease); guard reconciliation **54 forwarded / 0 blocked** across the whole
+matrix; deterministic reset, session destruction and lease revocation 10/10; topology proof (runner
+never on `active-target`; all networks `internal: true`; no internet egress). Evidence:
+`artifacts/phase-1.5-live-20260921T164151Z/` (summary SHA-256 `cc7f1c30c5c98167c9856b1042cdfdafb…`).
+Six defects were found by the live matrix and fixed before the verdict (admission base pinned to
+Python 3.11 for the cp311 hash lock; shared admission contracts moved into `aegis_zap_active`;
+single-arm activation flow; 16 KiB admission status ceiling; ordered emergency stop under a stop
+lock with durable guard revocation; `KILLED_BY_GUARD` classification for stop-killed engines).
+
+Not claimed: closed-test-environment, staging or production readiness; broad active scanning or
+OWASP coverage; authenticated scanning; arbitrary ZAP rules; AI-selected attacks; browser
+execution; application-wide safety. `ZAP_TEST_ENV_ACTIVE_V1` remains inert. amd64 pins are verified
+at build time, not executed.
 
 ## Phase 1.3 — Controlled ZAP Passive OpenAPI Integration
 
@@ -19,7 +77,7 @@ Full detail: [Phase 1.3](docs/phase-1.3-zap-passive-openapi.md). Also:
 [isolation](docs/zap-runner-isolation.md); [projection](docs/zap-openapi-projection.md);
 [supply chain and rule manifest](docs/zap-passive-rule-manifest.md);
 [evidence and verification](docs/zap-evidence-and-verification.md);
-[Phase 1.4 prerequisites](docs/phase-1.4-zap-active-staging-prerequisites.md).
+[historical active-scan prerequisites draft](docs/historical-zap-active-staging-prerequisites-draft.md).
 
 Pins: ZAP `2.17.0`, image index `sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef`
 (arm64 `sha256:05cbf4cab5d2fdaef55b0cd0b586f22d0ce4f75e0995f3cea2db23afbbdfd2f8`, amd64

@@ -1,0 +1,265 @@
+x-range-hardened: &range-hardened
+  build:
+    context: .
+    dockerfile: deploy/range/Dockerfile
+  image: aegis-range:1.6.0-dev
+  user: "65532:65532"
+  read_only: true
+  tmpfs:
+    - "/tmp:size=8m,mode=0700,uid=65532,gid=65532,nosuid,nodev,noexec"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 32
+  mem_limit: 128m
+  cpus: 0.50
+  ulimits:
+    nofile: {soft: 128, hard: 128}
+    core: {soft: 0, hard: 0}
+  restart: "no"
+  logging:
+    driver: json-file
+    options: {max-size: "1m", max-file: "2"}
+
+services:
+  aegis-bank-core:
+    <<: *range-hardened
+    command: uvicorn aegis_range.bank:app --host 0.0.0.0 --port 8101
+    expose: ["8101"]
+    networks:
+      bank-backend: {}
+      bank-management:
+        aliases: [aegis-bank-control]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  aegis-shop-core:
+    <<: *range-hardened
+    command: uvicorn aegis_range.shop:app --host 0.0.0.0 --port 8102
+    expose: ["8102"]
+    networks:
+      shop-backend: {}
+      shop-management:
+        aliases: [aegis-shop-control]
+      shop-viewer:
+        aliases: [aegis-shop-view]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8102/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  shop-effect-canary:
+    <<: *range-hardened
+    command: uvicorn aegis_range.shop_canary:app --host 0.0.0.0 --port 8800
+    expose: ["8800"]
+    networks:
+      shop-viewer:
+        aliases: [shop-effect-canary]
+      shop-management:
+        aliases: [shop-effect-canary-control]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8800/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  shop-browser:
+    build:
+      context: .
+      dockerfile: deploy/range-browser/Dockerfile
+    image: aegis-range-browser:1.6.0-dev
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - "/tmp:size=64m,mode=0700,uid=65532,gid=65532,nosuid,nodev"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.00
+    ulimits:
+      nofile: {soft: 1024, hard: 1024}
+      core: {soft: 0, hard: 0}
+    restart: "no"
+    logging:
+      driver: json-file
+      options: {max-size: "1m", max-file: "2"}
+    command: uvicorn aegis_range.shop_browser:app --host 0.0.0.0 --port 8650
+    expose: ["8650"]
+    depends_on:
+      aegis-shop-core: {condition: service_healthy}
+      shop-effect-canary: {condition: service_healthy}
+    networks:
+      shop-viewer: {}
+      shop-browser-control: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8650/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  aegis-ops-core:
+    <<: *range-hardened
+    command: uvicorn aegis_range.ops:app --host 0.0.0.0 --port 8103
+    expose: ["8103"]
+    networks:
+      ops-backend: {}
+      ops-management:
+        aliases: [aegis-ops-control]
+      ops-worker-control: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8103/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  ops-worker:
+    <<: *range-hardened
+    command: uvicorn aegis_range.ops_worker:app --host 0.0.0.0 --port 8600
+    expose: ["8600"]
+    networks:
+      ops-worker-control:
+        aliases: [ops-worker, ops-worker-control]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8600/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  aegis-cloud-core:
+    <<: *range-hardened
+    command: uvicorn aegis_range.cloud:app --host 0.0.0.0 --port 8104
+    expose: ["8104"]
+    depends_on:
+      range-canary:
+        condition: service_healthy
+      cloud-admin:
+        condition: service_healthy
+    networks:
+      cloud-backend: {}
+      cloud-management:
+        aliases: [aegis-cloud-control]
+      cloud-fixtures: {}
+      cloud-internal: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8104/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  cloud-admin:
+    <<: *range-hardened
+    command: uvicorn aegis_range.cloud_admin:app --host 0.0.0.0 --port 8700
+    expose: ["8700"]
+    networks: [cloud-internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8700/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  range-canary:
+    <<: *range-hardened
+    command: uvicorn aegis_range.canary:app --host 0.0.0.0 --port 8500
+    expose: ["8500"]
+    networks: [cloud-fixtures]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8500/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  range-ingress:
+    <<: *range-hardened
+    command: python -m aegis_range.ingress
+    pids_limit: 64
+    mem_limit: 192m
+    expose: ["8101", "8102", "8103", "8104"]
+    depends_on:
+      aegis-bank-core: {condition: service_healthy}
+      aegis-shop-core: {condition: service_healthy}
+      aegis-ops-core: {condition: service_healthy}
+      aegis-cloud-core: {condition: service_healthy}
+    networks:
+      range-access:
+        aliases: [aegis-bank, aegis-shop, aegis-ops, aegis-cloud]
+      bank-backend: {}
+      shop-backend: {}
+      ops-backend: {}
+      cloud-backend: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  range-controller:
+    <<: *range-hardened
+    command: uvicorn aegis_range.controller_api:app --host 0.0.0.0 --port 8090
+    environment:
+      RANGE_CONTROLLER_TOKEN: ${RANGE_CONTROLLER_TOKEN:-synthetic-range-controller-v1}
+    expose: ["8090"]
+    depends_on:
+      aegis-bank-core: {condition: service_healthy}
+      aegis-shop-core: {condition: service_healthy}
+      aegis-ops-core: {condition: service_healthy}
+      aegis-cloud-core: {condition: service_healthy}
+      shop-browser: {condition: service_healthy}
+      shop-effect-canary: {condition: service_healthy}
+      ops-worker: {condition: service_healthy}
+    networks:
+      range-control: {}
+      bank-management: {}
+      shop-management: {}
+      ops-management: {}
+      cloud-management: {}
+      shop-browser-control: {}
+      ops-worker-control: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  range-probe:
+    <<: *range-hardened
+    profiles: [acceptance]
+    command: python scripts/phase_1_6_surface_smoke.py
+    depends_on:
+      range-ingress: {condition: service_healthy}
+    networks: [range-access]
+
+networks:
+  range-access:
+    internal: true
+  range-control:
+    internal: true
+  bank-backend:
+    internal: true
+  bank-management:
+    internal: true
+  shop-backend:
+    internal: true
+  shop-management:
+    internal: true
+  ops-backend:
+    internal: true
+  ops-management:
+    internal: true
+  cloud-backend:
+    internal: true
+  cloud-management:
+    internal: true
+  cloud-fixtures:
+    internal: true
+  cloud-internal:
+    internal: true
+  shop-viewer:
+    internal: true
+  shop-browser-control:
+    internal: true
+  ops-worker-control:
+    internal: true

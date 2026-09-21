@@ -9,7 +9,7 @@ from time import monotonic
 from uuid import uuid4
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -36,6 +36,7 @@ from aegis.operator import (
     scan_projection,
     zap_summary,
 )
+from aegis.operator_session import OperatorSessionStore
 from aegis.planner import build_planner
 from aegis.safety import SafetyController
 from aegis.screenshots import ScreenshotStore
@@ -43,6 +44,8 @@ from aegis.service import ScanService
 from aegis.settings import get_settings
 from aegis.storage import ScanStore
 from aegis.verifier import DeterministicVerifier
+from aegis.zap_active_controller import ZapActiveActivation, ZapActiveController
+from aegis.zap_active_lease import LeaseError
 from aegis_nuclei.manifest import load_manifest, manifest_digest
 from aegis_zap.manifest import add_on_inventory_digest
 from aegis_zap.manifest import load_manifest as load_zap_manifest
@@ -64,6 +67,19 @@ templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
 beast_store = BeastStore(settings.database_path)
 beast = BeastController(settings, beast_store)
+# Phase 1.5. Constructing the controller is inert: it holds no lease and contacts nothing until an
+# operator completes the activation ceremony. When ZAP Active is enabled the lease-signing secret
+# must be real, so a misconfigured deployment fails here rather than scanning unauthenticated.
+zap_active = ZapActiveController(settings, safety)
+if settings.zap_active_enabled:
+    settings.require_zap_active_lease_secret()
+    settings.require_zap_active_runner_client_secret()
+    settings.require_zap_active_operator_bootstrap_secret()
+operator_sessions = OperatorSessionStore(
+    settings.require_zap_active_operator_bootstrap_secret()
+    if settings.zap_active_enabled
+    else "disabled-operator-session-secret-000000000000"
+)
 
 
 class StreamConnections:
@@ -235,12 +251,117 @@ async def console_config() -> dict[str, object]:
         "engine_kernel_version": ENGINE_KERNEL_VERSION,
         "engine_catalog": catalog_projection(),
         "beast": beast.config(),
+        # Active-scan configuration is operator-session protected; this public summary deliberately
+        # carries only availability and never the activation ceremony or target details.
+        "zap_active": {"enabled": zap_active.enabled},
     }
 
 
 class EmergencyStopRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operator_id: str = Field(pattern=r"^[A-Za-z0-9._@-]{3,80}$")
+
+
+class OperatorLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    bootstrap_secret: str = Field(min_length=32, max_length=256)
+
+
+def _operator(request: Request, *, mutate: bool = False) -> str:
+    if not operator_sessions.validate(
+        request.cookies.get("aegis_operator_session"),
+        request.headers.get("X-CSRF-Token"),
+        mutate=mutate,
+    ):
+        raise HTTPException(
+            status_code=401 if not request.cookies.get("aegis_operator_session") else 403,
+            detail="OPERATOR_AUTH_REQUIRED",
+        )
+    return "local-operator"
+
+
+@app.post("/api/zap-active/operator/login")
+async def zap_active_login(request: OperatorLoginRequest, response: Response) -> dict[str, str]:
+    try:
+        session_id, csrf = operator_sessions.login(request.bootstrap_secret)
+    except PermissionError:
+        raise HTTPException(status_code=401, detail="OPERATOR_AUTH_REQUIRED") from None
+    response.set_cookie(
+        "aegis_operator_session",
+        session_id,
+        httponly=True,
+        samesite="strict",
+        secure=True,
+        max_age=900,
+    )
+    return {"csrf_token": csrf}
+
+
+@app.post("/api/zap-active/operator/logout")
+async def zap_active_logout(request: Request, response: Response) -> dict[str, str]:
+    _operator(request, mutate=True)
+    operator_sessions.revoke(request.cookies.get("aegis_operator_session"))
+    response.delete_cookie("aegis_operator_session")
+    return {"status": "REVOKED"}
+
+
+@app.get("/api/zap-active/config")
+async def zap_active_config(request: Request) -> dict[str, object]:
+    _operator(request)
+    return zap_active.config()
+
+
+@app.get("/api/zap-active/preflight")
+async def zap_active_preflight(request: Request) -> dict[str, object]:
+    _operator(request)
+    return await zap_active.preflight()
+
+
+@app.post("/api/zap-active/activate", status_code=201)
+async def zap_active_activate(
+    request: ZapActiveActivation, http_request: Request
+) -> dict[str, object]:
+    """The activation ceremony: the exact confirmation phrase; nothing else widens it."""
+
+    try:
+        await zap_active.activate(
+            request.model_copy(update={"operator_id": _operator(http_request, mutate=True)})
+        )
+    except LeaseError as exc:
+        # A bounded refusal label. Never a token, a claim value or a cryptographic detail.
+        raise HTTPException(status_code=422, detail=exc.code) from None
+    return zap_active.view()
+
+
+@app.post("/api/zap-active/run", status_code=202)
+async def zap_active_run(background_tasks: BackgroundTasks, request: Request) -> dict[str, object]:
+    _operator(request, mutate=True)
+    if zap_active.session.state != "ARMED":
+        raise HTTPException(status_code=409, detail="NO_ARMED_SESSION")
+    background_tasks.add_task(_zap_active_execute)
+    return zap_active.view()
+
+
+async def _zap_active_execute() -> None:
+    try:
+        await zap_active.execute()
+    except LeaseError:  # pragma: no cover - the session already records the terminal reason
+        pass
+
+
+@app.get("/api/zap-active/session")
+async def zap_active_session(request: Request) -> dict[str, object]:
+    _operator(request)
+    status = await zap_active.adapter.lease_status() if settings.zap_active_enabled else None
+    return zap_active.view(status)
+
+
+@app.post("/api/zap-active/stop")
+async def zap_active_stop(
+    request: EmergencyStopRequest, http_request: Request
+) -> dict[str, object]:
+    await zap_active.stop(_operator(http_request, mutate=True))
+    return zap_active.view()
 
 
 @app.get("/api/beast/config")
@@ -303,9 +424,7 @@ async def beast_emergency_stop(run_id: str, request: EmergencyStopRequest) -> di
 
 
 @app.post("/api/beast/targets/{target_ref}/restore")
-async def beast_restore_target(
-    target_ref: str, request: EmergencyStopRequest
-) -> dict[str, object]:
+async def beast_restore_target(target_ref: str, request: EmergencyStopRequest) -> dict[str, object]:
     try:
         return await beast.restore_target(target_ref, request.operator_id)
     except (BeastRejected, ValueError, httpx.HTTPError) as exc:

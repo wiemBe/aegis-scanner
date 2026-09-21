@@ -1,9 +1,11 @@
 import asyncio
+import html
 from collections.abc import Iterator
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.responses import (
+    HTMLResponse,
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
@@ -281,3 +283,74 @@ def beast_git_config(variant: str) -> Response:
     if _beast_variant(variant) == "patched":
         return JSONResponse(status_code=404, content={"detail": "Not found"}, headers=_NOSNIFF)
     return PlainTextResponse(BEAST_GIT_CONFIG, headers=_NOSNIFF)
+
+
+# --- Phase 1.5 synthetic ZAP active scenario: reflected cross-site scripting ---------------------
+# One isolated, read-only, side-effect-free family under a dedicated prefix, excluded from the
+# OpenAPI document (so every other imported/projected surface stays byte-identical). It holds no
+# credential, no database, no filesystem access and no mutable state: the two variants differ ONLY
+# in output encoding. The vulnerable route reflects the single bounded ``q`` query parameter into an
+# executable HTML element context WITHOUT encoding; the patched route reflects the identical value
+# with correct contextual HTML-entity encoding. Because there is no state, reset is a deterministic
+# no-op. The single controlled ZAP reflected-XSS rule (40012) and the independent Aegis verifier
+# both act on this one parameter alone.
+ZAP_ACTIVE_LAB = "zap-active-reflected-xss"
+ZAP_ACTIVE_Q_MAX = 256
+
+
+def _zap_active_variant(variant: str) -> str:
+    if variant not in {"vulnerable", "patched"}:
+        raise HTTPException(status_code=404, detail="Unknown synthetic target")
+    return variant
+
+
+def _zap_active_page(variant: str, reflected: str) -> str:
+    # Identical skeleton for both variants; only ``reflected`` differs (raw vs. encoded). The
+    # synthetic marker lets the independent verifier confirm exact routing and variant.
+    marker = f'data-lab="{ZAP_ACTIVE_LAB}" data-variant="{variant}" data-synthetic="true"'
+    return (
+        "<!doctype html><html><head><title>Synthetic catalog search</title></head>"
+        f"<body><p {marker}>Synthetic catalog search.</p>"
+        f'<div id="query-echo">You searched for: {reflected}</div>'
+        "</body></html>"
+    )
+
+
+@app.get("/lab/zap-active/{variant}", include_in_schema=False)
+def zap_active_landing(variant: str) -> dict[str, str | bool]:
+    selected = _zap_active_variant(variant)
+    return {
+        "lab": ZAP_ACTIVE_LAB,
+        "variant": selected,
+        "synthetic": True,
+        "search": f"/lab/zap-active/{selected}/search",
+    }
+
+
+@app.get("/lab/zap-active/{variant}/search", include_in_schema=False)
+def zap_active_search(variant: str, q: str = "") -> HTMLResponse:
+    selected = _zap_active_variant(variant)
+    # Bounded, deterministic: the reflected value is clipped identically for both variants, so the
+    # only behavioural difference is contextual output encoding.
+    clipped = q[:ZAP_ACTIVE_Q_MAX]
+    reflected = clipped if selected == "vulnerable" else html.escape(clipped, quote=True)
+    return HTMLResponse(
+        _zap_active_page(selected, reflected),
+        headers={"Content-Type": "text/html; charset=utf-8", **_NOSNIFF},
+    )
+
+
+@app.get("/lab/zap-active/{variant}/reset", include_in_schema=False)
+def zap_active_reset(variant: str) -> JSONResponse:
+    selected = _zap_active_variant(variant)
+    # The scenario is stateless, so reset is a deterministic confirmation, never a mutation.
+    return JSONResponse(
+        {
+            "lab": ZAP_ACTIVE_LAB,
+            "variant": selected,
+            "reset": True,
+            "stateful": False,
+            "synthetic": True,
+        },
+        headers=_NOSNIFF,
+    )

@@ -1,0 +1,21 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Aegis Bank API", "version": "1.0.0"},
+  "servers": [{"url": "http://aegis-bank:8101"}],
+  "paths": {
+    "/api/profile": {
+      "get": {"operationId": "getCurrentProfile", "summary": "Get the current customer profile", "security": [{"bearerAuth": []}], "responses": {"200": {"description": "Profile"}, "401": {"description": "Authentication required"}}},
+      "patch": {"operationId": "updateCurrentProfile", "summary": "Update the current customer profile", "security": [{"bearerAuth": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "properties": {"display_name": {"type": "string", "maxLength": 80}, "timezone": {"type": "string", "maxLength": 60}}}}}}, "responses": {"200": {"description": "Updated profile"}, "401": {"description": "Authentication required"}}}
+    },
+    "/api/accounts": {"get": {"operationId": "listAccounts", "summary": "List customer accounts", "security": [{"bearerAuth": []}], "responses": {"200": {"description": "Accounts"}, "401": {"description": "Authentication required"}}}},
+    "/api/accounts/{account_id}": {"get": {"operationId": "getAccount", "summary": "Get account details", "security": [{"bearerAuth": []}], "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Account"}, "403": {"description": "Access denied"}, "404": {"description": "Account not found"}}}},
+    "/api/accounts/{account_id}/transactions": {"get": {"operationId": "listAccountTransactions", "summary": "List account transactions", "security": [{"bearerAuth": []}], "parameters": [{"name": "account_id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Transactions"}, "403": {"description": "Access denied"}, "404": {"description": "Account not found"}}}},
+    "/api/rates": {"get": {"operationId": "listExchangeRates", "summary": "List current exchange rates", "responses": {"200": {"description": "Rates"}}}},
+    "/api/operations/close-day": {"post": {"operationId": "closeBusinessDay", "summary": "Close the current business day", "security": [{"bearerAuth": []}], "responses": {"200": {"description": "Operation result"}, "403": {"description": "Access denied"}}}},
+    "/api/sessions": {"post": {"operationId": "createSession", "summary": "Create a customer session", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["username", "passcode"], "properties": {"username": {"type": "string", "maxLength": 120}, "passcode": {"type": "string", "maxLength": 120}}}}}}, "responses": {"200": {"description": "Session"}, "401": {"description": "Authentication failed"}}}},
+    "/api/session/summary": {"get": {"operationId": "getSessionSummary", "summary": "Get current session summary", "security": [{"bearerAuth": []}], "responses": {"200": {"description": "Session summary"}, "401": {"description": "Authentication required"}}}},
+    "/api/access/recovery": {"post": {"operationId": "requestAccountRecovery", "summary": "Request account access recovery", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["email"], "properties": {"email": {"type": "string", "maxLength": 120}}}}}}, "responses": {"200": {"description": "Request result"}, "429": {"description": "Request limit reached"}}}},
+    "/api/access/complete": {"post": {"operationId": "completeAccountRecovery", "summary": "Complete account access recovery", "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "additionalProperties": false, "required": ["reference", "new_passcode"], "properties": {"reference": {"type": "string", "maxLength": 80}, "new_passcode": {"type": "string", "maxLength": 120}}}}}}, "responses": {"200": {"description": "Recovery result"}, "400": {"description": "Request could not be completed"}}}}
+  },
+  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}
+}

@@ -1,0 +1,104 @@
+# DeepSeek external provider profile (AI_PROVIDER=internal_openai_compatible -> mode INTERNAL_LLM).
+#
+# One constrained acceptance profile that replaces the local Ollama planner with the external
+# DeepSeek OpenAI-compatible API for a bounded run, WITHOUT weakening any schema, safety policy,
+# target allowlist, verifier rule or budget. Bring up with:
+#   docker compose -f docker-compose.yml -f docker-compose.deepseek.yml up --build
+#
+# Topology (all application networks are internal: true; only the proxy touches egress):
+#
+#   control-plane --[planner-rpc]--> llm-gateway --[gateway-egress]--> egress-proxy --[provider-egress]--> api.deepseek.com:443
+#        |                                                                            (CONNECT api.deepseek.com:443 only)
+#   [security-lab] --> lab-api
+#
+# - control-plane joins only security-lab + planner-rpc. It keeps deny-all direct egress and NEVER
+#   holds AI_AUTH_TOKEN (aegis.main refuses to start if the credential is present here).
+# - llm-gateway joins only planner-rpc + gateway-egress. It holds the DeepSeek credential (only via
+#   .env.gateway) and never touches the lab/target network. It reaches DeepSeek only via the proxy.
+# - egress-proxy joins gateway-egress + provider-egress. It is the only egress-capable service. It
+#   holds no credential, publishes no host port, and allows only CONNECT api.deepseek.com:443.
+#
+# The credential value is never printed, logged, echoed, copied, hashed, committed or exposed to
+# control-plane, lab-api, any runner/guard, the dashboard, audit records, model input, frontend
+# responses, logs or artifacts.
+
+services:
+  control-plane:
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_MODEL: ${AI_MODEL:-deepseek-v4-pro}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-deepseek-v4-pro}
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      LOCAL_LLM_VALIDATION_STATUS: ${LOCAL_LLM_VALIDATION_STATUS:-INTERNAL_LLM_DEEPSEEK_ACCEPTANCE}
+      # Hard limits for the deliberately small first acceptance.
+      MAX_REQUESTS_PER_SCAN: ${MAX_REQUESTS_PER_SCAN:-8}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      SCAN_TIMEOUT_SECONDS: ${SCAN_TIMEOUT_SECONDS:-120}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-5}
+    networks: [security-lab, planner-rpc]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+
+  llm-gateway:
+    build: .
+    command: uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080
+    # The DeepSeek credential is provided ONLY here, via an untracked env file (.env.gateway,
+    # AI_AUTH_TOKEN=<key>). It is never placed in .env (which the control plane reads) or passed to
+    # any other service.
+    env_file:
+      - path: .env.gateway
+        required: false
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_MODEL: ${AI_MODEL:-deepseek-v4-pro}
+      AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-deepseek-v4-pro}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
+      AI_AUTH_MODE: bearer
+      # DeepSeek supports JSON mode (json_object), not the OpenAI strict json_schema feature. The
+      # strict schema is embedded in the prompt and locally re-validated; nothing is coerced.
+      AI_RESPONSE_FORMAT: json_object
+      # DeepSeek does not accept the OpenAI 'seed' field: omit it and record no determinism claim.
+      AI_SUPPORTS_SEED: "false"
+      # Reach DeepSeek only through the constrained CONNECT proxy.
+      AI_USE_EGRESS_PROXY: "true"
+      PROVIDER_PROXY_URL: http://egress-proxy:3128
+      # Bounded egress: strict timeout, bounded body, bounded completion tokens.
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-30}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-131072}
+      MAX_TOKENS_PER_SCAN: ${MAX_TOKENS_PER_SCAN:-80000}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+    networks: [planner-rpc, gateway-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+
+  egress-proxy:
+    image: ubuntu/squid:6.6-24.04_beta
+    volumes:
+      - ./deploy/egress-proxy.deepseek.squid.conf:/etc/squid/squid.conf:ro
+    # No host port. No API key. Only this service joins an egress-capable network.
+    networks: [gateway-egress, provider-egress]
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "squid -k parse"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  planner-rpc:
+    internal: true
+  gateway-egress:
+    internal: true
+  provider-egress:
+    # NOT internal: this is the single egress-capable network, reachable only by egress-proxy.
+    internal: false

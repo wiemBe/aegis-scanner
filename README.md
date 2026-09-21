@@ -1,7 +1,47 @@
-# Aegis AI Security Lab — Phase 1.4
+# Aegis AI Security Lab — Phase 1.6 vulnerability catalog
 
-A bounded, guardrailed security-testing demonstration for the included synthetic banking API.
+A bounded, guardrailed security-testing demonstration for the included synthetic services.
 **Not production-ready. No external or production targets are authorized.**
+
+Phase 1.6 now includes the completed
+[Aegis Vulnerable Application Range catalog](docs/phase-1.6-aegis-vulnerable-application-range.md):
+four internal-only applications, 19 deterministic vulnerable/patched scenarios, three end-to-end
+attack chains, independent fresh-evidence verifiers, and isolated ops, browser, metadata and admin
+fixtures. Container acceptance confirms all 38 scenario outcomes and all six chain outcomes. This
+catalog increment is not a Phase 1.6 GO or a claim of broad OWASP coverage; evaluation aggregation,
+engine integration and the Range UI remain separate work.
+
+Phase 1.5 adds the project's first
+[active scanning capability](docs/phase-1.5-zap-active-reflected-xss.md), deliberately as narrow as
+it can be: a second, separate ZAP profile `ZAP_LAB_ACTIVE_REFLECTED_XSS_V1` in which exactly one
+reviewed release rule (40012, reflected XSS) mutates exactly one bounded query parameter on exactly
+one approved read-only `GET` operation in the synthetic lab. It runs from its own digest-pinned
+11-add-on image, requires a single-use activation lease that the operator confirms with an exact
+phrase, and reaches the target only through the scope guard's additive ACTIVE mode, which allows a
+query string only on the projected parameter and enforces a hard request budget. ZAP's payload is
+never stored — the parser keeps a structural class and a digest — and a fresh deterministic Aegis
+verifier is still the only authority that can confirm a finding or grant a patched PASS. An
+emergency stop kills a scan in flight.
+
+**Phase 1.5 is a GO** (evidence-backed, 2026-09-21). The lease is an HMAC-SHA-256 authenticated
+single-use token that the runner's root-owned admission component verifies, arms, consumes and
+revokes itself (a valid signature alone never executes anything); the active-rule manifest review
+is operator-countersigned (record `countersign-zap-active-reflected-xss-v1`, any digest change
+fails closed); the Operator Console has a full ZAP Active view with the activation ceremony, a
+prominent `STOP ACTIVE SCAN`, the five-way alert-state separation and the interpretation warnings.
+The live acceptance on the real pinned image is 5/5 vulnerable (`VERIFIED_VULNERABLE`,
+verifier-owned), 5/5 patched (`PASS` from the fresh verifier plus complete coverage, never from
+zero alerts alone), one real mid-scan emergency stop and eight zero-traffic negative controls —
+54 forwarded / 0 blocked requests through the guard, reconciled exactly. The GO is scoped to one
+controller-owned reflected-XSS rule against one anonymous, read-only, resettable synthetic-lab
+endpoint; no test-environment, staging or production readiness, broad active scanning, broad OWASP
+coverage, authenticated scanning, arbitrary rules, AI-selected attacks or browser execution is
+claimed. Phase 1.3 passive ZAP is untouched and retains its GO.
+
+Phase 1.5 remains preserved. ZAP Active has not been run against the range (its Phase 1.6
+integration is separate, unimplemented work).
+
+## Phase 1.4 baseline
 
 Phase 1.4 adds [BEAST MODE](docs/phase-1.4-beast-mode.md), a real `qwen3:8b`-controlled arbitrary
 shell inside a disposable, resource-bounded and network-isolated adversary sandbox. The model owns
@@ -29,7 +69,7 @@ Details: [runner isolation](docs/zap-runner-isolation.md),
 [OpenAPI projection](docs/zap-openapi-projection.md),
 [supply chain and rule manifest](docs/zap-passive-rule-manifest.md),
 [evidence and verification](docs/zap-evidence-and-verification.md) and
-[Phase 1.4 prerequisites](docs/phase-1.4-zap-active-staging-prerequisites.md).
+[historical active-scan prerequisites draft](docs/historical-zap-active-staging-prerequisites-draft.md).
 
 ## Earlier phases
 
