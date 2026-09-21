@@ -55,6 +55,7 @@ class EngineEnvironment(StrEnum):
     """Environments a capability may run against. Only the synthetic lab is allowed in Phase 1.1."""
 
     SYNTHETIC_LAB = "SYNTHETIC_LAB"
+    SYNTHETIC_RANGE = "SYNTHETIC_RANGE"
     STAGING = "STAGING"
     PRODUCTION = "PRODUCTION"
 

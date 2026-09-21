@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { ZapActiveView } from './ZapActive'
+import { useZapActive } from './useZapActive'
 
-type View = 'Mission Control' | 'Runs' | 'Findings' | 'Audit' | 'Evidence' | 'Integrations' | 'System Health'
+type View = 'Mission Control' | 'Runs' | 'Findings' | 'ZAP Active' | 'Audit' | 'Evidence' | 'Integrations' | 'System Health'
 type StreamState = 'CONNECTING' | 'LIVE' | 'STALE' | 'GAP'
 
 type Run = {
@@ -269,7 +271,7 @@ type BeastRun = {
 
 type BeastEvent = { event_id: string; event_type: string; actor_type: string; timestamp: string; details: Record<string, unknown>; digest: string }
 
-const NAV: View[] = ['Mission Control', 'Runs', 'Findings', 'Audit', 'Evidence', 'Integrations', 'System Health']
+const NAV: View[] = ['Mission Control', 'Runs', 'Findings', 'ZAP Active', 'Audit', 'Evidence', 'Integrations', 'System Health']
 const WORKFLOW = ['PREFLIGHT', 'AI_HYPOTHESIS', 'CANDIDATE_VALIDATION', 'QUEUE_ADMISSION', 'REQUEST_COMPILATION', 'SAFETY_AUTHORIZATION', 'EXECUTION', 'VERIFICATION', 'FINDING', 'LINKED_RETEST', 'COMPLETE']
 const ZAP_WORKFLOW = ['PREFLIGHT', 'OPENAPI_PROJECTION', 'ENGINE_JOB', 'RUNNER_ATTESTATION', 'PLAN_VALIDATION', 'OPENAPI_IMPORT', 'PASSIVE_SCAN', 'EXECUTION', 'TOOL_FINDING', 'CORRELATION', 'VERIFICATION', 'COMPLETE']
 const ZAP_RESPONSIBILITY = 'ZAP passively analyzes responses from controller-approved read-only API operations. ZAP alerts are independently correlated and verified by Aegis.'
@@ -282,8 +284,9 @@ const api = async <T,>(path: string): Promise<T> => {
 }
 
 const apiPost = async <T,>(path: string, body: Record<string, unknown>): Promise<T> => {
+  const csrf = sessionStorage.getItem('aegis-zap-active-csrf')
   const response = await fetch(path, {
-    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) }, body: JSON.stringify(body),
   })
   if (!response.ok) {
     const problem = await response.json().catch(() => ({})) as { detail?: string }
@@ -570,6 +573,7 @@ export function App() {
   const [beastRun, setBeastRun] = useState<BeastRun>()
   const [beastEvents, setBeastEvents] = useState<BeastEvent[]>([])
   const [beastBusy, setBeastBusy] = useState(false)
+  const zapActive = useZapActive(api, apiPost)
   const lastSequence = useRef(0)
 
   const hydrate = useCallback(async () => {
@@ -644,5 +648,5 @@ export function App() {
   }
 
   if (presentation) return <ManagementView finding={findings[0]} onClose={() => setPresentation(false)} />
-  return <div className="shell"><aside className="sidebar"><a className="brand" href="/console/"><i>A</i><span>AEGIS<small>Operator Console</small></span></a><nav>{NAV.map((item, index) => <button className={view === item ? 'active' : ''} onClick={() => chooseView(item)} key={item}><span>{String(index + 1).padStart(2, '0')}</span>{item}</button>)}</nav><div className="sidebar-foot"><a href="/">Engineering dashboard ↗</a><button onClick={() => setPresentation(true)}>Presentation mode</button><div className={`stream-state ${streamState.toLowerCase()}`}><i />Event stream · {streamState}</div><small>Structured, checksummed audit evidence<br />Not an immutable audit store</small></div></aside><div className="workspace"><header className="topbar"><div><p className="eyebrow">AEGIS NATIVE · LOCAL CONTROL PLANE</p><h1>{selectedRun ? 'Run Replay' : view}</h1></div><ScopeBadges /></header><BeastControl config={beastConfig} run={beastRun} events={beastEvents} onOpen={() => void openBeast()} onStop={() => void stopBeast()} />{error && <div className="error-banner" role="alert"><strong>Console degraded</strong><span>{error}. Persisted views may be stale.</span><button onClick={() => void hydrate()}>Retry</button></div>}<main>{loading ? <Loading /> : selectedRun && view === 'Runs' ? <RunReplay detail={selectedRun} onBack={() => setSelectedRun(undefined)} /> : view === 'Mission Control' ? <MissionControl run={activeRun} events={events} onOpenRun={(id) => void openRun(id)} streamState={streamState} /> : view === 'Runs' ? <RunList runs={runs} onOpen={(id) => void openRun(id)} /> : view === 'Findings' ? <FindingsView findings={findings} selected={selectedFinding} setSelected={setSelectedFinding} /> : view === 'Audit' ? <AuditView events={events} /> : view === 'Evidence' ? <EvidenceView evidence={evidence} screenshotPolicy={screenshotPolicy} /> : view === 'Integrations' ? <IntegrationsView integrations={integrations} engines={engines} /> : <HealthView health={health} />}</main>{beastPreflight && <BeastPreflightModal preflight={beastPreflight} busy={beastBusy} onClose={() => setBeastPreflight(undefined)} onActivate={(confirmation, scenario) => void activateBeast(confirmation, scenario)} />}</div></div>
+  return <div className="shell"><aside className="sidebar"><a className="brand" href="/console/"><i>A</i><span>AEGIS<small>Operator Console</small></span></a><nav>{NAV.map((item, index) => <button className={view === item ? 'active' : ''} onClick={() => chooseView(item)} key={item}><span>{String(index + 1).padStart(2, '0')}</span>{item}</button>)}</nav><div className="sidebar-foot"><a href="/">Engineering dashboard ↗</a><button onClick={() => setPresentation(true)}>Presentation mode</button><div className={`stream-state ${streamState.toLowerCase()}`}><i />Event stream · {streamState}</div><small>Structured, checksummed audit evidence<br />Not an immutable audit store</small></div></aside><div className="workspace"><header className="topbar"><div><p className="eyebrow">AEGIS NATIVE · LOCAL CONTROL PLANE</p><h1>{selectedRun ? 'Run Replay' : view}</h1></div><ScopeBadges /></header><BeastControl config={beastConfig} run={beastRun} events={beastEvents} onOpen={() => void openBeast()} onStop={() => void stopBeast()} />{error && <div className="error-banner" role="alert"><strong>Console degraded</strong><span>{error}. Persisted views may be stale.</span><button onClick={() => void hydrate()}>Retry</button></div>}<main>{loading ? <Loading /> : selectedRun && view === 'Runs' ? <RunReplay detail={selectedRun} onBack={() => setSelectedRun(undefined)} /> : view === 'Mission Control' ? <MissionControl run={activeRun} events={events} onOpenRun={(id) => void openRun(id)} streamState={streamState} /> : view === 'Runs' ? <RunList runs={runs} onOpen={(id) => void openRun(id)} /> : view === 'Findings' ? <FindingsView findings={findings} selected={selectedFinding} setSelected={setSelectedFinding} /> : view === 'ZAP Active' ? <ZapActiveView config={zapActive.config} preflight={zapActive.preflight} session={zapActive.session} busy={zapActive.busy} authRequired={zapActive.authRequired} onLogin={(secret) => void zapActive.login(secret)} onActivate={(variant, phrase) => void zapActive.activate(variant, phrase)} onRun={() => void zapActive.run()} onStop={() => void zapActive.stop()} onRefresh={() => void zapActive.refresh()} /> : view === 'Audit' ? <AuditView events={events} /> : view === 'Evidence' ? <EvidenceView evidence={evidence} screenshotPolicy={screenshotPolicy} /> : view === 'Integrations' ? <IntegrationsView integrations={integrations} engines={engines} /> : <HealthView health={health} />}</main>{beastPreflight && <BeastPreflightModal preflight={beastPreflight} busy={beastBusy} onClose={() => setBeastPreflight(undefined)} onActivate={(confirmation, scenario) => void activateBeast(confirmation, scenario)} />}</div></div>
 }

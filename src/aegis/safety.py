@@ -6,6 +6,7 @@ from aegis.surface import OBJECTS, Variant, account_path
 from aegis_nuclei.targets import NUCLEI_TARGETS
 from aegis_zap.inventory import ZAP_TARGETS
 from aegis_zap.projection import project
+from aegis_zap_active.inventory import ZAP_ACTIVE_TARGETS
 
 
 class SafetyViolation(ValueError):
@@ -113,6 +114,23 @@ class SafetyController:
         }
         if path not in permitted:
             raise SafetyViolation("Verifier request is outside the fixed synthetic ZAP surface")
+        absolute_url = base_url.rstrip("/") + path
+        self.validate_absolute_url(absolute_url)
+        return absolute_url
+
+    def approve_zap_active_verification(self, base_url: str, path: str) -> str:
+        """Approve the fixed Phase 1.5 verifier request: the projected search path of an ACCEPTANCE
+        active target. The verifier supplies the ``q`` marker as a query parameter separately; any
+        other path, host or scheme is a SafetyViolation."""
+
+        permitted = {
+            target.search_path
+            for target in ZAP_ACTIVE_TARGETS.values()
+            if target.purpose == "ACCEPTANCE"
+            and target.origin.rstrip("/") == base_url.rstrip("/")
+        }
+        if path not in permitted:
+            raise SafetyViolation("Verifier request is outside the fixed synthetic active surface")
         absolute_url = base_url.rstrip("/") + path
         self.validate_absolute_url(absolute_url)
         return absolute_url

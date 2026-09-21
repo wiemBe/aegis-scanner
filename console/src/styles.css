@@ -47,3 +47,29 @@
 .badge.controller{background:#17243a;color:#9fc0f5}
 .zap-coverage .zap-metrics{grid-template-columns:repeat(4,1fr);margin-bottom:14px}
 @media(max-width:780px){.zap-coverage .zap-metrics{grid-template-columns:1fr 1fr}}
+
+/* --- Phase 1.5 ZAP Active view -------------------------------------------------------------- */
+.zap-active-head { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
+.zap-active-status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.zap-active-stop-strip { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; padding: 16px 20px; border-radius: 14px; border: 1px solid #b4232a; background: linear-gradient(90deg, rgba(180, 35, 42, 0.22), rgba(180, 35, 42, 0.06)); }
+.zap-active-stop-strip strong { display: block; letter-spacing: 0.08em; }
+.zap-active-stop-strip span { opacity: 0.8; font-size: 0.85rem; }
+.zap-active-stop { background: #b4232a; color: #fff; border: none; border-radius: 10px; padding: 12px 22px; font-weight: 700; letter-spacing: 0.1em; cursor: pointer; }
+.zap-active-stop:hover { background: #d0282f; }
+.zap-active-warnings p { margin: 0 0 8px; font-size: 0.88rem; opacity: 0.88; }
+.zap-active-warnings p:last-child { margin-bottom: 0; }
+.zap-active-blockers { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 0 0 12px; }
+.zap-active-lifecycle { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.zap-active-lifecycle-cell { border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 12px; padding: 12px; text-align: center; }
+.zap-active-lifecycle-cell span { display: block; font-size: 0.68rem; letter-spacing: 0.08em; opacity: 0.7; }
+.zap-active-lifecycle-cell strong { font-size: 1.5rem; }
+.zap-active-lifecycle-cell.verified { border-color: #2f7d52; }
+.zap-active-lifecycle-cell.review_required { border-color: #b8860b; }
+.zap-active-lifecycle-cell.rejected { opacity: 0.6; }
+.zap-active-actions { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
+.zap-active-buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+@media (max-width: 900px) {
+  .zap-active-lifecycle { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .zap-active-head, .zap-active-actions, .zap-active-stop-strip { flex-direction: column; align-items: flex-start; }
+  .zap-active-stop { width: 100%; }
+}

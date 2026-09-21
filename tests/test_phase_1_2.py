@@ -715,6 +715,9 @@ def test_runner_executes_fixed_argv_with_constructed_env(tmp_path: Path) -> None
         "LC_CTYPE",
         "SHLVL",
         "_",
+        # macOS injects this process-local encoding hint even when subprocess ``env`` is
+        # constructed from scratch. It is not inherited application configuration.
+        "__CF_USER_TEXT_ENCODING",
     }
     assert not any(k.startswith(("NUCLEI_", "PDCP_")) for k in call["env"])
     assert not (executor.state.work_root / "exec-0000000000aa").exists()  # scratch removed

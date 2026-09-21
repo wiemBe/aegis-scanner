@@ -8,6 +8,7 @@ version = "0.2.0"
 description = "Guardrailed AI-driven API security testing lab"
 requires-python = ">=3.12"
 dependencies = [
+  "cryptography==46.0.5",
   "fastapi==0.116.1",
   "httpx==0.28.1",
   "jinja2==3.1.6",
@@ -40,10 +41,14 @@ aegis = [
 aegis_nuclei = ["manifest.json", "py.typed"]
 nuclei_runner = ["py.typed"]
 aegis_zap = ["manifest.json", "sources/*.json", "py.typed"]
+aegis_zap_active = ["manifest.json", "countersign.json", "operator-public-key.hex", "sources/*.json", "py.typed"]
 zap_runner = ["py.typed"]
+zap_active_runner = ["py.typed"]
+zap_active_admission = ["py.typed"]
 zap_guard = ["py.typed"]
 beast_sandbox = ["py.typed"]
 beast_gateway = ["py.typed"]
+aegis_range = ["openapi/*.json", "fixtures/ops/**/*.txt", "fixtures/cloud/*.txt", "py.typed"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -66,8 +71,12 @@ packages = [
   "aegis_nuclei",
   "nuclei_runner",
   "aegis_zap",
+  "aegis_zap_active",
   "zap_runner",
+  "zap_active_runner",
+  "zap_active_admission",
   "zap_guard",
   "beast_sandbox",
   "beast_gateway",
+  "aegis_range",
 ]

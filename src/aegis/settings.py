@@ -121,6 +121,36 @@ class Settings(BaseSettings):
     zap_runner_url: str = "http://zap-runner:8092"
     zap_rpc_timeout_seconds: float = Field(default=150.0, gt=0, le=330)
 
+    # --- Phase 1.5 controlled ZAP active reflected-XSS (SYNTHETIC_LAB only; OFF by default) ------
+    # Enabling lets the controller talk to the isolated zap-active-runner. It does NOT authorize a
+    # scan: every run additionally needs an operator activation ceremony and a single-use, signed
+    # lease that the runner's root-owned admission component verifies for itself.
+    zap_active_enabled: bool = False
+    zap_active_runner_url: str = "http://zap-active-runner:8093"
+    zap_active_rpc_timeout_seconds: float = Field(default=320.0, gt=0, le=660)
+    # The HMAC key the controller signs leases with. It exists in exactly two places — here and the
+    # root-owned runner admission component — and is never given to ZAP, the scope guard, the
+    # Operator Console, an audit record, a report or an evidence artifact. Startup refuses a
+    # missing, empty, short or placeholder value whenever ZAP Active is enabled.
+    zap_active_lease_secret: SecretStr | None = None
+    # Separate control-plane -> active-runner RPC credential. This keeps the runner's endpoints
+    # unavailable to the untrusted ZAP child even though the child shares the runner namespace.
+    zap_active_runner_client_secret: SecretStr | None = None
+    # Separate from the lease key: authenticates a human into a short-lived, server-side session.
+    zap_active_operator_bootstrap_secret: SecretStr | None = None
+
+    def require_zap_active_operator_bootstrap_secret(self) -> str:
+        value = self.zap_active_operator_bootstrap_secret
+        if value is None or len(value.get_secret_value().encode()) < 32:
+            raise RuntimeError("ZAP Active operator bootstrap secret unavailable")
+        return value.get_secret_value()
+
+    def require_zap_active_runner_client_secret(self) -> str:
+        value = self.zap_active_runner_client_secret
+        if value is None or len(value.get_secret_value().encode()) < 32:
+            raise RuntimeError("ZAP Active runner client credential unavailable")
+        return value.get_secret_value()
+
     # --- Phase 1.4 disposable AI adversary sandbox (OFF by default) -----------------------------
     # The controller sends command text as opaque JSON to the supervisor. This shared RPC token is
     # mounted only in those two controller components and is stripped from every shell environment.
@@ -129,6 +159,21 @@ class Settings(BaseSettings):
     beast_supervisor_token: SecretStr | None = None
     beast_lease_seconds: int = Field(default=600, ge=30, le=900)
     beast_required_model: str = "qwen3:8b"
+
+    def require_zap_active_lease_secret(self) -> str:
+        """Return the signing secret, or refuse to operate. Never logged and never returned to an
+        API caller; the raised message deliberately names the variable, never a value."""
+
+        from aegis_zap_active.lease import LeaseRejected, normalize_secret
+
+        raw = self.zap_active_lease_secret
+        try:
+            return normalize_secret(raw.get_secret_value() if raw is not None else None).decode()
+        except LeaseRejected:
+            raise RuntimeError(
+                "ZAP_ACTIVE_ENABLED requires a real ZAP_ACTIVE_LEASE_SECRET "
+                "(>=32 bytes, not a placeholder); ZAP Active refuses to start without one"
+            ) from None
 
     @property
     def allowed_hosts(self) -> frozenset[str]:

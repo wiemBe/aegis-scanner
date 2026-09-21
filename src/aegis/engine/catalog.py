@@ -135,7 +135,10 @@ CAPABILITY_CATALOG: tuple[EngineCapability, ...] = (
         title="Object-level authorization read comparison (BOLA)",
         activity=EngineActivity.ACTIVE,
         supported_methods=("GET", "HEAD", "OPTIONS"),
-        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        allowed_environments=(
+            EngineEnvironment.SYNTHETIC_LAB,
+            EngineEnvironment.SYNTHETIC_RANGE,
+        ),
         requires_authentication=True,
         state_changing_possible=False,
         required_approvals=("SYNTHETIC_LAB_SCOPE",),
@@ -270,7 +273,35 @@ CAPABILITY_CATALOG: tuple[EngineCapability, ...] = (
         protocol="http",
         verified_severity="LOW",
     ),
-    # Catalogued ONLY to be refused: active scanning is not approved in Phase 1.3.
+    # Phase 1.5: the single operational ZAP ACTIVE capability. One reviewed release reflected-XSS
+    # rule (40012) mutates exactly one bounded projected query parameter on one anonymous, read-only
+    # GET endpoint in the synthetic lab, under a single-use activation lease, the active scope guard
+    # and a fresh deterministic Aegis verifier. Payloads are ZAP-generated inside the admitted
+    # policy; the scanner alert is TOOL_REPORTED only.
+    EngineCapability(
+        capability_id="zap_active_reflected_xss_v1",
+        engine=SecurityEngine.ZAP,
+        title="Reflected XSS (ZAP active, one rule, one projected query parameter, read-only)",
+        activity=EngineActivity.ACTIVE,
+        supported_methods=("GET", "HEAD"),
+        allowed_environments=(EngineEnvironment.SYNTHETIC_LAB,),
+        requires_authentication=False,
+        state_changing_possible=False,
+        required_approvals=(
+            "SYNTHETIC_LAB_SCOPE",
+            "OPERATOR_ENABLE_ZAP",
+            "OPERATOR_ACTIVE_SCAN_LEASE",
+        ),
+        request_budget=200,
+        concurrency_budget=1,
+        time_budget_ms=300_000,
+        evidence_types=("ZAP_EXECUTION_CARD", "ZAP_ALERT_CARD", "VERIFIER_PROBE_CARD"),
+        verification_policy=VerificationPolicy.DETERMINISTIC_AEGIS_VERIFIER,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+        protocol="http",
+        verified_severity="HIGH",
+    ),
+    # Catalogued ONLY to be refused: broad/arbitrary active scanning is never approved.
     EngineCapability(
         capability_id="zap_active_scan_v0",
         engine=SecurityEngine.ZAP,
@@ -380,7 +411,7 @@ PROFILE_CATALOG: tuple[EngineProfile, ...] = (
         adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
         description=(
             "ZAP 2.17.0 (pinned image digest and add-on inventory) running one fixed Automation "
-            "Framework plan: import a controller-projected local OpenAPI file of approved GET/HEAD "
+            "Framework plan: import a controller-projected local OpenAPI of approved GET/HEAD "
             "operations and passively analyse the responses with the admitted rule manifest. No "
             "active scan, spider, script, authentication or remote OpenAPI source. Alerts enter "
             "as TOOL_REPORTED; only the deterministic Aegis verifier promotes."
@@ -392,6 +423,34 @@ PROFILE_CATALOG: tuple[EngineProfile, ...] = (
             "internal zap-rpc network; its only outbound network contains just the scope "
             "guard, which forwards only armed, allowlisted GET/HEAD requests to the synthetic "
             "origin within a hard budget. Fixed argv, no shell."
+        ),
+    ),
+    EngineProfile(
+        profile_id="ZAP_LAB_ACTIVE_REFLECTED_XSS_V1",
+        engine=SecurityEngine.ZAP,
+        title="ZAP — lab active reflected XSS (pinned, one rule, one query parameter)",
+        capability_ids=("zap_active_reflected_xss_v1",),
+        enabled=True,
+        environment=EngineEnvironment.SYNTHETIC_LAB,
+        adapter_version=ADAPTER_VERSIONS[SecurityEngine.ZAP],
+        description=(
+            "ZAP 2.17.0 (a separate pinned image with the eight passive add-ons plus "
+            "ascanrules-release-83 and its neutralised forced dependencies oast/database) running "
+            "one fixed Automation Framework plan: import a controller-projected local OpenAPI "
+            "of one GET operation with one bounded query parameter, then an activeScan whose "
+            "inline policy disables every rule but the admitted reflected-XSS rule 40012 "
+            "(strength LOW, threshold MEDIUM). No spider, script, authentication or remote source. "
+            "Requires a single-use activation lease. Alerts enter as TOOL_REPORTED; only the "
+            "deterministic Aegis XSS verifier promotes."
+        ),
+        isolation_boundary=(
+            "Separate active zap-runner container from the pinned Phase 1.5 image: non-root, "
+            "read-only root filesystem, bounded tmpfs, all capabilities dropped, no shell, no "
+            "Docker socket, host mount, credential or published port. Reached only over the "
+            "internal active-rpc network; its only outbound network contains just the active scope "
+            "guard, which in ACTIVE mode forwards only armed GET/HEAD requests to the one approved "
+            "origin+path, permits a query string only on the projected parameter, and enforces a "
+            "hard measured request budget. An emergency stop kills the scan mid-flight."
         ),
     ),
     EngineProfile(

@@ -7,4 +7,8 @@
 .mypy_cache
 .ruff_cache
 *.db
+*.pem
+*.key
+*private-key*
+*private_key*
 artifacts

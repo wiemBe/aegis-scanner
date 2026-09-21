@@ -18,6 +18,7 @@ from aegis_zap.contracts import (
     GuardArmResponse,
     GuardAttestation,
     GuardCountersResponse,
+    GuardRevokeResponse,
 )
 from aegis_zap.projection import ProjectedOperation
 
@@ -26,8 +27,9 @@ _Model = TypeVar("_Model", bound=BaseModel)
 
 
 class GuardClient:
-    def __init__(self, control_url: str, *, timeout: float = 3.0) -> None:
+    def __init__(self, control_url: str, *, control_secret: str = "", timeout: float = 3.0) -> None:
         self.control_url = control_url.rstrip("/")
+        self._control_secret = control_secret
         self.timeout = timeout
         # An explicit empty ProxyHandler: ambient proxy variables are never honoured.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -40,7 +42,10 @@ class GuardClient:
             f"{self.control_url}{path}",
             data=data,
             method="POST" if payload is not None else "GET",
-            headers={"Content-Type": "application/json"} if payload is not None else {},
+            headers={
+                **({"Content-Type": "application/json"} if payload is not None else {}),
+                **({"X-Aegis-Guard-Control": self._control_secret} if self._control_secret else {}),
+            },
         )
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
@@ -79,6 +84,65 @@ class GuardClient:
         if armed is None or armed.execution_id != execution_id:
             return None
         return armed
+
+    def arm_active(
+        self,
+        *,
+        execution_id: str,
+        origin: str,
+        method: str,
+        path: str,
+        allowed_params: tuple[str, ...],
+        max_requests: int,
+        ttl_ms: int,
+        lease_id: str,
+        lease_expires_at: int,
+        projection_digest: str,
+        allowlist_digest: str,
+    ) -> GuardArmResponse | None:
+        """Arm the guard in ACTIVE mode: query mutation on ``allowed_params`` only, a larger
+        (still hard-capped) request budget, and the consumed lease's binding.
+
+        The guard echoes the binding back and this method refuses anything that does not match
+        exactly, so the runner can never proceed while the two sides disagree about which lease,
+        target or projection they are armed for."""
+
+        payload = {
+            "schema_version": GUARD_SCHEMA,
+            "execution_id": execution_id,
+            "origin": origin,
+            "allowlist": [{"method": method, "path": path}],
+            "max_requests": max_requests,
+            "ttl_ms": ttl_ms,
+            "mode": "ACTIVE",
+            "allowed_query_params": list(allowed_params),
+            "lease_id": lease_id,
+            "lease_expires_at": lease_expires_at,
+            "projection_digest": projection_digest,
+            "allowlist_digest": allowlist_digest,
+        }
+        armed = self._call("/v1/arm", payload, GuardArmResponse)
+        if armed is None or armed.execution_id != execution_id:
+            return None
+        if (
+            armed.lease_id != lease_id
+            or armed.lease_expires_at != lease_expires_at
+            or armed.projection_digest != projection_digest
+            or armed.allowlist_digest != allowlist_digest
+            or armed.max_requests != max_requests
+        ):
+            # The guard confirmed a different binding than the one the lease authorized. Fail
+            # closed and disarm: no ZAP process is started.
+            self.disarm(armed.token)
+            return None
+        return armed
+
+    def revoke_lease(self, lease_id: str, reason: str = "revoked") -> GuardRevokeResponse | None:
+        """Disarm immediately for one lease id. Does not require the arm token (stop must work)."""
+
+        return self._call(
+            "/v1/revoke", {"lease_id": lease_id, "reason": reason}, GuardRevokeResponse
+        )
 
     def counters(self, token: str) -> GuardCountersResponse | None:
         return self._call("/v1/counters", {"token": token}, GuardCountersResponse)

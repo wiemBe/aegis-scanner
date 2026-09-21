@@ -1,0 +1,3 @@
+Daily Operations Summary
+Orders processed: 42
+Exceptions: 0

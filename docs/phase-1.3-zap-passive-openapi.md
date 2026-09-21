@@ -97,5 +97,9 @@ clean; 136 prior artifacts byte-identical. Evidence: `artifacts/phase-1.3-*` and
 No active scan, spider, Ajax spider, client spider, fuzzing, forced browsing, OAST, scripting,
 requestor, replacer, sequence scanning, GraphQL/SOAP/Postman import, remote OpenAPI URL, remote report
 destination, ZAP API/daemon, MCP, LLM features, authentication, production or staging target, Burp
-integration or OWASP coverage claim. See [Phase 1.4 prerequisites](phase-1.4-zap-active-staging-prerequisites.md)
+integration or OWASP coverage claim. See [historical active-scan prerequisites draft](historical-zap-active-staging-prerequisites-draft.md)
 for what active staging testing would require.
+
+Active scanning was later added in [Phase 1.5](phase-1.5-zap-active-reflected-xss.md) as a
+**separate** profile, image and manifest. Nothing in this passive profile was widened by it: the
+eight-add-on image, the `10021`-only rule manifest and the passive scope-guard path are unchanged.

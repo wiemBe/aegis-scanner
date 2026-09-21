@@ -1,0 +1,265 @@
+{
+  "schema": "aegis.zap.active-manifest/1",
+  "manifest_version": "1.5.0",
+  "profile_id": "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1",
+  "engine": {
+    "name": "zap",
+    "version": "2.17.0",
+    "release_published_at": "2026-08-07",
+    "upstream_repository": "https://github.com/zaproxy/zaproxy",
+    "license": "Apache-2.0",
+    "image": {
+      "repository": "docker.io/zaproxy/zap-stable",
+      "observed_tag": "2.17.0",
+      "index_digest": "sha256:781a2bdaea47324e7bab583e2263f21d257b0aee61ed51521a5be45f5f5081ef",
+      "platforms": {
+        "linux_arm64": "sha256:05cbf4cab5d2fdaef55b0cd0b586f22d0ce4f75e0995f3cea2db23afbbdfd2f8",
+        "linux_amd64": "sha256:71db37cd5b75663b35758d10aaec05bf6fbac23f5020e3046c70e628a5f84efa"
+      },
+      "sbom": "NOT_PUBLISHED_UPSTREAM_PACKAGE_INVENTORY_RECORDED"
+    },
+    "jar": {
+      "path": "zap-2.17.0.jar",
+      "sha256": "015dda4709b5ef79736086bb41e8e2a4e95b04cf6625f14d6bcc02b197c99c0c"
+    },
+    "java": {
+      "version": "17.0.20",
+      "runtime_version": "17.0.20+8-1-deb12u1-Debian",
+      "implementor": "Debian",
+      "platforms": {
+        "linux_arm64": {
+          "home": "/usr/lib/jvm/java-17-openjdk-arm64",
+          "java_sha256": "96c4c2f2aa435203c4f3da91ca8c755dded3bf237b0f66e575acf6cadd609b70",
+          "libjvm_sha256": "35dc1132f6249806ac4e9b51a986e94ae4ca62c53323792c3d6f1e1f44165e76",
+          "release_sha256": "8332845d29ec3e0555558673dcbc3731ce1a013e9863f792e3c019432c341e2f"
+        },
+        "linux_amd64": {
+          "home": "/usr/lib/jvm/java-17-openjdk-amd64",
+          "java_sha256": "8e2c39b42d9a3a47469900c32981ada25735c605dd2c3e49be545c67553b340e",
+          "libjvm_sha256": "68fb1affe731196538b961f3fba9830fa4ba2263a6156f75335c7c5b0a5e8594",
+          "release_sha256": "2107e3508d59723612906e87bbf08d7c6ca08e27c237add05aae2a0217d7387b"
+        }
+      }
+    }
+  },
+  "add_ons": [
+    {
+      "id": "automation",
+      "version": "0.60.0",
+      "status": "beta",
+      "file": "automation-beta-0.60.0.zap",
+      "sha256": "e02c90abea15cb5802be1aa1adb959e5f76c4c517494087388732d71345e4ea9",
+      "role": "Automation Framework: runs the fixed controller-owned plan only."
+    },
+    {
+      "id": "callhome",
+      "version": "0.23.0",
+      "status": "release",
+      "file": "callhome-release-0.23.0.zap",
+      "sha256": "eadebd4ae60c1865f6811a276a643ebe954328e2e903447bf460d8b3ef691d7f",
+      "role": "Mandatory core add-on. Neutralised: -silent, -notel, telemetry disabled, no route out."
+    },
+    {
+      "id": "commonlib",
+      "version": "1.43.0",
+      "status": "release",
+      "file": "commonlib-release-1.43.0.zap",
+      "sha256": "f1c46d6c65434a2a54307065b558a87121eaa5b9b6bc6cfb10bf230b6335d1f5",
+      "role": "Shared library required by every admitted add-on."
+    },
+    {
+      "id": "network",
+      "version": "0.29.0",
+      "status": "beta",
+      "file": "network-beta-0.29.0.zap",
+      "sha256": "082367cca24029ed0dce69ad6c4464897c63c9a2f0d5ec7ae42860e728414853",
+      "role": "HTTP client; configured to send only through the scope guard."
+    },
+    {
+      "id": "openapi",
+      "version": "57.0.0",
+      "status": "beta",
+      "file": "openapi-beta-57.zap",
+      "sha256": "fe87dd63cb310131c4e7d8c14b675c97f4b7707eda8ccc5fd6042628b6f19ccf",
+      "role": "Imports the local projected OpenAPI file (apiFile only)."
+    },
+    {
+      "id": "pscan",
+      "version": "0.6.0",
+      "status": "alpha",
+      "file": "pscan-alpha-0.6.0.zap",
+      "sha256": "269ff66f0d8a8012f156e90e13238606a8d503b99521170649b62c9aa7295927",
+      "role": "Core passive scanner and its passiveScan-config / passiveScan-wait jobs."
+    },
+    {
+      "id": "pscanrules",
+      "version": "75.0.0",
+      "status": "release",
+      "file": "pscanrules-release-75.zap",
+      "sha256": "97814c5f1319a31b5041f1bbd1edfc312b3a539c7cd56f7903e9996858361fcb",
+      "role": "Release-quality passive rules; all disabled except the admitted rule manifest."
+    },
+    {
+      "id": "reports",
+      "version": "0.46.0",
+      "status": "release",
+      "file": "reports-release-0.46.0.zap",
+      "sha256": "2e8d42a48e23aefa8a6174b52aa0a8a6b90aca2da0a8bf94ac61f4aaa070bc2c",
+      "role": "Local traditional-json report only; no remote destination."
+    },
+    {
+      "id": "ascanrules",
+      "version": "83.0.0",
+      "status": "release",
+      "file": "ascanrules-release-83.zap",
+      "sha256": "9c1b64c2fceda629f7c0ab0c21b5901035494f78da51d584972eaf85e94e91cc",
+      "role": "Active scanner rules. ONLY plugin 40012 (Cross Site Scripting (Reflected)) is admitted and enabled; the fixed activeScan policy turns every other rule OFF."
+    },
+    {
+      "id": "oast",
+      "version": "0.24.0",
+      "status": "beta",
+      "file": "oast-beta-0.24.0.zap",
+      "sha256": "f06ecea02e2c1df4a164e737dd632afba4430225b2fdc2feb6042bdb1e976b3d",
+      "role": "FORCED_DEPENDENCY_NEUTRALISED. Mandatory ascanrules dependency. OAST services disabled; runner egress is guard-only so callbacks cannot leave; rule 40012 does not use OAST."
+    },
+    {
+      "id": "database",
+      "version": "0.9.0",
+      "status": "alpha",
+      "file": "database-alpha-0.9.0.zap",
+      "sha256": "4c58ca142288d9ddc6ae3fd8fe6815e3894462bae67eb0776e540a2d9ddaf87d",
+      "role": "FORCED_DEPENDENCY_NEUTRALISED. Mandatory oast dependency. Local session storage only; no network, no remote database, no persistence past the destroyed per-execution home."
+    }
+  ],
+  "forbidden_add_on_ids": [
+    "alertFilters",
+    "ascanrulesAlpha",
+    "ascanrulesBeta",
+    "authhelper",
+    "bruteforce",
+    "client",
+    "diff",
+    "directorylistv1",
+    "domxss",
+    "encoder",
+    "exim",
+    "formhandler",
+    "fuzz",
+    "gettingStarted",
+    "graaljs",
+    "graphql",
+    "help",
+    "hud",
+    "insights",
+    "invoke",
+    "llm",
+    "mcp",
+    "onlineMenu",
+    "postman",
+    "pscanrulesAlpha",
+    "pscanrulesBeta",
+    "quickstart",
+    "replacer",
+    "requester",
+    "retest",
+    "retire",
+    "reveal",
+    "scanpolicies",
+    "scripts",
+    "selenium",
+    "sequence",
+    "soap",
+    "spider",
+    "spiderAjax",
+    "tips",
+    "webdriverlinux",
+    "websocket",
+    "zest"
+  ],
+  "neutralised_dependency_ids": [
+    "database",
+    "oast"
+  ],
+  "active_rules": [
+    {
+      "plugin_id": 40012,
+      "name": "Cross Site Scripting (Reflected)",
+      "add_on_id": "ascanrules",
+      "add_on_version": "83.0.0",
+      "implementation": "org.zaproxy.zap.extension.ascanrules.CrossSiteScriptingScanRule",
+      "cwe_id": 79,
+      "quality": "release",
+      "threshold": "MEDIUM",
+      "strength": "LOW",
+      "claimed_risk": "high",
+      "claimed_confidence": "medium",
+      "risk_confidence_policy": "UNTRUSTED_TOOL_METADATA_NEVER_SETS_AEGIS_SEVERITY_OR_CONFIDENCE",
+      "expected_evidence_fields": [
+        "uri",
+        "method",
+        "param",
+        "attack",
+        "evidence"
+      ],
+      "expected_param": "q",
+      "capability_id": "zap_active_reflected_xss_v1",
+      "verification_policy": "DETERMINISTIC_AEGIS_VERIFIER",
+      "verifier": "aegis-zap-xss-verifier/1.5.0",
+      "aegis_verified_severity": "HIGH",
+      "attack_field_policy": "REDACTED_CLASSIFICATION_AND_DIGEST_ONLY_NEVER_RAW_ATTACK_TEXT",
+      "justification": "Release-quality reflected-XSS active rule verified in the pinned image (help id-40012, Messages.properties). It mutates exactly one bounded projected query parameter on one anonymous read-only GET endpoint. Payloads are ZAP-generated inside the admitted policy, never operator- or model-supplied. The scanner alert is TOOL_REPORTED only; a fresh deterministic Aegis verifier owns CONFIRMED/PASS.",
+      "review": {
+        "reviewed_on": "2026-09-20",
+        "reviewer": "Aegis Phase 1.5 technical admission review (AI-assisted, recorded)",
+        "operator_countersigned": false,
+        "notes": "Rule id, add-on version and file digest verified against ascanrules-release-83 inside the pinned base image sha256:781a2b. ascanrules mandatorily depends on oast, and oast on database; both are included ONLY as neutralised forced dependencies (operator-approved 2026-09-20). No threshold, strength or rule behaviour was altered to force a match. Adding a rule requires a new manifest version and fresh acceptance."
+      }
+    }
+  ],
+  "prohibited_jobs": [
+    "spider",
+    "spiderAjax",
+    "spiderClient",
+    "import",
+    "graphql",
+    "soap",
+    "postman",
+    "requestor",
+    "replacer",
+    "script",
+    "sequence-import",
+    "sequence-activeScan",
+    "addOns",
+    "alertFilter",
+    "exitStatus",
+    "llm",
+    "mcp",
+    "oast",
+    "delay",
+    "outputSummary"
+  ],
+  "prohibited_features": [
+    "spider",
+    "ajaxSpider",
+    "clientSpider",
+    "scripts",
+    "replacer",
+    "requestor",
+    "forcedBrowse",
+    "authentication",
+    "sequences",
+    "graphql",
+    "soap",
+    "postmanImport",
+    "remoteOpenApiUrl",
+    "remoteReports",
+    "zapDaemonOrApi",
+    "addOnInstallOrUpdate",
+    "oastCallbacks",
+    "llmOrMcp",
+    "arbitraryZapOptions",
+    "operatorOrModelPayloads",
+    "stateChangingMethods"
+  ]
+}
