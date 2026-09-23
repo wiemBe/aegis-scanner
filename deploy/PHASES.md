@@ -342,10 +342,17 @@ deterministic verifier; the patched chain is broken and cannot be confirmed.
   per arm). Stage A and Stage B were executed **directly by `CHAIN_AGENT` through the Tool Broker**,
   not as separate persisted agent jobs. `CLOUD_BOUNDARY_AGENT` / `AUTHORIZATION_AGENT` are
   producing-agent *labels* on the two persisted chain links, not independent queued/claimed/closed
-  jobs. The artifact check `real_agent_handoffs_persisted=true` verifies two links with distinct
-  producing-agent labels + valid source-evidence SHA-256 hashes — it does **not** assert separate
-  live agent-to-agent stage handoffs. **Live multi-agent stage handoffs: NOT_EVALUATED** (bounded
-  future acceptance item). Phase 2.0 does not claim to have proven live multi-agent stage execution.
+  jobs. The verdict check was therefore **renamed** `real_agent_handoffs_persisted` →
+  `chain_link_handoff_metadata_persisted` (it validates ordered links, role labels, evidence refs,
+  source SHA-256 hashes, `depends_on_link_id` and the credential-reference dependency — link
+  metadata only), and two explicit scope fields were added:
+  `separate_live_agent_stage_jobs_persisted="NOT_EVALUATED"` and
+  `live_multi_agent_stage_handoffs="NOT_EVALUATED"`. Producing-agent labels are never proof of live
+  agent execution. **Live multi-agent stage handoffs: NOT_EVALUATED** (bounded future acceptance
+  item). Phase 2.0 does not claim to have proven live multi-agent stage execution. The corrected
+  semantic verdict is regenerated offline (no re-run) at
+  `artifacts/phase-2.0-closure-reconciliation/reconciliation.json`; see
+  [`docs/phase-2.0-closure.md`](../docs/phase-2.0-closure.md).
 
 **New code:** `src/aegis/multi_agent/attack_chain.py` (typed chain model + states, isolated ephemeral
 secret store + opaque `credentialref://` lifecycle, Stage-A capture, shell-free Stage-B

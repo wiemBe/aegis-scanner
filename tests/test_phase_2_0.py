@@ -683,6 +683,8 @@ def _vuln_arm() -> dict[str, Any]:
         "source_evidence_sha256": "b" * 64,
         "depends_on_link_id": a_link["link_id"],
         "consumes_prior_credential_reference": True,
+        "input_evidence_refs": ["credential-reference"],
+        "output_evidence_refs": ["private-operation-effect"],
         "hypothesis_confirmed": False,
         "verification_state": "CONFIRMED",
         "severity_ref": "GT-RANGE-CLOUD-005",
@@ -1038,3 +1040,137 @@ def test_isolated_chain_probe_full_arm_without_credential_skips_stage_b() -> Non
     assert result["credential_reference_present"] is False
     assert result["stage_b"] == []
     assert result["causal_control"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2.0 closure — offline verdict-semantics reconciliation regression tests.
+# --------------------------------------------------------------------------- #
+def _load_reconcile() -> Any:
+    path = Path(__file__).resolve().parent.parent / "scripts" / "phase_2_0_reconcile_closure.py"
+    spec = importlib.util.spec_from_file_location("phase_2_0_reconcile_closure", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_chain_link_handoff_metadata_check_replaces_old_name() -> None:
+    module = _load_orchestrator()
+    verdict = module._verdict(_full_record())
+    # The misleading name is gone; the honest link-metadata check is present and true.
+    assert "real_agent_handoffs_persisted" not in verdict["checks"]
+    assert verdict["checks"]["chain_link_handoff_metadata_persisted"] is True
+
+
+def test_role_labels_alone_cannot_satisfy_live_agent_job_check() -> None:
+    module = _load_orchestrator()
+    # A record whose ONLY evidence of "agents" is producing-agent labels on chain links
+    # (exactly the bounded 2.0 case) must NOT be scored as separate live agent jobs.
+    record = _full_record()
+    assert record["vulnerable"]["links"][0]["producing_agent"] == "CLOUD_BOUNDARY_AGENT"
+    assert record["vulnerable"]["links"][1]["producing_agent"] == "AUTHORIZATION_AGENT"
+    assert module._separate_live_agent_stage_jobs_persisted(record) == "NOT_EVALUATED"
+    # Even a forged label on a CHAIN_AGENT-owned job cannot flip it.
+    record["stage_agent_jobs"] = [
+        {"to_agent": "CLOUD_BOUNDARY_AGENT", "address": "agentjob://CHAIN_AGENT/x"},
+    ]
+    assert module._separate_live_agent_stage_jobs_persisted(record) == "NOT_EVALUATED"
+
+
+def test_separate_live_agent_jobs_requires_real_distinct_addressed_jobs() -> None:
+    module = _load_orchestrator()
+    record = _full_record()
+    # Real distinct per-stage agent jobs with their own non-CHAIN_AGENT addresses => True.
+    record["stage_agent_jobs"] = [
+        {"to_agent": "CLOUD_BOUNDARY_AGENT", "address": "agentjob://CLOUD_BOUNDARY_AGENT/j1"},
+        {"to_agent": "AUTHORIZATION_AGENT", "address": "agentjob://AUTHORIZATION_AGENT/j2"},
+    ]
+    assert module._separate_live_agent_stage_jobs_persisted(record) is True
+
+
+def test_link_metadata_and_separate_agent_jobs_are_distinct_concepts() -> None:
+    module = _load_orchestrator()
+    verdict = module._verdict(_full_record())
+    # Same record: link metadata persisted is TRUE while separate live agent-stage jobs is
+    # NOT_EVALUATED. The two must never be conflated.
+    assert verdict["checks"]["chain_link_handoff_metadata_persisted"] is True
+    assert verdict["separate_live_agent_stage_jobs_persisted"] == "NOT_EVALUATED"
+    assert verdict["live_multi_agent_stage_handoffs"] == "NOT_EVALUATED"
+    # The bounded attack-chain result is still LIVE_GO / passed, independent of that scope.
+    assert verdict["passed"] is True
+    assert verdict["attack_chain_status"] == "LIVE_GO"
+
+
+def test_unknown_provider_usage_is_never_converted_to_zero() -> None:
+    module = _load_reconcile()
+    attempts = [
+        {"provider_calls_total": 7, "provider_tokens_total": 11267},
+        {"provider_calls_total": 2, "provider_tokens_total": "UNKNOWN"},
+    ]
+    agg = module.aggregate_usage(attempts)
+    # The 2 rejected calls contribute 0 to KNOWN tokens but are tracked as unknown, not zeroed.
+    assert agg["phase_cumulative_known_provider_tokens"] == 11267
+    assert agg["phase_cumulative_unknown_token_calls"] == 2
+    usage = module.build_usage_block(attempts[0], attempts)
+    assert usage["within_phase_token_ceiling"] == "UNKNOWN"  # noqa: S105 - status label, not a secret
+
+
+def test_unknown_phase_token_ceiling_only_flips_with_auditable_bound() -> None:
+    module = _load_reconcile()
+    attempts = [
+        {"provider_calls_total": 7, "provider_tokens_total": 11267},
+        {"provider_calls_total": 2, "provider_tokens_total": "UNKNOWN"},
+    ]
+    # Likely prompt size is NOT enough; only an explicit auditable upper bound may prove it.
+    usage_no_proof = module.build_usage_block(attempts[0], attempts)
+    assert usage_no_proof["within_phase_token_ceiling"] == "UNKNOWN"  # noqa: S105 - status label, not a secret
+    usage_proven = module.build_usage_block(
+        attempts[0], attempts, auditable_cumulative_token_upper_bound=20000
+    )
+    assert usage_proven["within_phase_token_ceiling"] is True
+    usage_over = module.build_usage_block(
+        attempts[0], attempts, auditable_cumulative_token_upper_bound=70000
+    )
+    assert usage_over["within_phase_token_ceiling"] is False
+
+
+def test_attempt_totals_and_phase_totals_reported_separately() -> None:
+    module = _load_reconcile()
+    attempts = [
+        {"provider_calls_total": 7, "provider_tokens_total": 11267},
+        {"provider_calls_total": 2, "provider_tokens_total": "UNKNOWN"},
+    ]
+    usage = module.build_usage_block(attempts[0], attempts)
+    assert usage["authoritative_attempt_provider_calls"] == 7
+    assert usage["authoritative_attempt_provider_tokens"] == 11267
+    assert usage["phase_cumulative_provider_calls"] == 9
+    # Attempt total and phase total are genuinely different numbers, kept in distinct fields.
+    assert (
+        usage["authoritative_attempt_provider_calls"] != usage["phase_cumulative_provider_calls"]
+    )
+    assert usage["within_authoritative_attempt_call_ceiling"] is True
+    assert usage["within_phase_call_ceiling"] is True
+
+
+def test_build_reconciliation_surfaces_not_evaluated_scope_fields() -> None:
+    module = _load_reconcile()
+    failed = {"verdict": "PARTIAL", "provider_calls_total": 2, "provider_tokens_total": "UNKNOWN"}
+    orch = _load_orchestrator()
+    corrected = orch._verdict(_full_record())
+    recon = module.build_reconciliation(
+        failed_acceptance=failed,
+        authoritative_acceptance={
+            "provider_calls_total": 7,
+            "provider_tokens_total": 11267,
+            "record": _full_record(),
+        },
+        corrected_verdict=corrected,
+        ledger_rows={"chain_jobs": [], "chain_links": [], "distinct_job_roles": ["CHAIN_AGENT"]},
+        provenance={},
+    )
+    assert recon["attack_chain_status"] == "LIVE_GO"
+    assert recon["live_multi_agent_stage_handoffs"] == "NOT_EVALUATED"
+    assert recon["separate_live_agent_stage_jobs_persisted"] == "NOT_EVALUATED"
+    assert recon["usage"]["within_phase_token_ceiling"] == "UNKNOWN"  # noqa: S105 - status label, not a secret
+    assert recon["usage"]["phase_cumulative_unknown_token_calls"] == 2
+    assert "real_agent_handoffs_persisted" not in recon["corrected_verdict"]["checks"]

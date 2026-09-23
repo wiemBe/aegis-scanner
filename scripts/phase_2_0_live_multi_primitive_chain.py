@@ -981,6 +981,34 @@ def _stage_a_probe_reached(arm_rec: dict[str, Any]) -> bool:
     return any(s.get("label") == "CONTROL" and int(s.get("status_code", 0)) == 200 for s in stage_a)
 
 
+def _separate_live_agent_stage_jobs_persisted(record: dict[str, Any]) -> Any:
+    """Whether the ledger persisted *distinct live per-stage agent jobs* — separate
+    ``agentjob://`` jobs owned by the producing agents (e.g. CLOUD_BOUNDARY_AGENT for Stage A and
+    AUTHORIZATION_AGENT for Stage B), each independently queued/claimed/closed.
+
+    This is deliberately distinct from ``chain_link_handoff_metadata_persisted``: producing-agent
+    *labels* on chain links can never satisfy this. In the bounded Phase 2.0 run only the single
+    CHAIN_AGENT job exists per arm and both stages were executed directly by CHAIN_AGENT through the
+    Tool Broker, so no such per-stage jobs were recorded and this returns ``NOT_EVALUATED``. It only
+    returns ``True`` if the record carries real per-stage agent jobs with their own addresses and a
+    producing role that is not CHAIN_AGENT.
+    """
+
+    stage_jobs = record.get("stage_agent_jobs")
+    if not isinstance(stage_jobs, list) or not stage_jobs:
+        return NOT_EVALUATED
+    roles = {str(j.get("to_agent")) for j in stage_jobs if isinstance(j, dict)}
+    addressed = all(
+        str(j.get("address", "")).startswith("agentjob://")
+        and str(j.get("to_agent")) != "CHAIN_AGENT"
+        for j in stage_jobs
+        if isinstance(j, dict)
+    )
+    if addressed and {"CLOUD_BOUNDARY_AGENT", "AUTHORIZATION_AGENT"} <= roles:
+        return True
+    return NOT_EVALUATED
+
+
 def _verdict(record: dict[str, Any]) -> dict[str, Any]:
     vuln = record.get("vulnerable") or {}
     patched = record.get("patched") or {}
@@ -1027,11 +1055,25 @@ def _verdict(record: dict[str, Any]) -> dict[str, Any]:
         )
 
     checks["addressable_chain_job_consumed"] = _job_consumed(vuln) and _job_consumed(patched)
-    # Real agent handoffs persisted: two links with distinct producing/consuming agents + hashes.
-    checks["real_agent_handoffs_persisted"] = bool(
+    # Chain-link handoff METADATA persisted: two ordered links carrying producing/consuming ROLE
+    # LABELS, evidence references, source hashes, the Stage-B->Stage-A dependency edge and the
+    # credential-reference dependency. This is link metadata only. It does NOT — and must not be
+    # read to — assert that separate live per-stage agent jobs were created and executed. The
+    # producing-agent labels below are metadata on the CHAIN_AGENT-produced links, not proof that
+    # a CLOUD_BOUNDARY_AGENT or AUTHORIZATION_AGENT job ran. See
+    # ``_separate_live_agent_stage_jobs_persisted`` for that distinct (NOT_EVALUATED) concept.
+    checks["chain_link_handoff_metadata_persisted"] = bool(
         len(links) == 2
+        and stage_a_link.get("stage_index") == 0
+        and stage_b_link.get("stage_index") == 1
         and stage_a_link.get("producing_agent") == "CLOUD_BOUNDARY_AGENT"
         and stage_b_link.get("producing_agent") == "AUTHORIZATION_AGENT"
+        and stage_a_link.get("consuming_agent") == "CHAIN_AGENT"
+        and stage_b_link.get("consuming_agent") == "CHAIN_AGENT"
+        and stage_b_link.get("depends_on_link_id") == stage_a_link.get("link_id")
+        and bool(stage_a_link.get("link_id"))
+        and stage_b_link.get("consumes_prior_credential_reference") is True
+        and "credential-reference" in (stage_b_link.get("input_evidence_refs") or [])
         and re.fullmatch(r"[a-f0-9]{64}", str(stage_a_link.get("source_evidence_sha256", "")))
         and re.fullmatch(r"[a-f0-9]{64}", str(stage_b_link.get("source_evidence_sha256", "")))
     )
@@ -1197,9 +1239,17 @@ def _verdict(record: dict[str, Any]) -> dict[str, Any]:
     )
 
     passed = all(v is True for v in checks.values())
+    # Status fields live OUTSIDE ``checks`` so the NOT_EVALUATED multi-agent-stage scope cannot
+    # break the bounded attack-chain pass, yet is always present so a reader cannot mistake this
+    # for multi-agent-stage acceptance.
     return {
         "checks": checks,
         "passed": passed,
+        "attack_chain_status": "LIVE_GO" if passed else "NOT_LIVE_GO",
+        "separate_live_agent_stage_jobs_persisted": _separate_live_agent_stage_jobs_persisted(
+            record
+        ),
+        "live_multi_agent_stage_handoffs": NOT_EVALUATED,
         "provider_calls_total": total_calls,
         "provider_tokens_total": combined_tokens,
     }
