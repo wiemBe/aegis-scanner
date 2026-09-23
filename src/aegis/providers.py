@@ -146,6 +146,23 @@ _AGENT_TASK_DIRECTIVE: dict[str, str] = {
         "recommend the observations be submitted to the independent deterministic verifier; never "
         "confirm, PASS or set severity yourself"
     ),
+    "PLAN_ATTACK_CHAIN": (
+        "plan a two-stage chain of two distinct registered primitives where the second stage "
+        "consumes an opaque artifact reference produced by the first; select registered "
+        "capabilities and symbolic destinations only, never a URL, credential or body"
+    ),
+    "INTERPRET_CHAIN_STAGE": (
+        "summarise one independently-verified stage's normalised observations, noting whether it "
+        "produced the artifact reference the next stage needs, without confirming"
+    ),
+    "SELECT_NEXT_CHAIN_STEP": (
+        "select the next registered chain capability that consumes the prior link's opaque "
+        "credential reference; reason only about the reference's existence, never its value"
+    ),
+    "EXPLAIN_VERIFIED_CHAIN": (
+        "explain the verified two-primitive chain and its remediation; never confirm, "
+        "PASS or set severity or impact yourself"
+    ),
 }
 
 

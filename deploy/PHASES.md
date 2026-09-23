@@ -311,19 +311,65 @@ unavailable-without-lease) in the profile registry. Evidence:
 
 ---
 
-### Phase 2.0 — Multi-Primitive Chain Agent — `PLANNED`
-**Goal.** Turn separate findings into a **real** attack chain (not the 1.7-B workflow stub).
+### Phase 2.0 — Verified Multi-Primitive Chain Agent — `LIVE GO (one verifier-confirmed chain + patched break)`
+**Goal.** Turn separate findings into a **real, causally-connected** attack chain (not the 1.7-B
+workflow stub): Stage A produces a verified security artifact that Stage B *requires*; Stage B
+cannot succeed without it; every link and the final chain are confirmed only by the independent
+deterministic verifier; the patched chain is broken and cannot be confirmed.
 
-**Acceptance checks:**
-- At least **two distinct primitives** used in one chain.
-- **Proven transitions** between chain steps (state carried from step N to N+1, evidenced).
-- Chain-level impact articulated and verifier-confirmed.
-- Clearly distinguished in the audit trail from `DELEGATION_WORKFLOW_CHAIN`.
+**Result — LIVE GO (all typed checks True), 7 calls / 11,267 tokens / ~122s.** The chain is
+`cloud-service-chain-v1` composed of **two distinct primitives** in `aegis-cloud`:
+- **Stage A — METADATA_CREDENTIAL_EXPOSURE** (`cloud-metadata-response-v1`, GT-RANGE-CLOUD-004,
+  CWE-200), producing agent `CLOUD_BOUNDARY_AGENT` → verifier **CONFIRMED**.
+- **Stage B — INTERNAL_SERVICE_AUTHORIZATION** (`cloud-service-access-v1`, GT-RANGE-CLOUD-005,
+  CWE-285), producing agent `AUTHORIZATION_AGENT` → verifier **CONFIRMED**.
+- **Causal link:** Stage A's synthetic instance-metadata credential is captured **at the source**
+  into an isolated ephemeral secret store and emitted only as an opaque `credentialref://`; Stage B
+  resolves that reference **broker-side** to reach the private admin operation (`ADMIN-EFFECT`). The
+  raw credential value never enters a model prompt, queue payload, projection, log or artifact
+  (verified absent).
+- **Causal-dependency control (held):** an unrelated/invalid reference is rejected by the private
+  operation (403, no effect) while the real reference reaches the effect (200). The Stage B link
+  records `depends_on_link_id` = the Stage A link and `consumes_prior_credential_reference=true`.
+- **Patched arm:** the same scenario reset to patched suppresses the credential; no usable reference
+  is created; chain state → **BLOCKED_BY_PATCH**; Stage A verifier **PASS**; no Stage B, no
+  `EXPLAIN_VERIFIED_CHAIN` — the broken chain is never reported as confirmed.
+- Real addressable `agentjob://CHAIN_AGENT/<id>` job consumed (QUEUED→CLAIMED→CLOSED); persisted
+  chain ledger with two links, source-evidence hashes, and RUNNING→LINK_CONFIRMED→CHAIN_CONFIRMED
+  transitions. Identity exact `deepseek-v4-pro` on all 7 calls; credential gateway-only; cleanup
+  `down_rc=0`, no leftovers. Opaque credential reference revoked and proven unusable post-cleanup.
 
-**Optional early signal (non-blocking).** A cheap multi-agent-vs-single sanity comparison may
-be captured here to de-risk the 2.4 benchmark investment. Optional; must not block 2.0.
+**New code:** `src/aegis/multi_agent/attack_chain.py` (typed chain model + states, isolated ephemeral
+secret store + opaque `credentialref://` lifecycle, Stage-A capture, shell-free Stage-B
+internal-service-access broker, durable/addressable `AttackChainLedger`, offline-testable
+`run_isolated_chain_probe`); four strict gateway contracts (`PLAN_ATTACK_CHAIN`,
+`INTERPRET_CHAIN_STAGE`, `SELECT_NEXT_CHAIN_STEP`, `EXPLAIN_VERIFIED_CHAIN`); new registered Stage-B
+capability `aegis.cloud.internal_service_access`; `scripts/phase_2_0_live_multi_primitive_chain.py`;
+`tests/test_phase_2_0.py` (42 offline tests). ruff/mypy(strict, gated packages) clean.
 
-**Budget.** ≤ 15 calls / ≤ 60,000 tokens. **Stop condition.** Do not start 2.1.
+**Distinct from 1.7-B.** This chain is `VERIFIED_MULTI_PRIMITIVE_CHAIN` — two independently-verified
+vulnerability primitives combined into a distinct controller-verified effect — and is clearly
+separated in the audit trail from the earlier `DELEGATION_WORKFLOW_CHAIN` (recon→injection→verify
+delegation workflow, which confirms nothing).
+
+**CAVEAT (record in closure):** the first live campaign FAILED fail-closed on the very first model
+call — the `PLAN_ATTACK_CHAIN` `objective` field capped at 300 chars while the mode-blind objective
+handed in was 320, so the model's echo overflowed (`objective: string_too_long`). Everything else in
+that run worked (both stacks healthy, controller dependency-cascade armed all three cloud scenarios,
+sanitizer clean, `down_rc=0`). The contract prose fields were widened to 600 with headroom, the input
+objective shortened, and a regression guard test added; the campaign was re-run **once**
+(transparently, with user authorization — not silently), 2 rejected + 7 successful = 9 calls across
+the two runs, each run individually within the ≤12 / ≤60,000 ceiling. Live prompt-injection control
+was NOT re-evaluated (reused Phase 1.7-D / 1.9 boundaries; new ingestion paths covered by offline
+tests).
+
+- **Status:** LIVE GO for one verifier-confirmed multi-primitive attack chain and its patched break
+  inside the bounded synthetic range. Artifact:
+  `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194626Z`. Not general autonomous
+  exploitation, full attack-chain coverage, production readiness, public-cloud compromise,
+  company-target readiness or full OWASP coverage.
+
+**Budget.** ≤ 12 calls / ≤ 60,000 tokens. **Stop condition.** Do not start 2.1.
 
 ---
 

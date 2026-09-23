@@ -526,6 +526,138 @@ class CloudBoundarySubmissionOutput(StrictModel):
     rationale: str = Field(min_length=3, max_length=300)
 
 
+# --- Phase 2.0 verified multi-primitive attack-chain gateway output contracts (server-selected) ---
+#
+# These are the strict schemas the gateway derives for the CHAIN_AGENT / Stage-B agent task types.
+# As with the recon and cloud-boundary contracts they are reference-only: the model may select only
+# registered chain capability ids, registered target references, typed *primitive-type* hypotheses,
+# and symbolic destination references. There is NO field through which it can emit a URL, a
+# credential value, a raw request body, a verdict, PASS/CONFIRMED, severity or final impact — those
+# are structurally unrepresentable. The model may reason about the *existence and type* of a
+# credential reference (a boolean) but never its value. Every ``unconfirmed`` flag is fixed True
+# so the schema itself restates that only the independent verifier may confirm. The literal alias
+# values are kept in lockstep with aegis.multi_agent.attack_chain by a drift-guard test; they are
+# duplicated here, not imported, so the isolated gateway process never imports the range inventory.
+ChainCapabilityId = Literal[
+    "aegis.cloud.metadata_boundary_probe",
+    "aegis.cloud.internal_service_access",
+]
+_GwChainPrimitiveType = Literal[
+    "METADATA_CREDENTIAL_EXPOSURE",
+    "INTERNAL_SERVICE_AUTHORIZATION",
+]
+# Symbolic chain destinations the model may name. Neither is a URL: the broker resolves each to a
+# concrete internal origin+route controller-side. INSTANCE_METADATA is the synthetic instance
+# -metadata response; PRIVATE_ADMIN_OPERATION is the private administration operation reached with a
+# captured credential reference.
+_GwChainDestinationRef = Literal["INSTANCE_METADATA", "PRIVATE_ADMIN_OPERATION"]
+_GwChainObservationKind = Literal[
+    "INTEGRATION_RESPONSE",
+    "CREDENTIAL_REFERENCE_PRESENT",
+    "CREDENTIAL_REFERENCE_ABSENT",
+    "PRIVATE_OPERATION_EFFECT",
+    "OPERATION_REJECTED",
+    "NO_FINDING",
+    "INCOMPLETE_TOOL_ERROR",
+]
+
+
+class GatewayChainStageSelection(StrictModel):
+    """One typed chain-stage *selection*: a primitive type, a registered capability, a symbolic
+    destination, and whether the stage consumes the prior stage's opaque credential reference.
+
+    No URL, credential value, header or raw body is representable. The controller/broker renders the
+    concrete, shell-free execution and rejects anything out of the registered capability's scope.
+    """
+
+    primitive_type: _GwChainPrimitiveType
+    capability_id: ChainCapabilityId
+    destination_ref: _GwChainDestinationRef
+    consumes_prior_stage: bool = False
+
+
+class AttackChainPlanOutput(StrictModel):
+    """PLAN_ATTACK_CHAIN: a typed two-primitive chain hypothesis over registered capabilities.
+
+    The plan references only a registered chain, an inventory target reference, two ordered typed
+    stages (distinct primitive types) and their symbolic destinations. It cannot express a URL,
+    credential, header, raw body, verdict, severity or final impact. The first stage produces an
+    artifact; the second consumes it. ``unconfirmed`` is fixed True — only the verifier confirms.
+    """
+
+    objective: str = Field(min_length=3, max_length=600)
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    stages: list[GatewayChainStageSelection] = Field(min_length=2, max_length=2)
+    rationale: str = Field(min_length=3, max_length=600)
+    unconfirmed: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _distinct_ordered_primitives(self) -> AttackChainPlanOutput:
+        first, second = self.stages[0], self.stages[1]
+        if first.primitive_type == second.primitive_type:
+            # "multi-primitive" requires two DISTINCT primitives, not repeated use of one.
+            raise ValueError("CHAIN_PLAN_PRIMITIVES_NOT_DISTINCT")
+        if first.consumes_prior_stage:
+            raise ValueError("CHAIN_PLAN_FIRST_STAGE_HAS_NO_INPUT")
+        if not second.consumes_prior_stage:
+            raise ValueError("CHAIN_PLAN_SECOND_STAGE_MUST_CONSUME_FIRST")
+        return self
+
+
+class ChainStageInterpretationOutput(StrictModel):
+    """INTERPRET_CHAIN_STAGE: a bounded, reference-only reading of one independently-verified link.
+
+    It has no verdict, PASS, CONFIRMED, severity or impact field. ``stage_produced_artifact`` is the
+    model's reading of whether the stage yielded the artifact the next primitive needs (e.g. a
+    credential reference *exists*) — never the artifact's value. ``unconfirmed`` is fixed True.
+    """
+
+    summary: str = Field(min_length=3, max_length=600)
+    primitive_type: _GwChainPrimitiveType
+    salient_observation_kinds: list[_GwChainObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    stage_produced_artifact: bool
+    unconfirmed: Literal[True] = True
+
+
+class ChainNextStepOutput(StrictModel):
+    """SELECT_NEXT_CHAIN_STEP: select the next registered chain step that consumes the prior link.
+
+    The model selects the next primitive type and registered capability, and declares that it
+    consumes the prior link's opaque credential reference (a boolean — never the value). It cannot
+    express a URL, credential, verdict or severity. ``unconfirmed`` is fixed True.
+    """
+
+    next_primitive_type: _GwChainPrimitiveType
+    next_capability_id: ChainCapabilityId
+    next_destination_ref: _GwChainDestinationRef
+    consumes_prior_link_reference: bool
+    rationale: str = Field(min_length=3, max_length=600)
+    unconfirmed: Literal[True] = True
+
+
+class ChainExplanationOutput(StrictModel):
+    """EXPLAIN_VERIFIED_CHAIN: explain the independently-verified chain and its remediation.
+
+    It carries only prose and the ordered primitive types. There is deliberately no verdict, PASS,
+    CONFIRMED, severity or impact field — those trace to the controller ground truth and the
+    independent verifier, not the model. ``unconfirmed`` is fixed True.
+    """
+
+    chain_summary: str = Field(min_length=3, max_length=600)
+    ordered_primitive_types: list[_GwChainPrimitiveType] = Field(min_length=2, max_length=2)
+    causal_link_explanation: str = Field(min_length=3, max_length=600)
+    remediation: str = Field(min_length=3, max_length=600)
+    unconfirmed: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _distinct_primitives(self) -> ChainExplanationOutput:
+        if len(set(self.ordered_primitive_types)) != len(self.ordered_primitive_types):
+            raise ValueError("CHAIN_EXPLANATION_PRIMITIVES_NOT_DISTINCT")
+        return self
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -558,6 +690,10 @@ class AgentGatewayRequest(StrictModel):
         "PLAN_CLOUD_BOUNDARY",
         "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS",
         "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION",
+        "PLAN_ATTACK_CHAIN",
+        "INTERPRET_CHAIN_STAGE",
+        "SELECT_NEXT_CHAIN_STEP",
+        "EXPLAIN_VERIFIED_CHAIN",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)

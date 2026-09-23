@@ -45,8 +45,16 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
         "Propose owner comparisons using only supplied aliases and resource references.",
         frozenset({ObservationType.SURFACE, ObservationType.AUTHORIZATION_COMPARISON}),
         # Surface observation is also granted to the equivalent single-agent baseline so both
-        # paths receive the same envelope and spend the same target-request budget.
-        frozenset({"aegis.surface.openapi", "aegis.authorization.compare"}),
+        # paths receive the same envelope and spend the same target-request budget. Phase 2.0 adds
+        # the bounded credential-backed internal-service access as the Stage-B authorization
+        # primitive of the verified multi-primitive chain.
+        frozenset(
+            {
+                "aegis.surface.openapi",
+                "aegis.authorization.compare",
+                "aegis.cloud.internal_service_access",
+            }
+        ),
         "AuthorizationAgentOutput",
     ),
     AgentRole.INJECTION_AGENT: RolePolicy(
@@ -103,11 +111,16 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
                 ObservationType.VERIFIER_SUMMARY,
             }
         ),
+        # Phase 2.0: the Chain Agent also composes the two cloud chain primitives (metadata boundary
+        # probe -> credential-backed internal-service access) within one authorized target scope. It
+        # only plans/interprets/explains over these; the Stage-A/Stage-B agents execute them.
         frozenset(
             {
                 "aegis.surface.openapi",
                 "aegis.injection.xss_reflected",
                 "aegis.injection.sql_boolean",
+                "aegis.cloud.metadata_boundary_probe",
+                "aegis.cloud.internal_service_access",
             }
         ),
         "ChainPlanOutput",
@@ -169,9 +182,21 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
     # verifier does, using controller-owned ground truth.
     "aegis.cloud.metadata_boundary_probe": CapabilityPolicy(
         "aegis.cloud.metadata_boundary_probe",
-        frozenset({AgentRole.CLOUD_BOUNDARY_AGENT}),
+        frozenset({AgentRole.CLOUD_BOUNDARY_AGENT, AgentRole.CHAIN_AGENT}),
         2,
         True,
+    ),
+    # Phase 2.0 Stage-B primitive: bounded credential-backed internal-service access. It issues one
+    # benign control request and one credential-backed private-operation request against the
+    # synthetic aegis-cloud surface (a typed HTTP pair the broker renders shell-free; the credential
+    # is resolved broker-side from an opaque reference, never model-authored). It is not read-only
+    # (it invokes a privileged synthetic operation) and it never confirms, PASSes or sets severity —
+    # only the independent deterministic range verifier does, from controller-owned ground truth.
+    "aegis.cloud.internal_service_access": CapabilityPolicy(
+        "aegis.cloud.internal_service_access",
+        frozenset({AgentRole.AUTHORIZATION_AGENT, AgentRole.CHAIN_AGENT}),
+        2,
+        False,
     ),
 }
 

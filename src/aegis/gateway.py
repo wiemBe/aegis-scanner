@@ -36,7 +36,11 @@ from aegis.multi_agent.contracts import (
     AgentGatewayRequestProjection,
     AgentGatewayResponse,
     AgentRole,
+    AttackChainPlanOutput,
     AuthorizationAgentOutput,
+    ChainExplanationOutput,
+    ChainNextStepOutput,
+    ChainStageInterpretationOutput,
     CloudBoundaryInterpretationOutput,
     CloudBoundaryPlanOutput,
     CloudBoundarySubmissionOutput,
@@ -92,6 +96,12 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_CLOUD_BOUNDARY": CloudBoundaryPlanOutput,
     "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": CloudBoundaryInterpretationOutput,
     "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": CloudBoundarySubmissionOutput,
+    # Phase 2.0 verified multi-primitive attack-chain task types. Same reference-only guarantee: no
+    # raw URL, credential value, request body, verdict, severity or final impact is representable.
+    "PLAN_ATTACK_CHAIN": AttackChainPlanOutput,
+    "INTERPRET_CHAIN_STAGE": ChainStageInterpretationOutput,
+    "SELECT_NEXT_CHAIN_STEP": ChainNextStepOutput,
+    "EXPLAIN_VERIFIED_CHAIN": ChainExplanationOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -105,6 +115,12 @@ _AGENT_TASK_ROLES = {
     "PLAN_CLOUD_BOUNDARY": AgentRole.CLOUD_BOUNDARY_AGENT,
     "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": AgentRole.CLOUD_BOUNDARY_AGENT,
     "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": AgentRole.CLOUD_BOUNDARY_AGENT,
+    # Phase 2.0: the Chain Agent plans/interprets/explains the chain; the Stage-B (Authorization)
+    # agent selects the next credential-backed step it will execute.
+    "PLAN_ATTACK_CHAIN": AgentRole.CHAIN_AGENT,
+    "INTERPRET_CHAIN_STAGE": AgentRole.CHAIN_AGENT,
+    "SELECT_NEXT_CHAIN_STEP": AgentRole.AUTHORIZATION_AGENT,
+    "EXPLAIN_VERIFIED_CHAIN": AgentRole.CHAIN_AGENT,
 }
 
 
