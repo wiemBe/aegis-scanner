@@ -14,8 +14,31 @@ confirm or PASS a run. Vulnerable and patched offline synthetic acceptance passe
 single-agent baseline and multi-agent path with equal budget limits and seven target requests each.
 The baseline uses one structured model call and the multi-agent path four. These measurements use
 an offline structured fixture, not a live model, and do not establish a multi-agent improvement.
-The read-only view is at `/multi-agent`. Injection Agent and Chain Agent execution remain future
-work. ZAP Active is not an agent capability and was not started for this slice.
+The read-only view is at `/multi-agent`. Phase 1.7-B adds a bounded, **offline-accepted** Injection
+and Chain slice: controller-owned reflected-XSS and boolean-SQL-injection detection probes (the model
+selects a registered payload class and never authors payloads), and a `DELEGATION_WORKFLOW_CHAIN` that
+delegates recon → injection → independent verification. That chain is a workflow delegation, **not**
+a multi-primitive attack chain, and it does **not** complete any Phase 1.6 range attack chain. The
+independent range verifier remains the sole PASS/CONFIRMED authority. Live-provider execution of the
+1.7-B gates is **not yet available**: the gateway serves only the 1.7-A task types, so the 1.7-B
+matrix is proven offline only.
+
+Phase 1.7-C upgrades the recon role into a **controlled Recon Agent** (offline-accepted) with four
+registered capabilities: `aegis.recon.network_service_discovery` (a typed `NmapScanPlan` rendered to
+a shell-free argv; full-port/UDP/OS-detection/NSE are capability- and **scope-gated**, not
+prohibited), `aegis.recon.nuclei_reviewed_exposure` and `aegis.recon.zap_passive_openapi` (which
+**reuse** the pinned Phase 1.2 Nuclei and Phase 1.3 passive-ZAP controllers — alerts stay unconfirmed
+candidates), and the existing `aegis.surface.openapi`. The model only selects registered capabilities
+and approved profiles; source spoofing, decoy/fragmentation evasion, and credentialed brute-force are
+**`UNSUPPORTED_IN_PHASE_1_7C_RECON`** (representable but rejected pre-execution, zero traffic; reserved
+for future dedicated Adversary-Simulation / Authentication-Testing capabilities, not architecturally
+prohibited). Recon produces typed, bounded observations only — it never confirms, PASSes, or sets
+severity. The Nmap capability has a **real containerized acceptance** (CONTAINERIZED PASS: Bank/Shop
+service discovery executed in an isolated, egress-blocked, non-root worker, with negative controls
+verified experimentally); the Nuclei/ZAP passive runners are reused from Phase 1.2/1.3 and not
+re-executed in that harness. See
+[docs/phase-1.7-controlled-recon.md](docs/phase-1.7-controlled-recon.md). ZAP Active and Beast Mode
+remain excluded and are not agent capabilities.
 
 **Phase 1.7-A live-provider smoke: NO-GO (2026-09-23).** The exact four-case matrix was started
 against the configured DeepSeek OpenAI-compatible gateway and synthetic Bank range. Case 1

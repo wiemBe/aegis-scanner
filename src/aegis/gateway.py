@@ -14,12 +14,13 @@ appear in its responses or logs.
 
 import hashlib
 import json
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from aegis.beast.contracts import BeastDecisionRequest, BeastDecisionResponse
 from aegis.models import (
@@ -38,6 +39,9 @@ from aegis.multi_agent.contracts import (
     AuthorizationAgentOutput,
     LeadTaskOutput,
     ModelUsage,
+    ReconDelegationOutput,
+    ReconInterpretationOutput,
+    ReconPlanOutput,
     SingleAgentOutput,
     SurfaceAgentOutput,
 )
@@ -74,6 +78,12 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_AUTHORIZATION": LeadTaskOutput,
     "TEST_AUTHORIZATION": AuthorizationAgentOutput,
     "SINGLE_AGENT_BOLA": SingleAgentOutput,
+    # Phase 1.7-C controlled Recon Agent task types. The schema is server-selected per task; the
+    # caller never supplies or weakens it. Each shape is reference-only: no raw flag, origin,
+    # template, policy, payload, credential or verdict is representable.
+    "PLAN_RECON": ReconPlanOutput,
+    "INTERPRET_RECON_OBSERVATIONS": ReconInterpretationOutput,
+    "DELEGATE_RECON_HYPOTHESIS": ReconDelegationOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -81,6 +91,9 @@ _AGENT_TASK_ROLES = {
     "PLAN_AUTHORIZATION": AgentRole.LEAD_ORCHESTRATOR,
     "TEST_AUTHORIZATION": AgentRole.AUTHORIZATION_AGENT,
     "SINGLE_AGENT_BOLA": AgentRole.AUTHORIZATION_AGENT,
+    "PLAN_RECON": AgentRole.RECON_AGENT,
+    "INTERPRET_RECON_OBSERVATIONS": AgentRole.RECON_AGENT,
+    "DELEGATE_RECON_HYPOTHESIS": AgentRole.RECON_AGENT,
 }
 
 
@@ -232,6 +245,51 @@ async def select(request: GatewaySelectRequest) -> GatewaySelectResponse:
     )
 
 
+# Bound on the number of validation-error locations surfaced on an AGENT_OUTPUT_REJECTED response.
+_MAX_VALIDATION_ERRORS = 20
+# A contract validator code is a SCREAMING_SNAKE_CASE constant raised by our own model validators
+# (e.g. PLAN_RECON_NMAP_REQUIRES_TYPED_PLAN). Only a message matching this exact shape may be
+# surfaced, so a value_error whose message would echo model input (lowercase JSON, free text,
+# punctuation) never matches and never leaks.
+_CONTRACT_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,80}$")
+
+
+def _validation_error_summary(exc: Exception) -> list[dict[str, str]] | None:
+    """Bounded, value-free summary of a structured-output validation failure.
+
+    Only the schema-side location path and the pydantic error *type* are copied — never the
+    offending value, the raw input or any error context — so no fragment of raw model output leaves
+    the gateway. For a model-level ``value_error`` (a cross-field ``@model_validator`` on our own
+    contract) the validator's constant code is added too, but only when the message is a bare
+    SCREAMING_SNAKE_CASE token; a message that would carry model-supplied text never matches. Each
+    location is truncated and the list is capped. This lets an operator see *which* contract
+    constraint the completed output violated without exposing what the model actually produced.
+    """
+    if not isinstance(exc, ValidationError):
+        return None
+    summary: list[dict[str, str]] = []
+    for err in exc.errors(include_url=False):
+        loc = ".".join(str(part) for part in err.get("loc", ()))[:200]
+        item = {"loc": loc, "type": str(err.get("type", "unknown"))[:100]}
+        code = _contract_code(err)
+        if code is not None:
+            item["code"] = code
+        summary.append(item)
+        if len(summary) >= _MAX_VALIDATION_ERRORS:
+            break
+    return summary
+
+
+def _contract_code(err: Mapping[str, object]) -> str | None:
+    """Return our own validator's constant code for a value_error, or None. Never returns input."""
+    if err.get("type") != "value_error":
+        return None
+    msg = str(err.get("msg", ""))
+    # Pydantic renders a raised ValueError as "Value error, <message>"; recover the raw message.
+    token = msg.removeprefix("Value error, ").strip()
+    return token if _CONTRACT_CODE_RE.match(token) else None
+
+
 @app.post("/v1/agents/generate", response_model=AgentGatewayResponse)
 async def generate_agent(request: AgentGatewayRequest) -> AgentGatewayResponse:
     output_type = _AGENT_OUTPUTS[request.task_type]
@@ -251,20 +309,33 @@ async def generate_agent(request: AgentGatewayRequest) -> AgentGatewayResponse:
         )
         validated = output_type.model_validate_json(result.payload_json)
     except PlannerFailure as exc:
+        # The sanitized pre-dispatch projection is always returned, including on a
+        # finish_reason=length truncation, so every rejection path stays auditable. Only non-secret
+        # scalars leave here: code, digest, model identity, finish reason and bounded token/length
+        # counts. No provider body, raw content or reasoning_content text is ever included.
         raise HTTPException(
             status_code=502,
             detail={
                 "code": str(exc),
                 "response_sha256": exc.response_digest,
                 "provider_reported_model": exc.provider_reported_model,
+                "finish_reason": exc.finish_reason,
+                "provider_usage": exc.provider_usage,
+                "content_length": exc.content_length,
+                "reasoning_present": exc.reasoning_present,
+                "reasoning_length": exc.reasoning_length,
                 "request_projection": projection.model_dump(mode="json"),
             },
         ) from None
     except (ValueError, KeyError, TypeError) as exc:
+        # A complete response whose JSON fails the strict server-selected contract fails closed. A
+        # bounded, value-free summary (schema location + error type only) is attached so the reason
+        # is auditable; no raw payload, content or reasoning text is ever included.
         raise HTTPException(
             status_code=502,
             detail={
                 "code": "AGENT_OUTPUT_REJECTED",
+                "validation_errors": _validation_error_summary(exc),
                 "request_projection": projection.model_dump(mode="json"),
             },
         ) from exc

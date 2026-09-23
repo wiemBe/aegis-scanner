@@ -1,0 +1,88 @@
+# Phase 1.7-C controlled Recon Agent overlay: an isolated, ephemeral, non-root, read-only nmap
+# worker joined ONLY to a scope-bound internal network with the synthetic range targets, plus the
+# reused Phase 1.2 nuclei-runner and Phase 1.3 zap-runner (attested, defined in their own overlays;
+# NOT redeclared here). This overlay is self-contained: every network is Compose-managed and owned
+# by the runner's project, and none is `external:` — so there is no public egress path at all.
+#
+# The nmap worker's supply chain is pinned by DIGEST, never by a mutable tag. It runs one bounded,
+# controller-rendered argv per task (see aegis.multi_agent.recon.render_nmap_argv); its default
+# command here is an inert `--version` so `docker compose config` validates without scanning. The
+# controller supplies the real argv at exec time. NET_RAW is the ONLY added capability and exists
+# solely for SYN / OS-detection inside the RANGE_FULL_RECON profile, for the duration of the task —
+# it is never granted to the general agent runtime.
+#
+# Static validation (bash -n / docker compose config / the compose guard test) is done here; the
+# actual containerized scan is operator-run, exactly like the live provider matrix.
+
+services:
+  recon-nmap-worker:
+    # Pinned by immutable RepoDigest (resolved 2026-09-23, linux/arm64; the :7.98 tag resolved to
+    # the same digest). The digest — not the tag — is what Docker verifies. Mirrors
+    # aegis.multi_agent.recon.NMAP_IMAGE_REF.
+    image: instrumentisto/nmap@sha256:96f6ed194519b62421a1a1c57809e65a7f94d2aa1c8c25676f247e5e148c0827
+    # Default (UNPRIVILEGED) profile: TCP connect scan (-sT), service/version detection and the
+    # admitted NSE scripts run as non-root with NO added capability. The default command is inert;
+    # the controller injects the rendered argv per job (see scripts/phase_1_7c_containerized.py).
+    #
+    # RAW_SOCKET profile (SYN scan -sS, UDP -sU, OS detection -O) is a SEPARATE per-job launch that
+    # the controller runs with `user: "0:0"` + `cap_add: [NET_RAW]` (still cap_drop ALL, read-only,
+    # no-new-privileges, internal net). Determined experimentally: nmap requires uid 0 for raw
+    # sockets, and NET_RAW as a NON-root user is NOT sufficient in this image. NET_RAW is granted
+    # only for that job, never to the general agent runtime, so it is not added on this default
+    # service.
+    command: ["--version"]
+    user: "65534:65534"          # nobody:nogroup — non-root (unprivileged connect-scan default).
+    read_only: true              # no writable host or image filesystem.
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=65534,gid=65534,nosuid,nodev,noexec
+    cap_drop: [ALL]              # RAW_SOCKET jobs add ONLY NET_RAW at per-job launch; none here.
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 192m
+    cpus: 0.75
+    restart: "no"
+    # No `ports:` (nothing published to the host) and no `volumes:` (no host mount, no docker socket).
+    # Joined ONLY to the internal scope network: the approved targets and nothing on the public net.
+    networks: [recon-scope]
+
+  aegis-bank-live:
+    image: aegis-range:1.6.0-dev
+    command: uvicorn aegis_range.bank:app --host 0.0.0.0 --port 8101
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    restart: "no"
+    networks:
+      recon-scope:
+        aliases: [aegis-bank, aegis-bank-control]
+
+  aegis-shop-live:
+    image: aegis-range:1.6.0-dev
+    command: uvicorn aegis_range.shop:app --host 0.0.0.0 --port 8102
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    restart: "no"
+    networks:
+      recon-scope:
+        aliases: [aegis-shop, aegis-shop-control]
+
+networks:
+  # Project-owned, Compose-managed, internal-only scope network. `internal: true` means no bridge to
+  # the host/public network exists, so the worker has NO public egress; it can reach only the range
+  # targets on this network. It has no fixed `name:` and is NOT external, so Compose creates and
+  # destroys it with this project (effective name: <project>_recon-scope).
+  recon-scope:
+    internal: true

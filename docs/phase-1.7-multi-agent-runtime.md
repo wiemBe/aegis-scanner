@@ -100,7 +100,14 @@ verifier outcomes, cleanup, persistence, safe console projection and equivalent 
   measured but not interpreted as an improvement.
 - The runtime has no durable distributed worker recovery; it is intentionally in-process and uses
   the current SQLite persistence model.
-- Injection Agent and Chain Agent are registered but have no capabilities or execution path.
+- Injection and Chain execution exist only as the bounded, offline-accepted Phase 1.7-B slice:
+  `HTTP_API_SURFACE_RECON` (documented HTTP/API surface only — **not** network/Nmap/Nuclei/ZAP
+  recon, none of which are implemented as Recon Agent capabilities), controller-owned reflected-XSS
+  and boolean-SQL-injection detection probes (model payload authorship is structurally impossible),
+  and a `DELEGATION_WORKFLOW_CHAIN` (recon → injection → independent verify delegation). That chain
+  is **not** a multi-primitive attack chain and does **not** complete any Phase 1.6 range attack
+  chain. There is no live-provider execution path for the 1.7-B gates yet (the gateway serves only
+  the 1.7-A task types).
 - Nuclei/passive ZAP agent delegation and all ZAP Active work are out of scope.
 
 ## Phase 1.7-A live-provider smoke (2026-09-23)
@@ -121,3 +128,35 @@ Controller cleanup and the final reset/health check passed. The acceptance proje
 down, structural secret scans were clean without reading the key, and the post-smoke repository
 gates passed. See the checksummed artifact at
 `artifacts/phase-1.7a-live-20260922T210938Z/acceptance.json` and `SHA256SUMS` beside it.
+
+## Phase 1.7-C controlled Recon Agent (offline-accepted, 2026-09-23)
+
+Phase 1.7-C upgrades the recon role (`AgentRole.RECON_AGENT`, class `CONTROLLED_RECON_AGENT`) into a
+controlled Recon Agent with four registered capabilities: `aegis.recon.network_service_discovery`
+(typed `NmapScanPlan` → controller-rendered, shell-free argv; `RANGE_FULL_RECON` supports full TCP,
+bounded/full UDP, version + OS detection and NSE discovery/version/vuln/safe against synthetic-range
+targets, while `AUTHORIZED_ENV_RECON` fails closed without a signed lease), the reused Phase 1.2
+`aegis.recon.nuclei_reviewed_exposure` and Phase 1.3 `aegis.recon.zap_passive_openapi` (scanner
+alerts stay `confirmed=False` candidates), and the existing `aegis.surface.openapi`. A recon plan is
+expanded into single-purpose jobs (TCP discovery, UDP discovery, service/version+NSE, OS detection),
+each rendered to its own shell-free argv; NSE runs only the pinned admitted script IDs (broad
+categories crash/hang nmap on a bounded target). Source spoofing, decoy/fragmentation evasion and
+credentialed brute-force are **`UNSUPPORTED_IN_PHASE_1_7C_RECON`** — rejected pre-execution with zero
+traffic and reserved for future dedicated Adversary-Simulation / Authentication-Testing capabilities
+(not architecturally prohibited). Recon emits only eight typed, deduplicated observation kinds and
+never confirms, PASSes or sets severity; the verifier retains sole authority and Recon has no path to
+it.
+
+The nmap worker's supply chain is pinned by immutable RepoDigest
+(`instrumentisto/nmap@sha256:96f6ed19…`, nmap 7.98, linux/arm64). Determined experimentally: nmap
+needs uid 0 for raw sockets, so SYN/UDP/OS jobs run as `user 0:0` + only `NET_RAW` while connect/
+version/NSE run non-root with no added capability. A **real containerized run**
+(`scripts/phase_1_7c_containerized.py`) executed the worker against Bank + Shop on an internal,
+egress-blocked network: **CONTAINERIZED PASS** — 8101/8102 discovered (service `http`, product
+`Uvicorn`), OS detection executed (inconclusive in Docker), and every negative control (no egress, no
+host FS / Docker socket, scope escape rejected, no published port, container removal, malformed XML →
+INCOMPLETE, recon-cannot-confirm) verified experimentally, with clean cleanup. The Nuclei/ZAP passive
+*runners* were not re-executed in that harness (reuse covered by Phase 1.2/1.3), so the recon suite
+overall is PARTIAL. Offline acceptance (`scripts/phase_1_7c_acceptance.py`, 13/13 PASS) is preserved.
+**No paid DeepSeek run was performed.** Full report:
+[docs/phase-1.7-controlled-recon.md](phase-1.7-controlled-recon.md).

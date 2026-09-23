@@ -23,6 +23,7 @@ class AgentRole(StrEnum):
     AUTHORIZATION_AGENT = "AUTHORIZATION_AGENT"
     INJECTION_AGENT = "INJECTION_AGENT"
     CHAIN_AGENT = "CHAIN_AGENT"
+    RECON_AGENT = "RECON_AGENT"
 
 
 class AgentRunState(StrEnum):
@@ -48,6 +49,8 @@ class ObservationType(StrEnum):
     SURFACE = "SURFACE"
     AUTHORIZATION_COMPARISON = "AUTHORIZATION_COMPARISON"
     VERIFIER_SUMMARY = "VERIFIER_SUMMARY"
+    RECON_INVENTORY = "RECON_INVENTORY"
+    INJECTION_PROBE = "INJECTION_PROBE"
 
 
 class EvaluationVerdict(StrEnum):
@@ -129,6 +132,15 @@ class AgentTask(StrictModel):
         "PLAN_AUTHORIZATION",
         "TEST_AUTHORIZATION",
         "SINGLE_AGENT_BOLA",
+        "RECON_INVENTORY",
+        "SELECT_INJECTION",
+        "EXECUTE_INJECTION",
+        "PLAN_CHAIN",
+        "RECON_SERVICE_DISCOVERY",
+        "RECON_REVIEWED_EXPOSURE",
+        "RECON_PASSIVE_OPENAPI",
+        "RECON_HTTP_SURFACE",
+        "RECON_ORCHESTRATE",
     ]
     state: AgentTaskState = AgentTaskState.QUEUED
     parent_task_id: str | None = Field(default=None, pattern=r"^task-[a-f0-9]{16}$")
@@ -288,6 +300,134 @@ class SingleAgentOutput(StrictModel):
     authorization: AuthorizationAgentOutput
 
 
+# --- Phase 1.7-C controlled Recon Agent gateway output contracts (server-selected schemas) ---
+#
+# These are the strict schemas the gateway derives for the RECON_AGENT task types. They are the
+# ONLY shapes a model may return for those tasks; the caller never supplies or weakens them. The
+# model may select only: a registered recon capability id, a registered target reference, typed
+# Nmap plan fields, an approved Nuclei/ZAP profile id, and reference-only delegation targets. There
+# is NO field through which it can emit a raw shell command, a raw Nmap flag, an arbitrary origin,
+# a template path, a ZAP policy, a payload, a credential, or a verdict / PASS / CONFIRMED /
+# severity: those are structurally unrepresentable. The controller owns every unsafe decision, and
+# aegis.multi_agent.recon re-validates every selection again before any command is produced.
+#
+# The literal alias values below are kept in lockstep with aegis.multi_agent.recon by a drift-guard
+# test (tests/test_phase_1_7c.py). They are duplicated here — not imported — so the isolated gateway
+# process never has to import the range inventory, injection templates or capability registry.
+ReconCapabilityId = Literal[
+    "aegis.recon.network_service_discovery",
+    "aegis.recon.nuclei_reviewed_exposure",
+    "aegis.recon.zap_passive_openapi",
+    "aegis.surface.openapi",
+]
+_GwTcpPortSpec = Literal["DISCOVERY_TOP_100", "TOP_1000", "FULL_65535"]
+_GwUdpPortSpec = Literal["NONE", "TOP_50", "FULL_65535"]
+_GwDiscoveryStrategy = Literal["TCP_CONNECT", "TCP_SYN"]
+_GwTimingProfile = Literal["T2", "T3", "T4"]
+_GwNseCategory = Literal["DISCOVERY", "VERSION", "VULN", "SAFE", "DEFAULT"]
+_GwNmapProfileId = Literal["RANGE_FULL_RECON", "AUTHORIZED_ENV_RECON"]
+_GwAdmittedNseScriptId = Literal[
+    "banner", "http-title", "http-headers", "http-methods", "ssl-cert", "vulners"
+]
+_GwApprovedScannerProfile = Literal["NUCLEI_LAB_SAFE_HTTP_V1", "ZAP_LAB_PASSIVE_OPENAPI_V1"]
+_GwReconObservationKind = Literal[
+    "DISCOVERED_SERVICE",
+    "HTTP_TECHNOLOGY",
+    "DOCUMENTED_OPERATION",
+    "PARAMETER_CANDIDATE",
+    "NUCLEI_CANDIDATE",
+    "ZAP_PASSIVE_CANDIDATE",
+    "NO_FINDING",
+    "INCOMPLETE_TOOL_ERROR",
+]
+
+
+class GatewayNmapPlanSelection(StrictModel):
+    """Typed Nmap plan *selection* fields only.
+
+    No raw flag, host, URL, evasion or credentialed-brute field is representable here (those fields
+    from :class:`aegis.multi_agent.recon.NmapScanPlan` are deliberately absent from the gateway
+    boundary). ``nse_script_ids`` is restricted to the admitted script-id enum, so the model cannot
+    name an arbitrary NSE script. The controller renders argv and rejects anything out of profile.
+    """
+
+    transports: list[Literal["TCP", "UDP"]] = Field(min_length=1, max_length=2)
+    tcp_port_spec: _GwTcpPortSpec = "TOP_1000"
+    udp_port_spec: _GwUdpPortSpec = "NONE"
+    discovery_strategy: _GwDiscoveryStrategy = "TCP_CONNECT"
+    version_detection: bool = True
+    version_intensity: int = Field(default=5, ge=0, le=9)
+    os_detection: bool = False
+    traceroute: bool = False
+    timing_profile: _GwTimingProfile = "T3"
+    nse_categories: list[_GwNseCategory] = Field(default_factory=list, max_length=5)
+    nse_script_ids: list[_GwAdmittedNseScriptId] = Field(default_factory=list, max_length=6)
+
+
+class ReconPlanOutput(StrictModel):
+    """PLAN_RECON: select one registered recon capability and its typed, approved plan.
+
+    Exactly one plan shape is required for the selected capability: a typed Nmap plan (with a
+    registered profile) for network service discovery, or an approved scanner profile id for the
+    reused Nuclei / ZAP passive capabilities. The surface capability needs only the target ref.
+    """
+
+    capability_id: ReconCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    profile_id: _GwNmapProfileId | None = None
+    nmap_plan: GatewayNmapPlanSelection | None = None
+    scanner_profile_id: _GwApprovedScannerProfile | None = None
+    rationale: str = Field(min_length=3, max_length=300)
+
+    @model_validator(mode="after")
+    def _coherent_selection(self) -> ReconPlanOutput:
+        is_nmap = self.capability_id == "aegis.recon.network_service_discovery"
+        is_scanner = self.capability_id in {
+            "aegis.recon.nuclei_reviewed_exposure",
+            "aegis.recon.zap_passive_openapi",
+        }
+        if is_nmap and (self.nmap_plan is None or self.profile_id is None):
+            raise ValueError("PLAN_RECON_NMAP_REQUIRES_TYPED_PLAN")
+        if not is_nmap and (self.nmap_plan is not None or self.profile_id is not None):
+            raise ValueError("PLAN_RECON_NMAP_FIELDS_NOT_ALLOWED")
+        if is_scanner and self.scanner_profile_id is None:
+            raise ValueError("PLAN_RECON_SCANNER_REQUIRES_PROFILE")
+        if not is_scanner and self.scanner_profile_id is not None:
+            raise ValueError("PLAN_RECON_SCANNER_PROFILE_NOT_ALLOWED")
+        return self
+
+
+class ReconInterpretationOutput(StrictModel):
+    """INTERPRET_RECON_OBSERVATIONS: a bounded, reference-only reading of normalized observations.
+
+    It has no verdict, PASS, CONFIRMED or severity field: recon cannot confirm a vulnerability. The
+    ``unconfirmed`` invariant is fixed True so even the schema restates that recon never confirms.
+    """
+
+    summary: str = Field(min_length=3, max_length=400)
+    salient_observation_kinds: list[_GwReconObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    recommended_followups: list[ReconCapabilityId] = Field(default_factory=list, max_length=4)
+    unconfirmed: Literal[True] = True
+
+
+class ReconDelegationOutput(StrictModel):
+    """DELEGATE_RECON_HYPOTHESIS: a reference-only hypothesis routed to another registered agent.
+
+    Only references travel: a registered destination agent, an ``aegis.*`` capability id, a target
+    reference, and an optional documented route/parameter. There is no payload, no origin and no
+    verdict field.
+    """
+
+    to_agent: Literal["AUTHORIZATION_AGENT", "INJECTION_AGENT"]
+    capability_id: str = Field(pattern=r"^aegis\.[a-z0-9_.]+$")
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    route: str = Field(default="", max_length=200, pattern=r"^(/[A-Za-z0-9/._{}~-]*)?$")
+    parameter: str = Field(default="", max_length=64, pattern=r"^[A-Za-z0-9_.-]*$")
+    rationale: str = Field(min_length=3, max_length=300)
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -305,6 +445,7 @@ class AgentGatewayRequest(StrictModel):
         "AUTHORIZATION_AGENT",
         "INJECTION_AGENT",
         "CHAIN_AGENT",
+        "RECON_AGENT",
     ]
     task_type: Literal[
         "PLAN_SURFACE",
@@ -312,6 +453,9 @@ class AgentGatewayRequest(StrictModel):
         "PLAN_AUTHORIZATION",
         "TEST_AUTHORIZATION",
         "SINGLE_AGENT_BOLA",
+        "PLAN_RECON",
+        "INTERPRET_RECON_OBSERVATIONS",
+        "DELEGATE_RECON_HYPOTHESIS",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)

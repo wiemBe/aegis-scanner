@@ -276,12 +276,24 @@ class PlannerFailure(ValueError):
         response_digest: str | None = None,
         *,
         provider_reported_model: str | None = None,
+        finish_reason: str | None = None,
+        provider_usage: dict[str, int] | None = None,
+        content_length: int | None = None,
+        reasoning_present: bool | None = None,
+        reasoning_length: int | None = None,
     ) -> None:
         super().__init__(code)
         self.response_digest = response_digest
         # Model identity is non-secret and is retained only for exact binding diagnosis. Provider
         # bodies, prompts, headers and credentials remain unavailable to callers.
         self.provider_reported_model = provider_reported_model
+        # Bounded, non-secret truncation diagnostics. These are scalar counts and a finish reason
+        # only: raw reasoning_content, raw model output and any credential are never captured here.
+        self.finish_reason = finish_reason
+        self.provider_usage = provider_usage
+        self.content_length = content_length
+        self.reasoning_present = reasoning_present
+        self.reasoning_length = reasoning_length
 
 
 def _gateway_error(raw: bytes) -> tuple[str, str | None]:
