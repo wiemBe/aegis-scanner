@@ -338,6 +338,14 @@ deterministic verifier; the patched chain is broken and cannot be confirmed.
   chain ledger with two links, source-evidence hashes, and RUNNING→LINK_CONFIRMED→CHAIN_CONFIRMED
   transitions. Identity exact `deepseek-v4-pro` on all 7 calls; credential gateway-only; cleanup
   `down_rc=0`, no leftovers. Opaque credential reference revoked and proven unusable post-cleanup.
+- **Handoff scope (honest):** the ledger `chain_jobs` table holds **only** `CHAIN_AGENT` jobs (one
+  per arm). Stage A and Stage B were executed **directly by `CHAIN_AGENT` through the Tool Broker**,
+  not as separate persisted agent jobs. `CLOUD_BOUNDARY_AGENT` / `AUTHORIZATION_AGENT` are
+  producing-agent *labels* on the two persisted chain links, not independent queued/claimed/closed
+  jobs. The artifact check `real_agent_handoffs_persisted=true` verifies two links with distinct
+  producing-agent labels + valid source-evidence SHA-256 hashes — it does **not** assert separate
+  live agent-to-agent stage handoffs. **Live multi-agent stage handoffs: NOT_EVALUATED** (bounded
+  future acceptance item). Phase 2.0 does not claim to have proven live multi-agent stage execution.
 
 **New code:** `src/aegis/multi_agent/attack_chain.py` (typed chain model + states, isolated ephemeral
 secret store + opaque `credentialref://` lifecycle, Stage-A capture, shell-free Stage-B
@@ -358,14 +366,29 @@ handed in was 320, so the model's echo overflowed (`objective: string_too_long`)
 that run worked (both stacks healthy, controller dependency-cascade armed all three cloud scenarios,
 sanitizer clean, `down_rc=0`). The contract prose fields were widened to 600 with headroom, the input
 objective shortened, and a regression guard test added; the campaign was re-run **once**
-(transparently, with user authorization — not silently), 2 rejected + 7 successful = 9 calls across
-the two runs, each run individually within the ≤12 / ≤60,000 ceiling. Live prompt-injection control
-was NOT re-evaluated (reused Phase 1.7-D / 1.9 boundaries; new ingestion paths covered by offline
-tests).
+(transparently, with user authorization — not silently). The authorization record for the re-run is
+this caveat itself; no separate signed audit artifact was produced.
+
+**Attempt accounting (cumulative, both attempts).**
+
+| Attempt | Artifact | Outcome | Provider calls | Provider tokens | Rejection | Authoritative |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194011Z` | `PARTIAL` — fail-closed | 2 (both rejected) | UNKNOWN | `PLAN_ATTACK_CHAIN.objective string_too_long` (300<320) | No — retained as fail-closed evidence |
+| 2 | `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194626Z` | `LIVE GO` | 7 | 11,267 | none | **Yes — authoritative acceptance artifact** |
+
+Cumulative phase totals: **9 provider calls** (2 rejected + 7 successful) and **11,267 + UNKNOWN
+tokens** — the 2 rejected calls were rejected at output validation before usage was recorded, so
+their token cost is genuinely unavailable and is reported as UNKNOWN, not zero. Against the ≤12 call
+ceiling the cumulative 9 calls is within budget; against the ≤60,000 token ceiling the known 11,267
+is within budget while the rejected-call contribution is UNKNOWN (bounded above by two single
+≤4,096-token output ceilings). Live prompt-injection control was NOT re-evaluated (reused Phase
+1.7-D / 1.9 boundaries; new ingestion paths covered by offline tests).
 
 - **Status:** LIVE GO for one verifier-confirmed multi-primitive attack chain and its patched break
-  inside the bounded synthetic range. Artifact:
-  `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194626Z`. Not general autonomous
+  inside the bounded synthetic range. **Live multi-agent stage handoffs: NOT_EVALUATED.**
+  Authoritative artifact: `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194626Z`;
+  fail-closed first attempt retained at
+  `artifacts/phase-2.0-live-multi-primitive-chain-20260923T194011Z`. Not general autonomous
   exploitation, full attack-chain coverage, production readiness, public-cloud compromise,
   company-target readiness or full OWASP coverage.
 
