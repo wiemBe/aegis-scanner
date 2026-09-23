@@ -134,6 +134,17 @@ _AGENT_TASK_DIRECTIVE: dict[str, str] = {
     ),
     "INTERPRET_RECON_OBSERVATIONS": "summarise the normalised observations without confirming",
     "DELEGATE_RECON_HYPOTHESIS": "route a reference-only hypothesis to a registered agent",
+    "PLAN_CLOUD_BOUNDARY": (
+        "select one registered cloud-boundary capability, a typed boundary_class hypothesis and a "
+        "symbolic probe destination reference; emit no URL, credential, header or raw body"
+    ),
+    "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": (
+        "summarise the normalised cloud-boundary observations without confirming a violation"
+    ),
+    "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": (
+        "recommend the observations be submitted to the independent deterministic verifier; never "
+        "confirm, PASS or set severity yourself"
+    ),
 }
 
 

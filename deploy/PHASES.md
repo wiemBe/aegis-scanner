@@ -227,7 +227,7 @@ does **not invent** them. Severity and PASS/FAIL come from the verifier and grou
 
 ---
 
-### Phase 1.9 — Cloud Boundary Agent — `PLANNED`
+### Phase 1.9 — Cloud Boundary Agent — `LIVE GO (one controller-owned scenario pair)`
 **Goal.** Cloud boundary/misconfiguration testing on `aegis-cloud` within authorized scope.
 
 **Acceptance checks:**
@@ -237,6 +237,28 @@ does **not invent** them. Severity and PASS/FAIL come from the verifier and grou
 - Credential isolation + cleanup as per global conventions.
 
 **Budget.** ≤ 10 calls / ≤ 45,000 tokens, one live slice. **Stop condition.** Do not start 2.0.
+
+**Closure (LIVE GO).** Scenario `cloud-metadata-response-v1` (GT-RANGE-CLOUD-004, CWE-200) — a
+synthetic instance-metadata **credential-exposure boundary**: the internal metadata response either
+leaks a fresh credential-shaped field (vulnerable) or filters it (patched). One live slice with
+`deepseek-v4-pro` via the isolated gateway proved BOTH modes end to end: an addressable
+`agentjob://CLOUD_BOUNDARY_AGENT/<id>` job (QUEUED→CLAIMED→CLOSED) → live `PLAN_CLOUD_BOUNDARY` →
+Tool Broker shell-free HTTP execution → bounded probe vs the live `aegis-cloud` (on the internal
+range-access network) → credential-redacted-at-source observations → live
+`INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS` + `SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION` (agent never
+confirms) → independent deterministic verifier **CONFIRMED** (vulnerable) / **PASS** (patched) from
+controller-owned ground truth. All 23 typed verdict checks true; **6 provider calls / 7,043 tokens**
+(≤ 8 / ≤ 40,000); severity `HIGH` traced to ground truth; identity exact `deepseek-v4-pro`;
+projections clean; no credential value in evidence; `down_rc == 0`, no leftovers. Evidence:
+`artifacts/phase-1.9-live-cloud-boundary-<UTC>/`.
+- **Scope caveat:** proves exactly one synthetic vulnerable/patched cloud-boundary scenario pair —
+  NOT general cloud coverage, AWS/Azure/GCP support, a real public-cloud assessment, production
+  readiness, or autonomous exploitation.
+- **CAVEAT (live injection control):** the paid Phase 1.7-D injection negative control was NOT
+  repeated live (`NOT_EVALUATED` live); the new HTTP-response ingestion adapter's instruction
+  -resistance and credential redaction are covered by offline tests (`tests/test_phase_1_9.py`).
+
+**Stop condition.** Do not start 2.0.
 
 ---
 

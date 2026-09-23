@@ -24,6 +24,7 @@ class AgentRole(StrEnum):
     INJECTION_AGENT = "INJECTION_AGENT"
     CHAIN_AGENT = "CHAIN_AGENT"
     RECON_AGENT = "RECON_AGENT"
+    CLOUD_BOUNDARY_AGENT = "CLOUD_BOUNDARY_AGENT"
 
 
 class AgentRunState(StrEnum):
@@ -428,6 +429,103 @@ class ReconDelegationOutput(StrictModel):
     rationale: str = Field(min_length=3, max_length=300)
 
 
+# --- Phase 1.9 controlled Cloud Boundary Agent gateway output contracts (server-selected) ---
+#
+# These are the strict schemas the gateway derives for the CLOUD_BOUNDARY_AGENT task types. As with
+# the recon contracts, they are reference-only: the model may select only a registered cloud
+# capability id, a registered target reference, a typed *boundary class* hypothesis, and a symbolic
+# probe destination reference (never a URL, credential, header, raw request body, verdict, PASS,
+# CONFIRMED or severity — those are structurally unrepresentable). The Tool Broker
+# (aegis.multi_agent.cloud_boundary) resolves the symbolic destination reference to a concrete,
+# shell-free HTTP execution controller-side, and re-validates every selection before any request.
+# The literal alias values are kept in lockstep with aegis.multi_agent.cloud_boundary by a drift
+# guard (tests/test_phase_1_9.py); they are duplicated here, not imported, so the isolated gateway
+# process never imports the range inventory or capability registry.
+CloudBoundaryCapabilityId = Literal["aegis.cloud.metadata_boundary_probe"]
+_GwCloudBoundaryClass = Literal[
+    "METADATA_CREDENTIAL_EXPOSURE",
+    "INTEGRATION_DESTINATION_SSRF",
+    "INTERNAL_SERVICE_AUTHORIZATION",
+    "WORKSPACE_CROSS_ORIGIN",
+    "XML_EXTERNAL_ENTITY",
+]
+# Symbolic probe destinations the model may name. Neither is a URL: the broker resolves each to a
+# concrete internal origin+path controller-side. INSTANCE_METADATA is the synthetic instance
+# -metadata response reachable through the integration-check surface; APPROVED_PARTNER_STATUS is the
+# benign approved control destination.
+_GwCloudDestinationRef = Literal["INSTANCE_METADATA", "APPROVED_PARTNER_STATUS"]
+_GwCloudBoundaryObservationKind = Literal[
+    "INTEGRATION_RESPONSE",
+    "CREDENTIAL_FIELD_PRESENT",
+    "CREDENTIAL_FIELD_ABSENT",
+    "NO_FINDING",
+    "INCOMPLETE_TOOL_ERROR",
+]
+
+
+class GatewayCloudBoundaryProbeSelection(StrictModel):
+    """Typed probe *selection* fields only.
+
+    No raw URL, origin, header, credential or request body is representable here. The model selects
+    a bounded HTTP method and a symbolic destination reference; the controller/broker renders the
+    concrete, shell-free execution and rejects anything out of the registered capability's scope.
+    """
+
+    method: Literal["POST"] = "POST"
+    destination_ref: _GwCloudDestinationRef = "INSTANCE_METADATA"
+
+
+class CloudBoundaryPlanOutput(StrictModel):
+    """PLAN_CLOUD_BOUNDARY: select one registered cloud-boundary capability and its typed probe.
+
+    The plan references only a registered capability, an inventory target reference, a typed
+    boundary-class hypothesis and a symbolic probe destination. It cannot express a URL, credential,
+    header, raw body, verdict or severity.
+    """
+
+    capability_id: CloudBoundaryCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    boundary_class: _GwCloudBoundaryClass
+    probe: GatewayCloudBoundaryProbeSelection
+    rationale: str = Field(min_length=3, max_length=300)
+
+
+class CloudBoundaryInterpretationOutput(StrictModel):
+    """INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS: a bounded, reference-only reading of observations.
+
+    It has no verdict, PASS, CONFIRMED or severity field: the agent cannot confirm a boundary
+    violation. ``unconfirmed`` is fixed True so the schema itself restates that the agent never
+    confirms — only the independent verifier may.
+    """
+
+    summary: str = Field(min_length=3, max_length=400)
+    salient_observation_kinds: list[_GwCloudBoundaryObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    boundary_hypothesis: _GwCloudBoundaryClass
+    unconfirmed: Literal[True] = True
+
+
+class CloudBoundarySubmissionOutput(StrictModel):
+    """SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION: recommend independent verification, never confirm.
+
+    The submission carries only references: the deterministic verifier authority, a registered
+    capability id, a target reference and the typed boundary class. There is deliberately no verdict
+    field of any kind — the agent structurally cannot self-confirm, and ``unconfirmed`` (fixed True)
+    restates that. The controller maps the boundary class to the owned scenario and runs the
+    independent verifier. (A ``confirmed`` field is intentionally absent: it would both re-introduce
+    a self-confirmation surface and, as a schema property name, trip the gateway's verdict-token
+    sanitizer that keeps every outbound projection free of ``"confirmed"``/``"pass"``.)
+    """
+
+    to_verifier: Literal["DETERMINISTIC_RANGE_VERIFIER"]
+    capability_id: CloudBoundaryCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    boundary_class: _GwCloudBoundaryClass
+    unconfirmed: Literal[True] = True
+    rationale: str = Field(min_length=3, max_length=300)
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -446,6 +544,7 @@ class AgentGatewayRequest(StrictModel):
         "INJECTION_AGENT",
         "CHAIN_AGENT",
         "RECON_AGENT",
+        "CLOUD_BOUNDARY_AGENT",
     ]
     task_type: Literal[
         "PLAN_SURFACE",
@@ -456,6 +555,9 @@ class AgentGatewayRequest(StrictModel):
         "PLAN_RECON",
         "INTERPRET_RECON_OBSERVATIONS",
         "DELEGATE_RECON_HYPOTHESIS",
+        "PLAN_CLOUD_BOUNDARY",
+        "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS",
+        "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)

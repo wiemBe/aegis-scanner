@@ -77,6 +77,18 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
         ),
         "NormalizedReconReport",
     ),
+    AgentRole.CLOUD_BOUNDARY_AGENT: RolePolicy(
+        AgentRole.CLOUD_BOUNDARY_AGENT,
+        # Phase 1.9: select only a registered cloud-boundary capability and a symbolic probe
+        # destination against inventory references; never author a raw URL, credential, header or
+        # body; never confirm a violation, emit PASS, severity, or a final finding.
+        "Select only registered cloud-boundary capabilities and symbolic probe destinations "
+        "against inventory references. Never author raw URLs, credentials, headers or bodies; "
+        "never confirm a boundary violation, emit PASS, severity, or a final finding.",
+        frozenset({ObservationType.SURFACE, ObservationType.RECON_INVENTORY}),
+        frozenset({"aegis.surface.openapi", "aegis.cloud.metadata_boundary_probe"}),
+        "CloudBoundaryInterpretationOutput",
+    ),
     AgentRole.CHAIN_AGENT: RolePolicy(
         AgentRole.CHAIN_AGENT,
         # Phase 1.7-B: compose only already-approved bounded capabilities within one target scope;
@@ -149,6 +161,17 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
     ),
     "aegis.recon.zap_passive_openapi": CapabilityPolicy(
         "aegis.recon.zap_passive_openapi", frozenset({AgentRole.RECON_AGENT}), 8, True
+    ),
+    # Phase 1.9 controlled Cloud Boundary Agent capability. It issues exactly one benign control
+    # request and one bounded boundary probe against the synthetic aegis-cloud integration-check
+    # surface (a typed HTTP request the broker renders shell-free, never a model-authored URL or
+    # body). It never confirms, PASSes, or sets severity — only the independent deterministic range
+    # verifier does, using controller-owned ground truth.
+    "aegis.cloud.metadata_boundary_probe": CapabilityPolicy(
+        "aegis.cloud.metadata_boundary_probe",
+        frozenset({AgentRole.CLOUD_BOUNDARY_AGENT}),
+        2,
+        True,
     ),
 }
 

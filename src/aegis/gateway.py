@@ -37,6 +37,9 @@ from aegis.multi_agent.contracts import (
     AgentGatewayResponse,
     AgentRole,
     AuthorizationAgentOutput,
+    CloudBoundaryInterpretationOutput,
+    CloudBoundaryPlanOutput,
+    CloudBoundarySubmissionOutput,
     LeadTaskOutput,
     ModelUsage,
     ReconDelegationOutput,
@@ -84,6 +87,11 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_RECON": ReconPlanOutput,
     "INTERPRET_RECON_OBSERVATIONS": ReconInterpretationOutput,
     "DELEGATE_RECON_HYPOTHESIS": ReconDelegationOutput,
+    # Phase 1.9 controlled Cloud Boundary Agent task types. Same reference-only guarantee: no raw
+    # URL, credential, header, request body or verdict is representable in any of these shapes.
+    "PLAN_CLOUD_BOUNDARY": CloudBoundaryPlanOutput,
+    "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": CloudBoundaryInterpretationOutput,
+    "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": CloudBoundarySubmissionOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -94,6 +102,9 @@ _AGENT_TASK_ROLES = {
     "PLAN_RECON": AgentRole.RECON_AGENT,
     "INTERPRET_RECON_OBSERVATIONS": AgentRole.RECON_AGENT,
     "DELEGATE_RECON_HYPOTHESIS": AgentRole.RECON_AGENT,
+    "PLAN_CLOUD_BOUNDARY": AgentRole.CLOUD_BOUNDARY_AGENT,
+    "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": AgentRole.CLOUD_BOUNDARY_AGENT,
+    "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": AgentRole.CLOUD_BOUNDARY_AGENT,
 }
 
 

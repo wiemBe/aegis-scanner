@@ -119,6 +119,7 @@ def test_registry_has_eventual_roles_and_no_zap_active_capability() -> None:
         AgentRole.INJECTION_AGENT,
         AgentRole.CHAIN_AGENT,
         AgentRole.RECON_AGENT,  # Phase 1.7-C controlled Recon Agent.
+        AgentRole.CLOUD_BOUNDARY_AGENT,  # Phase 1.9 controlled Cloud Boundary Agent.
     }
     assert "aegis.zap.active" not in CAPABILITY_REGISTRY
     # Phase 1.7-C reuses the passive controllers but never registers an active-scan capability.
