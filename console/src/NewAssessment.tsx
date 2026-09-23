@@ -1,13 +1,19 @@
 import { useMemo, useState } from 'react'
-import type { AssessmentProfile, ProfileCapability, Run, TargetEntry } from './api'
+import type { AssessmentProfile, ProfileCapability, TargetEntry } from './api'
+import { AddTarget } from './AddTarget'
 import { Pill } from './components'
 
 type Props = {
   targets: TargetEntry[]
   profiles: AssessmentProfile[]
-  onStart: (target: TargetEntry, profile: AssessmentProfile) => Promise<Run>
-  onStarted: (run: Run) => void
+  onStart: (target: TargetEntry, profile: AssessmentProfile) => Promise<{ run_id: string }>
+  onStarted: (runId: string) => void
+  onTargetCreated: (target: TargetEntry) => void
   onCancel: () => void
+}
+
+function isProduction(target: TargetEntry): boolean {
+  return !target.synthetic && target.environment.toUpperCase().includes('PRODUCTION')
 }
 
 const STEPS = ['Target', 'Assessment', 'Controls', 'Review & Start']
@@ -21,7 +27,14 @@ function primaryCapability(profile: AssessmentProfile): ProfileCapability | unde
   return profile.capabilities[0]
 }
 
-export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel }: Props) {
+export function NewAssessment({
+  targets,
+  profiles,
+  onStart,
+  onStarted,
+  onTargetCreated,
+  onCancel,
+}: Props) {
   const [step, setStep] = useState(0)
   const [targetRef, setTargetRef] = useState<string | undefined>(
     targets.length === 1 ? targets[0]?.target_ref : undefined,
@@ -29,7 +42,9 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
   const [profileId, setProfileId] = useState<string>()
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string>()
+  const [adding, setAdding] = useState(false)
 
+  const selectable = useMemo(() => targets.filter((t) => t.enabled), [targets])
   const target = useMemo(() => targets.find((t) => t.target_ref === targetRef), [targets, targetRef])
   const profile = useMemo(() => profiles.find((p) => p.profile_id === profileId), [profiles, profileId])
 
@@ -47,8 +62,8 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
     setStarting(true)
     setError(undefined)
     try {
-      const run = await onStart(target, profile)
-      onStarted(run)
+      const { run_id } = await onStart(target, profile)
+      onStarted(run_id)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The controller rejected the assessment.')
       setStarting(false)
@@ -77,11 +92,16 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
       {step === 0 && (
         <div className="panel">
           <div className="panel-head">
-            <h2>Choose an authorized target</h2>
-            <span className="sub">From controller-authorized inventory only</span>
+            <div>
+              <h2>Choose an authorized target</h2>
+              <span className="sub">Select from inventory, or onboard an authorized company target</span>
+            </div>
+            <button type="button" className="btn" onClick={() => setAdding(true)}>
+              + Add authorized target
+            </button>
           </div>
           <div className="option-list">
-            {targets.map((entry) => (
+            {selectable.map((entry) => (
               <button
                 type="button"
                 key={entry.target_ref}
@@ -97,10 +117,17 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
                   <span className="opt-title">
                     {entry.name}
                     <Pill tone="neutral">{entry.type}</Pill>
+                    {entry.synthetic ? (
+                      <Pill tone="neutral">Synthetic</Pill>
+                    ) : (
+                      <Pill tone={isProduction(entry) ? 'warning' : 'success'}>
+                        {isProduction(entry) ? 'Production' : 'Company'}
+                      </Pill>
+                    )}
                   </span>
                   <span className="opt-desc">{entry.description}</span>
                   <span className="opt-meta">
-                    <span className="mono">{entry.target_ref}</span>
+                    <span className="mono">{entry.authorized_scope[0] ?? entry.target_ref}</span>
                     <span>· {entry.environment}</span>
                   </span>
                 </span>
@@ -116,6 +143,18 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
             </button>
           </div>
         </div>
+      )}
+
+      {adding && (
+        <AddTarget
+          onClose={() => setAdding(false)}
+          onCreated={(created) => {
+            onTargetCreated(created)
+            setTargetRef(created.target_ref)
+            setProfileId(undefined)
+            setAdding(false)
+          }}
+        />
       )}
 
       {step === 1 && target && (
@@ -237,6 +276,15 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
             <h2>Review and start</h2>
             <span className="sub">Confirm before execution</span>
           </div>
+          {isProduction(target) && (
+            <div className="banner warning" style={{ marginBottom: 16 }}>
+              <div className="banner-body">
+                <strong className="accent">Production target</strong>
+                Review the authorized scope, lease, budget and exclusions below before you start. This
+                assessment is bounded to exactly the origins and paths shown.
+              </div>
+            </div>
+          )}
           <div className="review-grid">
             <div>
               <dl className="kv">
@@ -245,6 +293,24 @@ export function NewAssessment({ targets, profiles, onStart, onStarted, onCancel 
                   <dd>
                     {target.name} <span className="mono muted">({target.target_ref})</span>
                   </dd>
+                </div>
+                <div style={{ display: 'contents' }}>
+                  <dt>Authorized scope</dt>
+                  <dd>
+                    {target.authorized_scope.map((s) => (
+                      <div className="mono" key={s}>{s}</div>
+                    ))}
+                    {target.allowed_path_prefixes.length > 0 && (
+                      <div className="muted micro">Paths: {target.allowed_path_prefixes.join(', ')}</div>
+                    )}
+                    {target.excluded_path_prefixes.length > 0 && (
+                      <div className="muted micro">Excluded: {target.excluded_path_prefixes.join(', ')}</div>
+                    )}
+                  </dd>
+                </div>
+                <div style={{ display: 'contents' }}>
+                  <dt>Authorization ref</dt>
+                  <dd className="mono">{target.authorization_reference}</dd>
                 </div>
                 <div style={{ display: 'contents' }}>
                   <dt>Assessment</dt>

@@ -11,6 +11,7 @@ import type {
 import { consoleApi } from './api'
 import { Empty, HealthDot, Kv, Loading, Pill, RunStatePill } from './components'
 import { findingStateView, short, when } from './format'
+import { AddTarget } from './AddTarget'
 import { NewAssessment } from './NewAssessment'
 import { RunDetailView } from './RunDetail'
 
@@ -168,14 +169,17 @@ export function App() {
   const hs = healthState(health)
   const environment = 'Synthetic Lab'
 
-  const startAssessment = async (target: TargetEntry, profile: AssessmentProfile): Promise<Run> => {
-    const cap = profile.capabilities[0]
-    const native = profile.profile_id === 'aegis-native-bola-synthetic'
+  const startAssessment = async (target: TargetEntry, profile: AssessmentProfile) => {
+    // Typed controller job referencing the stable inventory target id. The controller enforces the
+    // target's stored scope; the browser never sends an origin or a scanner argument.
     return consoleApi.startAssessment({
-      target: 'synthetic-bank-api',
-      variant: 'vulnerable',
-      capability: native ? null : cap?.capability_id,
+      target_id: target.target_ref,
+      profile_id: profile.profile_id,
     })
+  }
+
+  const onTargetCreated = (created: TargetEntry) => {
+    setTargets((current) => [...current, created])
   }
 
   const navActive = (match: Route['name'][]) => match.includes(route.name)
@@ -259,10 +263,11 @@ export function App() {
               targets={targets}
               profiles={profiles}
               onStart={startAssessment}
-              onStarted={(run) => {
+              onStarted={(runId) => {
                 void hydrate()
-                go(`#/runs/${run.id}`)
+                go(`#/runs/${runId}`)
               }}
+              onTargetCreated={onTargetCreated}
               onCancel={() => go('#/')}
             />
           ) : route.name === 'run' ? (
@@ -274,7 +279,14 @@ export function App() {
           ) : route.name === 'findings' ? (
             <FindingsView findings={findings} />
           ) : route.name === 'targets' ? (
-            <TargetsView targets={targets} profiles={profiles} />
+            <TargetsView
+              targets={targets}
+              profiles={profiles}
+              onTargetCreated={onTargetCreated}
+              onTargetUpdated={(t) =>
+                setTargets((current) => current.map((c) => (c.target_ref === t.target_ref ? t : c)))
+              }
+            />
           ) : route.name === 'reports' ? (
             <ReportsView runs={runs} onOpen={(id) => go(`#/runs/${id}`)} />
           ) : route.name === 'audit' ? (
@@ -448,41 +460,168 @@ function FindingsView({ findings }: { findings: Finding[] }) {
   )
 }
 
-function TargetsView({ targets, profiles }: { targets: TargetEntry[]; profiles: AssessmentProfile[] }) {
+function TargetsView({
+  targets,
+  profiles,
+  onTargetCreated,
+  onTargetUpdated,
+}: {
+  targets: TargetEntry[]
+  profiles: AssessmentProfile[]
+  onTargetCreated: (t: TargetEntry) => void
+  onTargetUpdated: (t: TargetEntry) => void
+}) {
+  const [adding, setAdding] = useState(false)
+  const [detail, setDetail] = useState<TargetEntry>()
+  const [busy, setBusy] = useState<string>()
+
+  const toggle = async (target: TargetEntry) => {
+    setBusy(target.target_ref)
+    try {
+      const updated = target.enabled
+        ? await consoleApi.disableTarget(target.target_ref)
+        : await consoleApi.enableTarget(target.target_ref)
+      onTargetUpdated(updated)
+    } catch {
+      /* transient; the controller remains the source of truth on next hydrate */
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const kind = (t: TargetEntry) =>
+    t.synthetic ? (
+      <Pill tone="neutral">Synthetic</Pill>
+    ) : t.environment.toUpperCase().includes('PRODUCTION') ? (
+      <Pill tone="warning">Production</Pill>
+    ) : (
+      <Pill tone="success">Company</Pill>
+    )
+
   return (
     <div>
-      <div className="page-head">
-        <h1>Targets</h1>
-        <p>Controller-authorized inventory. Custom hostnames are not accepted in this deployment.</p>
+      <div className="page-head with-action">
+        <div>
+          <h1>Targets</h1>
+          <p>Controller-authorized inventory. Onboard company websites, APIs and authorized ranges.</p>
+        </div>
+        <button className="btn primary" onClick={() => setAdding(true)}>
+          + Add authorized target
+        </button>
       </div>
-      <div className="stack">
-        {targets.map((target) => {
-          const supported = profiles.filter((p) => target.supported_profile_ids.includes(p.profile_id))
-          return (
-            <div className="panel" key={target.target_ref}>
-              <div className="panel-head">
-                <div>
-                  <h2>{target.name}</h2>
-                  <div className="mono muted" style={{ marginTop: 2 }}>
-                    {target.target_ref}
-                  </div>
-                </div>
-                <Pill tone="neutral">{target.environment}</Pill>
-              </div>
-              <p style={{ marginTop: 0 }} className="muted">
-                {target.description}
-              </p>
-              <div className="row" style={{ marginTop: 8 }}>
-                {supported.map((p) => (
-                  <Pill key={p.profile_id} tone={p.available ? 'success' : 'warning'}>
-                    {p.display_name}
-                  </Pill>
-                ))}
-              </div>
+
+      {targets.length === 0 ? (
+        <Empty
+          title="No targets yet"
+          copy="Add an authorized company website, API or range to assess."
+          action={<button className="btn primary" onClick={() => setAdding(true)}>Add authorized target</button>}
+        />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Authorized scope</th>
+                <th>Environment</th>
+                <th>Authorization</th>
+                <th>Last assessment</th>
+                <th>State</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {targets.map((target) => (
+                <tr key={target.target_ref}>
+                  <td>
+                    <strong>{target.name}</strong>
+                    <div className="mono muted" style={{ fontSize: 11 }}>{target.target_ref}</div>
+                  </td>
+                  <td>{kind(target)}</td>
+                  <td className="mono">
+                    {target.authorized_scope.slice(0, 2).map((s) => (
+                      <div key={s}>{s}</div>
+                    ))}
+                    {target.authorized_scope.length > 2 && (
+                      <div className="muted">+{target.authorized_scope.length - 2} more</div>
+                    )}
+                  </td>
+                  <td>{target.environment}</td>
+                  <td>
+                    <Pill tone={target.status === 'AVAILABLE_FOR_ASSESSMENT' ? 'success' : 'neutral'}>
+                      {target.status.replaceAll('_', ' ')}
+                    </Pill>
+                  </td>
+                  <td className="muted">{target.last_assessment_at ? when(target.last_assessment_at) : '—'}</td>
+                  <td>
+                    <Pill tone={target.enabled ? 'success' : 'warning'}>
+                      {target.enabled ? 'Enabled' : 'Disabled'}
+                    </Pill>
+                  </td>
+                  <td className="target-actions">
+                    <button className="link-btn" onClick={() => setDetail(target)}>View</button>
+                    {!target.synthetic && (
+                      <button
+                        className="link-btn"
+                        disabled={busy === target.target_ref}
+                        onClick={() => void toggle(target)}
+                      >
+                        {target.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                    )}
+                    <button
+                      className="link-btn"
+                      disabled={!target.enabled}
+                      onClick={() => go('#/new')}
+                    >
+                      Start assessment
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {detail && (
+        <div className="modal-scrim" role="dialog" aria-modal="true" onClick={() => setDetail(undefined)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
+              <h2>{detail.name}</h2>
+              {kind(detail)}
             </div>
-          )
-        })}
-      </div>
+            <p className="muted">{detail.description || 'No description.'}</p>
+            <Kv
+              items={[
+                ['Target ID', <span className="mono" key="id">{detail.target_ref}</span>],
+                ['Type', detail.type],
+                ['Environment', detail.environment],
+                ['Authorization ref', <span className="mono" key="a">{detail.authorization_reference}</span>],
+                ['Authorized scope', detail.authorized_scope.map((s) => <div className="mono" key={s}>{s}</div>)],
+                ['Allowed paths', detail.allowed_path_prefixes.join(', ') || '— (all)'],
+                ['Excluded paths', detail.excluded_path_prefixes.join(', ') || '—'],
+                ['Credential', detail.credential_reference ? <span className="mono" key="c">{detail.credential_reference}</span> : 'None referenced'],
+                ['Compatible profiles', profiles.filter((p) => detail.supported_profile_ids.includes(p.profile_id)).map((p) => p.display_name).join(', ') || '—'],
+              ]}
+            />
+            <div className="modal-actions">
+              <button className="btn ghost" onClick={() => setDetail(undefined)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {adding && (
+        <AddTarget
+          onClose={() => setAdding(false)}
+          onCreated={(created) => {
+            onTargetCreated(created)
+            setAdding(false)
+          }}
+        />
+      )}
     </div>
   )
 }

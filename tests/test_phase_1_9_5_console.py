@@ -3,6 +3,8 @@ assessment-profile projections, plus their read-only controller endpoints."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -12,6 +14,19 @@ from aegis.console_catalog import (
     profile_display_name,
     target_directory,
 )
+from aegis.target_inventory import TargetInventoryStore
+
+
+def _use_temp_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> TargetInventoryStore:
+    """Point the app's controller-owned inventory at a writable temp database. The module-level
+    store defaults to the production mount, which the offline suite cannot open."""
+
+    store = TargetInventoryStore(str(tmp_path / "targets.db"))
+    store.initialize()
+    monkeypatch.setattr(main_module, "target_store", store)
+    return store
 
 # The four operator-facing catalog profiles, in display order.
 OPERATOR_PROFILE_IDS = [
@@ -28,16 +43,21 @@ def test_target_directory_is_authorized_inventory_only() -> None:
     # The default native target plus the range inventory.
     assert "synthetic-bank-api" in refs
     assert {"range-bank", "range-shop", "range-ops", "range-cloud"} <= refs
+    required = {
+        "target_ref",
+        "name",
+        "type",
+        "target_type",
+        "environment",
+        "description",
+        "supported_profile_ids",
+    }
     for item in items:
-        # No management origin, credential, mode or answer-key material may be projected.
-        assert set(item) == {
-            "target_ref",
-            "name",
-            "type",
-            "environment",
-            "description",
-            "supported_profile_ids",
-        }
+        # The onboarding projection carries scope/lifecycle metadata, but never management
+        # origins, credential *values*, modes or answer-key material.
+        assert required <= set(item)
+        assert item["synthetic"] is True
+        assert item["credential_reference"] is None
         assert "management" not in str(item).lower()
 
 
@@ -79,14 +99,18 @@ def test_profile_display_name_falls_back_to_id() -> None:
     assert profile_display_name("does-not-exist") == "does-not-exist"
 
 
-async def test_targets_endpoint_returns_authorized_inventory() -> None:
+async def test_targets_endpoint_returns_authorized_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_temp_store(tmp_path, monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=main_module.app), base_url="http://test"
     ) as client:
         response = await client.get("/api/console/targets")
     assert response.status_code == 200
     body = response.json()
-    assert body["custom_target_entry"] is False
+    # Operators now onboard company targets through the typed endpoint, not free-text scan input.
+    assert body["custom_target_entry"] is True
     refs = {item["target_ref"] for item in body["items"]}
     assert "synthetic-bank-api" in refs
 
@@ -106,7 +130,10 @@ async def test_profiles_endpoint_only_native_available_by_default() -> None:
         assert profiles[disabled_id]["unavailable_reason"]
 
 
-async def test_console_projections_leak_no_management_or_credential_material() -> None:
+async def test_console_projections_leak_no_management_or_credential_material(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_temp_store(tmp_path, monkeypatch)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=main_module.app), base_url="http://test"
     ) as client:

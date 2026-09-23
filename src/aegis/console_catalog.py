@@ -94,9 +94,20 @@ _NATIVE_TARGET: dict[str, object] = {
     "target_ref": "synthetic-bank-api",
     "name": "Synthetic Bank API",
     "type": "REST API",
+    "target_type": "SYNTHETIC",
     "environment": "SYNTHETIC_LAB",
     "description": "Authorized in-process synthetic banking API with approved account routes.",
     "supported_profile_ids": ["aegis-native-bola-synthetic"],
+    "origin_source": "CONTROLLER_SEEDED",
+    "synthetic": True,
+    "status": "AVAILABLE_FOR_ASSESSMENT",
+    "enabled": True,
+    "authorized_scope": ["synthetic-bank-api (in-process synthetic lab)"],
+    "authorization_reference": "SYNTHETIC_LAB_SCOPE",
+    "allowed_path_prefixes": [],
+    "excluded_path_prefixes": [],
+    "credential_reference": None,
+    "last_assessment_at": None,
 }
 
 
@@ -116,6 +127,7 @@ def target_directory() -> list[dict[str, object]]:
                 "target_ref": item["target_ref"],
                 "name": item["name"],
                 "type": "REST API",
+                "target_type": "SYNTHETIC",
                 "environment": item["environment"],
                 "description": (
                     f"Authorized synthetic range application ({item['application_id']})."
@@ -127,6 +139,16 @@ def target_directory() -> list[dict[str, object]]:
                     "NUCLEI_LAB_SAFE_HTTP_V1",
                     "ZAP_LAB_PASSIVE_OPENAPI_V1",
                 ],
+                "origin_source": "CONTROLLER_SEEDED",
+                "synthetic": True,
+                "status": "AVAILABLE_FOR_ASSESSMENT",
+                "enabled": True,
+                "authorized_scope": [f"{item['origin']} (synthetic range)"],
+                "authorization_reference": "SYNTHETIC_RANGE_SCOPE",
+                "allowed_path_prefixes": [],
+                "excluded_path_prefixes": [],
+                "credential_reference": None,
+                "last_assessment_at": None,
             }
         )
     return targets

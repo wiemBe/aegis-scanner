@@ -64,9 +64,24 @@ const confirmedFinding = {
   final_state: 'FAIL',
 }
 
+const targetDefaults = {
+  target_type: 'SYNTHETIC' as const,
+  synthetic: true,
+  status: 'AVAILABLE_FOR_ASSESSMENT',
+  enabled: true,
+  authorization_reference: 'SYNTHETIC_LAB_SCOPE',
+  authorized_scope: ['synthetic-bank-api (in-process synthetic lab)'],
+  allowed_path_prefixes: [] as string[],
+  excluded_path_prefixes: [] as string[],
+  credential_reference: null,
+  last_assessment_at: null,
+}
+
 const targets = {
+  custom_target_entry: true,
   items: [
     {
+      ...targetDefaults,
       target_ref: 'synthetic-bank-api',
       name: 'Synthetic Bank API',
       type: 'REST API',
@@ -75,11 +90,13 @@ const targets = {
       supported_profile_ids: ['aegis-native-bola-synthetic'],
     },
     {
+      ...targetDefaults,
       target_ref: 'range-bank',
       name: 'Aegis Bank',
       type: 'REST API',
       environment: 'SYNTHETIC_RANGE',
       description: 'Authorized synthetic range application.',
+      authorized_scope: ['http://range-bank.local (synthetic range)'],
       supported_profile_ids: ['NUCLEI_LAB_SAFE_HTTP_V1'],
     },
   ],
@@ -139,7 +156,15 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
       const path = String(input)
       if (init?.method === 'POST') {
         postedBodies.push(JSON.parse(String(init.body)))
-        return { ok: true, json: async () => ({ ...run, id: 'scan-cccccccccccc', status: 'RUNNING' }) } as Response
+        return {
+          ok: true,
+          json: async () => ({
+            run_id: 'scan-cccccccccccc',
+            target_id: 'synthetic-bank-api',
+            profile_id: 'aegis-native-bola-synthetic',
+            status: 'RUNNING',
+          }),
+        } as Response
       }
       const runsList = overrides.runs ?? [run, passRun]
       const payload = path.includes('/runs/')
@@ -233,7 +258,12 @@ describe('New assessment workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start assessment' }))
 
     await waitFor(() => expect(postedBodies.length).toBe(1))
-    expect(postedBodies[0]).toMatchObject({ target: 'synthetic-bank-api', variant: 'vulnerable' })
+    // The browser sends a stable inventory target id and profile id — never an origin or a scanner
+    // argument. The controller resolves and enforces the target's stored scope.
+    expect(postedBodies[0]).toMatchObject({
+      target_id: 'synthetic-bank-api',
+      profile_id: 'aegis-native-bola-synthetic',
+    })
   })
 
   it('prevents duplicate submits while a start is in flight', async () => {
@@ -316,5 +346,112 @@ describe('Credential safety', () => {
     const { container } = render(<App />)
     await screen.findByRole('heading', { name: 'Runs' })
     expect(container.textContent).not.toContain(SECRET)
+  })
+})
+
+describe('Company target onboarding', () => {
+  const companyTarget = {
+    ...targetDefaults,
+    target_ref: 'tgt-abc123def456',
+    target_type: 'WEBSITE' as const,
+    synthetic: false,
+    name: 'Company Marketing Site',
+    type: 'Website / FQDN',
+    environment: 'PRODUCTION',
+    description: '',
+    authorization_reference: 'CHG-1029',
+    authorized_scope: ['https://example.company.com'],
+    supported_profile_ids: ['NUCLEI_LAB_SAFE_HTTP_V1', 'ZAP_LAB_PASSIVE_OPENAPI_V1'],
+  }
+
+  function stubOnboarding() {
+    postedBodies = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        if (init?.method === 'POST') {
+          postedBodies.push(JSON.parse(String(init.body)))
+          if (path.endsWith('/targets/preview')) {
+            return { ok: true, json: async () => ({
+              authorized_scope: ['https://example.company.com'],
+              origins: ['https://example.company.com'],
+              addresses: [], wildcard_subdomains: [],
+              allowed_path_prefixes: [], excluded_path_prefixes: [], openapi_url: null,
+            }) } as Response
+          }
+          return { ok: true, json: async () => companyTarget } as Response
+        }
+        const payload = path.includes('/console/runs')
+          ? { items: [run], count: 1 }
+          : path.includes('/console/findings')
+            ? { items: [] }
+            : path.includes('/console/targets')
+              ? targets
+              : path.includes('/console/profiles')
+                ? profiles
+                : path.includes('/console/health')
+                  ? { control_plane: 'HEALTHY', lab: 'HEALTHY' }
+                  : { console_version: '1.0.0', operational_engines: ['AEGIS_NATIVE'] }
+        return { ok: true, json: async () => payload } as Response
+      }),
+    )
+  }
+
+  it('offers Add authorized target on the target step and returns to the flow with it selected', async () => {
+    stubOnboarding()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getAllByText('New Assessment')[0]!)
+    await screen.findByText('Choose an authorized target')
+
+    // The onboarding action is visible on the target step — not hidden in advanced settings.
+    fireEvent.click(screen.getByRole('button', { name: '+ Add authorized target' }))
+    await screen.findByRole('dialog', { name: 'Add authorized target' })
+
+    fireEvent.change(screen.getByPlaceholderText('Company Marketing Site'), {
+      target: { value: 'Company Marketing Site' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('CHG-1029 / ticket ID'), {
+      target: { value: 'CHG-1029' },
+    })
+    fireEvent.change(screen.getByPlaceholderText(/example.company.com/), {
+      target: { value: 'example.company.com' },
+    })
+    fireEvent.click(screen.getByLabelText('I confirm that I am authorized to assess these targets'))
+
+    // Preview shows the controller-normalized scope before saving.
+    fireEvent.click(screen.getByRole('button', { name: 'Preview scope' }))
+    await screen.findByText('Normalized authorized scope')
+
+    // Add and continue persists via the typed endpoint and returns to the flow with it selected.
+    fireEvent.click(screen.getByRole('button', { name: 'Add and continue' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Add authorized target' })).toBeNull(),
+    )
+    expect(await screen.findByText('Company Marketing Site')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByText('Choose an assessment')
+
+    // The create posted a typed, bounded scope — an origin, never a scanner argument or secret.
+    const createBody = postedBodies.find((b) => b.display_name === 'Company Marketing Site')
+    expect(createBody).toMatchObject({
+      target_type: 'WEBSITE',
+      authorization_attested: true,
+      origins: ['example.company.com'],
+    })
+    expect(JSON.stringify(postedBodies)).not.toContain(SECRET)
+  })
+
+  it('makes the Targets page functional with add and company/synthetic distinction', async () => {
+    stubOnboarding()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getByRole('button', { name: 'Targets' }))
+    await screen.findByRole('heading', { name: 'Targets' })
+    // The synthetic seed is labeled as such, and the add action is present.
+    expect(screen.getByText('Synthetic Bank API')).toBeInTheDocument()
+    expect(screen.getAllByText('Synthetic').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '+ Add authorized target' })).toBeInTheDocument()
   })
 })

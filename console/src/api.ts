@@ -33,13 +33,67 @@ export type Run = {
   verifier_confirmed_count?: number
 }
 
+export type TargetType = 'WEBSITE' | 'API' | 'IP_CIDR' | 'SYNTHETIC'
+export type TargetEnvironment =
+  | 'PRODUCTION'
+  | 'STAGING'
+  | 'DEVELOPMENT'
+  | 'INTERNAL'
+  | 'SYNTHETIC'
+  | 'SYNTHETIC_LAB'
+  | 'SYNTHETIC_RANGE'
+
 export type TargetEntry = {
   target_ref: string
   name: string
   type: string
+  target_type: TargetType
   environment: string
   description: string
   supported_profile_ids: string[]
+  // Onboarding metadata. Seeded synthetic targets and operator-onboarded company targets share this
+  // shape so the console can distinguish and govern them without special-casing.
+  synthetic: boolean
+  status: string
+  enabled: boolean
+  origin_source?: string
+  authorization_reference: string
+  authorized_scope: string[]
+  allowed_path_prefixes: string[]
+  excluded_path_prefixes: string[]
+  credential_reference: string | null
+  last_assessment_at: string | null
+}
+
+// The typed create request the browser sends. It never carries scanner arguments or secret values —
+// only a bounded scope and an opaque credential *reference*.
+export type TargetCreate = {
+  target_type: TargetType
+  display_name: string
+  environment: TargetEnvironment
+  owner?: string | null
+  authorization_reference: string
+  authorization_attested: boolean
+  description?: string | null
+  origins?: string[]
+  allowed_path_prefixes?: string[]
+  excluded_path_prefixes?: string[]
+  wildcard_subdomains?: string[]
+  wildcard_authorized?: boolean
+  openapi_url?: string | null
+  credential_reference?: string | null
+  addresses?: string[]
+  cidr_authorized?: boolean
+}
+
+export type ScopePreview = {
+  authorized_scope: string[]
+  origins: string[]
+  addresses: string[]
+  wildcard_subdomains: string[]
+  allowed_path_prefixes: string[]
+  excluded_path_prefixes: string[]
+  openapi_url: string | null
 }
 
 export type ProfileCapability = {
@@ -169,10 +223,25 @@ export const consoleApi = {
   runs: () => getJSON<{ items: Run[]; count: number }>('/api/console/runs?limit=50'),
   run: (id: string) => getJSON<RunDetail>(`/api/console/runs/${encodeURIComponent(id)}`),
   findings: () => getJSON<{ items: Finding[] }>('/api/console/findings'),
-  targets: () => getJSON<{ items: TargetEntry[] }>('/api/console/targets'),
+  targets: () =>
+    getJSON<{ items: TargetEntry[]; custom_target_entry: boolean }>('/api/console/targets'),
   profiles: () => getJSON<{ items: AssessmentProfile[] }>('/api/console/profiles'),
   health: () => getJSON<Health>('/api/console/health'),
-  // Starting an assessment creates a real typed controller job and returns its real run address.
-  startAssessment: (body: { target: string; variant: string; capability?: string | null }) =>
-    postJSON<Run>('/api/scans', body),
+  // Onboarding an authorized company target. The controller normalizes, validates and persists it;
+  // the browser only submits a typed, bounded scope.
+  previewTarget: (body: TargetCreate) =>
+    postJSON<ScopePreview>('/api/console/targets/preview', body as Record<string, unknown>),
+  createTarget: (body: TargetCreate) =>
+    postJSON<TargetEntry>('/api/console/targets', body as Record<string, unknown>),
+  disableTarget: (ref: string) =>
+    postJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}/disable`, {}),
+  enableTarget: (ref: string) =>
+    postJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}/enable`, {}),
+  // Typed assessment creation. It references a stable inventory target id; the controller enforces
+  // that target's stored scope and fails closed on anything outside it.
+  startAssessment: (body: { target_id: string; profile_id: string }) =>
+    postJSON<{ run_id: string; target_id: string; profile_id: string; status: string }>(
+      '/api/console/assessments',
+      body,
+    ),
 }

@@ -360,3 +360,49 @@ pre.evidence-json {
   background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 12px; font-family: var(--mono); font-size: 11.5px; overflow-x: auto; color: var(--muted);
 }
+
+/* ---- Target onboarding ---- */
+.page-head.with-action { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+
+.target-modal { max-width: 640px; max-height: 88vh; overflow-y: auto; }
+
+.type-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 14px 0 4px; }
+.type-tab {
+  background: var(--raised); border: 1px solid var(--border-strong); color: var(--muted);
+  border-radius: var(--radius-sm); padding: 7px 12px; font-size: 12.5px; cursor: pointer;
+}
+.type-tab.active { border-color: var(--action); color: var(--text); background: var(--surface); }
+.type-help { font-size: 12.5px; margin: 0 0 12px; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.field.wide { width: 100%; margin-bottom: 12px; }
+.field textarea {
+  background: var(--raised); border: 1px solid var(--border-strong); color: var(--text);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; font-family: var(--mono);
+  resize: vertical; width: 100%;
+}
+.field textarea:focus { outline: 2px solid var(--action); outline-offset: 0; border-color: var(--action); }
+.field input, .field select { width: 100%; }
+
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); align-self: end; padding-bottom: 8px; }
+.check input { width: 15px; height: 15px; accent-color: var(--success); }
+.check.attest { margin: 6px 0 4px; font-weight: 500; }
+.micro { font-size: 11.5px; margin: 2px 0 10px; }
+
+.scope-review {
+  border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px;
+  margin-top: 14px; background: var(--raised);
+}
+.scope-review h3 { margin: 0; font-size: 14px; }
+.scope-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.scope-list li { color: var(--success); font-size: 12.5px; }
+
+.target-actions { white-space: nowrap; }
+.link-btn {
+  background: none; border: none; color: var(--muted); cursor: pointer; font-size: 12.5px;
+  padding: 2px 6px; border-radius: var(--radius-sm);
+}
+.link-btn:hover:not(:disabled) { color: var(--text); background: var(--raised); }
+.link-btn:disabled { color: var(--faint); cursor: not-allowed; }
+
+@media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }
