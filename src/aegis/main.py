@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aegis import scm_verifier, zap_verifier
 from aegis.beast.contracts import BeastRunRequest, LeaseRequest
+from aegis.console_catalog import (
+    ProfileAvailability,
+    profile_directory,
+    target_directory,
+)
 from aegis.beast.controller import BeastController, BeastRejected
 from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
@@ -899,6 +904,74 @@ async def console_engines() -> dict[str, object]:
         "items": engine_readiness(healths, extras),
         "kernel_version": ENGINE_KERNEL_VERSION,
         "operational_engines": operational,
+    }
+
+
+@app.get("/api/console/targets")
+async def console_targets() -> dict[str, object]:
+    """Authorized target inventory for the New Assessment flow. Controller-owned; never built from
+    planner input. Credentials, management origins and answer keys are never projected."""
+
+    return {
+        "items": target_directory(),
+        "environment": "SYNTHETIC_LAB / SYNTHETIC_RANGE",
+        "custom_target_entry": False,
+    }
+
+
+@app.get("/api/console/profiles")
+async def console_profiles() -> dict[str, object]:
+    """Plain-language assessment profiles backed by the real enabled catalog profiles. A profile is
+    only advertised as available when the backing adapter can actually execute it; otherwise it is
+    returned unavailable with a precise operator-readable reason (never a clickable fake option)."""
+
+    if service.nuclei.enabled:
+        await service.nuclei.attest()
+    if service.zap.enabled:
+        await service.zap.attest()
+    nuclei_ok = service.nuclei.enabled and service.nuclei.health().authorized
+    zap_ok = service.zap.enabled and service.zap.health().authorized
+
+    def engine_reason(enabled: bool, authorized: bool, enable_flag: str) -> ProfileAvailability:
+        if not enabled:
+            return {
+                "available": False,
+                "reason": f"The {enable_flag} adapter is not enabled in this deployment.",
+            }
+        if not authorized:
+            return {
+                "available": False,
+                "reason": (
+                    f"The {enable_flag} runner has not returned an authorized attestation."
+                ),
+            }
+        return {"available": True, "reason": ""}
+
+    availability: dict[str, ProfileAvailability] = {
+        # The in-process native authorization assessment is always executable.
+        "aegis-native-bola-synthetic": {"available": True, "reason": ""},
+        "NUCLEI_LAB_SAFE_HTTP_V1": engine_reason(
+            service.nuclei.enabled, nuclei_ok, "Nuclei"
+        ),
+        "ZAP_LAB_PASSIVE_OPENAPI_V1": engine_reason(service.zap.enabled, zap_ok, "ZAP"),
+        "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1": (
+            {"available": True, "reason": ""}
+            if zap_active.enabled
+            else {
+                "available": False,
+                "reason": (
+                    "Requires the operator ZAP Active activation lease, which is not enabled in "
+                    "this deployment."
+                ),
+            }
+        ),
+    }
+    return {
+        "items": profile_directory(availability),
+        "provenance_policy": (
+            "Profiles are backed by the controller-owned engine capability catalog. Engine and "
+            "tool results are unconfirmed until the independent Aegis verifier promotes them."
+        ),
     }
 
 

@@ -262,6 +262,55 @@ projections clean; no credential value in evidence; `down_rc == 0`, no leftovers
 
 ---
 
+### Phase 1.9.5 — Operator Console Productization — `PASS (UI phase; downstream model execution NOT_EVALUATED)`
+**Goal.** Replace the engineering/demo-oriented console with a run-first operator product: a
+first-time operator can select an authorized target, understand each assessment profile, start an
+assessment, follow real execution state, read hypotheses vs confirmed findings, see cleanup, and
+find the report — without documentation. No new execution system; typed controller requests only.
+
+**Acceptance checks (typed verdict):**
+- First-time operator can start an assessment without docs — `true` (four-step guided New
+  Assessment workflow; one obvious primary action per screen).
+- Run-first landing with one obvious New Assessment action — `true`.
+- Authorized synthetic target selected from real inventory (`GET /api/console/targets`) — `true`
+  (controller-owned; no custom hostname entry; no management origin/credential projected).
+- Every profile explains what it does and is only clickable when executable
+  (`GET /api/console/profiles`) — `true` (native available; Nuclei/ZAP/ZAP-Active shown unavailable
+  with a precise reason in the default deployment).
+- An assessment creates a real controller job (`POST /api/scans`) returning its real run address —
+  `true` (verified live; run `scan-a2f08b2cc2c2` FAIL/DETERMINISTIC_CONFIRMED, 1 finding).
+- Operator follows real execution state (bounded polling to a terminal outcome) — `true`.
+- Hypothesis vs CONFIRMED finding vs PASS vs UNKNOWN visibly distinct — `true`.
+- Evidence provenance accessible; sensitive values redacted; credential values never in browser
+  responses/content — `true` (unit-tested).
+- Cleanup status first-class — `true` (in-process runs: COMPLETED, no residual containers/networks,
+  `down_rc` N/A).
+- Stop/kill — `NOT_EVALUATED` for the native in-process assessment: it runs as one atomic
+  controller transaction with no cancellable mid-flight state; the control is shown disabled with
+  that exact reason (honest, not faked). Real cancellation remains for the BEAST/ZAP-Active flows.
+- Presentation Mode removed — `true` (route + component deleted). Engineering Dashboard absent from
+  operator navigation — `true`. Debug behind a dev-only route (`import.meta.env.DEV`), omitted from
+  the production build — `true`.
+- No purple/blue gradient, glow, or cyberpunk treatment; neutral dark palette — `true`.
+- No fabricated metrics/health/findings/reports — `true` (all from real backend records).
+- Existing controller/verifier/authorization/lease/inventory/cleanup boundaries intact — `true`
+  (backend authority unchanged; the two new endpoints are pure read-only projections).
+
+**Quality gates.** Frontend: `eslint` clean, `tsc -b` clean, `vitest` 9/9, production `vite build`
+OK. Backend: `tests/test_phase_1_9_5_console.py` 7/7; `tests/test_phase_1_1.py` 33/33 (no
+regression). Visual verification at 1440×900 and 1280×800 (no clipping/overflow; primary action
+obvious). No paid provider calls (deterministic DEMO planner used up to the provider boundary).
+
+**Scope caveat.** UI productization only. Live model-backed assessment/report execution is
+`NOT_EVALUATED` (requires the paid provider pipeline). The obsolete standalone ZAP Active *frontend*
+was removed; the ZAP Active *backend API* is unchanged and the capability is surfaced (advanced,
+unavailable-without-lease) in the profile registry. Evidence:
+`artifacts/phase-1.9.5-operator-console-<UTC>/`.
+
+**Stop condition.** Do not start 2.0.
+
+---
+
 ### Phase 2.0 — Multi-Primitive Chain Agent — `PLANNED`
 **Goal.** Turn separate findings into a **real** attack chain (not the 1.7-B workflow stub).
 
