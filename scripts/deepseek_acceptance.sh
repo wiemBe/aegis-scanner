@@ -130,7 +130,7 @@ if grep -q '"smoke": "PASS"' "$ROOT/artifacts/deepseek-smoke.json" 2>/dev/null; 
     -e AEGIS_BASE_URL=http://control-plane:8000 \
     -e GATEWAY_URL=http://llm-gateway:8080 \
     -e EXPECTED_MODEL="$EXPECTED_MODEL" \
-    -e REQUESTED_MODEL="deepseek-chat" \
+    -e REQUESTED_MODEL="$EXPECTED_MODEL" \
     -e MODEL_TIMEOUT_SECONDS="${MODEL_TIMEOUT_SECONDS:-30}" \
     -e SMOKE_RESULT_PATH=/work/artifacts/deepseek-smoke.json \
     -e EVIDENCE_PATH=/work/artifacts/deepseek-initial-acceptance.json \

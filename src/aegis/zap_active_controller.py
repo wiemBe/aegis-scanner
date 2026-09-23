@@ -559,8 +559,34 @@ class ZapActiveController:
             "countersign": self.countersign().model_dump(mode="json"),
             # The lease is projected redacted. The token exists only in controller memory and in
             # the one RPC body that carried it; it is never in this dictionary.
-            "lease": None if session.lease is None else session.lease.redacted(),
-            "armed_lease": session.armed_lease,
+            "lease": None
+            if session.lease is None
+            else {
+                "lease_id": session.lease.lease_id,
+                "profile_id": session.lease.profile_id,
+                "capability_id": session.lease.capability_id,
+                "projection_digest": session.lease.binding.projection_digest,
+                "allowlist_digest": session.lease.binding.allowlist_digest,
+                "manifest_digest": session.lease.binding.manifest_digest,
+                "audience": session.lease.binding.audience,
+                "budget_id": session.lease.binding.budget_id,
+                "state": session.lease.state,
+                "issued_at": session.lease.issued_at.isoformat(),
+                "expires_at": session.lease.expires_at.isoformat(),
+                "lifetime_seconds": round(
+                    (session.lease.expires_at - session.lease.issued_at).total_seconds()
+                ),
+                "termination_reason": session.lease.termination_reason,
+            },
+            # Admission returns controller-only scope material (target ref, origin, path and
+            # digests). The browser needs lifecycle state only; projecting the full admission
+            # record would disclose the exact hidden fixture route.
+            "armed_lease": None
+            if session.armed_lease is None
+            else {
+                key: session.armed_lease.get(key)
+                for key in ("state", "issued_at", "expires_at", "termination_reason")
+            },
             "lease_status": (lease_status.model_dump(mode="json") if lease_status else None),
             "budgets": None
             if job is None

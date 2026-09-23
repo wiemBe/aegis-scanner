@@ -22,6 +22,8 @@ from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
+from aegis.multi_agent.runtime import console_projection as multi_agent_projection
+from aegis.multi_agent.store import MultiAgentStore
 from aegis.operator import (
     ActorType,
     AuditEnvelope,
@@ -66,6 +68,7 @@ service = ScanService(settings, store, planner, safety)
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
 beast_store = BeastStore(settings.database_path)
+multi_agent_store = MultiAgentStore(settings.database_path)
 beast = BeastController(settings, beast_store)
 # Phase 1.5. Constructing the controller is inert: it holds no lease and contacts nothing until an
 # operator completes the activation ceremony. When ZAP Active is enabled the lease-signing secret
@@ -107,6 +110,7 @@ streams = StreamConnections()
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     store.initialize()
     beast_store.initialize()
+    multi_agent_store.initialize()
     yield
 
 
@@ -164,6 +168,17 @@ async def management_demo(request: Request) -> HTMLResponse:
             "model_name": settings.ai_model if planner.name != "DEMO_HEURISTIC" else "",
             "contract_version": PLANNER_CONTRACT_VERSION,
         },
+    )
+
+
+@app.get("/multi-agent", response_class=HTMLResponse)
+async def multi_agent_console(request: Request) -> HTMLResponse:
+    """Read-only Phase 1.7 console projection; execution remains controller/API owned."""
+
+    return templates.TemplateResponse(
+        request=request,
+        name="multi_agent.html",
+        context={},
     )
 
 
@@ -255,6 +270,26 @@ async def console_config() -> dict[str, object]:
         # carries only availability and never the activation ceremony or target details.
         "zap_active": {"enabled": zap_active.enabled},
     }
+
+
+@app.get("/api/console/multi-agent/runs")
+async def console_multi_agent_runs(
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, object]:
+    return {
+        "items": [multi_agent_projection(item) for item in multi_agent_store.list_recent(limit)],
+        "zap_active_agent_capability": "DISABLED",
+    }
+
+
+@app.get("/api/console/multi-agent/runs/{run_id}")
+async def console_multi_agent_run(run_id: str) -> dict[str, object]:
+    if not re.fullmatch(r"marun-[a-f0-9]{16}", run_id):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    item = multi_agent_store.get(run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return multi_agent_projection(item)
 
 
 class EmergencyStopRequest(BaseModel):

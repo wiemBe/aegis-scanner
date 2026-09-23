@@ -1,0 +1,355 @@
+"""Strict controller-owned contracts for the Phase 1.7 agent runtime.
+
+The contracts intentionally contain references and aliases, never origins, credential values,
+provider secrets, response bodies, answer keys, or model reasoning.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class AgentRole(StrEnum):
+    LEAD_ORCHESTRATOR = "LEAD_ORCHESTRATOR"
+    SURFACE_AGENT = "SURFACE_AGENT"
+    AUTHORIZATION_AGENT = "AUTHORIZATION_AGENT"
+    INJECTION_AGENT = "INJECTION_AGENT"
+    CHAIN_AGENT = "CHAIN_AGENT"
+
+
+class AgentRunState(StrEnum):
+    QUEUED = "QUEUED"
+    RESETTING = "RESETTING"
+    RUNNING = "RUNNING"
+    VERIFYING = "VERIFYING"
+    CLEANING_UP = "CLEANING_UP"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class AgentTaskState(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class ObservationType(StrEnum):
+    SURFACE = "SURFACE"
+    AUTHORIZATION_COMPARISON = "AUTHORIZATION_COMPARISON"
+    VERIFIER_SUMMARY = "VERIFIER_SUMMARY"
+
+
+class EvaluationVerdict(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    PASS = "PASS"  # noqa: S105 - evaluation verdict, not a credential
+    INCOMPLETE = "INCOMPLETE"
+    CANCELLED = "CANCELLED"
+
+
+def now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+class BudgetLimit(StrictModel):
+    model_calls: int = Field(ge=0, le=100)
+    tokens: int = Field(ge=0, le=1_000_000)
+    target_requests: int = Field(ge=0, le=10_000)
+    commands: int = Field(ge=0, le=1_000)
+    elapsed_ms: int = Field(ge=1, le=86_400_000)
+    evidence_bytes: int = Field(ge=0, le=100_000_000)
+
+
+class BudgetUsage(StrictModel):
+    model_calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    target_requests: int = Field(default=0, ge=0)
+    commands: int = Field(default=0, ge=0)
+    elapsed_ms: int = Field(default=0, ge=0)
+    evidence_bytes: int = Field(default=0, ge=0)
+
+    @property
+    def tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+class AgentBudgetLedger(StrictModel):
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    agent_id: str | None = Field(default=None, pattern=r"^agent-[a-f0-9]{16}$")
+    limit: BudgetLimit
+    usage: BudgetUsage = Field(default_factory=BudgetUsage)
+
+
+class AgentRun(StrictModel):
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    application_id: str = Field(pattern=r"^aegis-[a-z0-9-]+$")
+    scenario_id: str = Field(pattern=r"^[a-z0-9-]+$")
+    execution_mode: Literal["single_agent", "multi_agent"]
+    state: AgentRunState = AgentRunState.QUEUED
+    created_at: datetime = Field(default_factory=now_utc)
+    completed_at: datetime | None = None
+    active_role: AgentRole | None = None
+    stop_requested: bool = False
+    verifier_result_ref: str | None = Field(default=None, max_length=100)
+    verdict: EvaluationVerdict | None = None
+    cleanup_succeeded: bool | None = None
+    reset_generation_before: int | None = None
+    reset_generation_after: int | None = None
+
+
+class AgentTaskContext(StrictModel):
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    scenario_ref: str = Field(pattern=r"^[a-z0-9-]+$")
+    allowed_operation_ids: list[str] = Field(max_length=32)
+    credential_aliases: list[str] = Field(max_length=8)
+    resource_refs: list[str] = Field(max_length=32)
+    observation_refs: list[str] = Field(default_factory=list, max_length=32)
+
+
+class AgentTask(StrictModel):
+    task_id: str = Field(pattern=r"^task-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    agent_id: str = Field(pattern=r"^agent-[a-f0-9]{16}$")
+    role: AgentRole
+    task_type: Literal[
+        "PLAN_SURFACE",
+        "OBSERVE_SURFACE",
+        "PLAN_AUTHORIZATION",
+        "TEST_AUTHORIZATION",
+        "SINGLE_AGENT_BOLA",
+    ]
+    state: AgentTaskState = AgentTaskState.QUEUED
+    parent_task_id: str | None = Field(default=None, pattern=r"^task-[a-f0-9]{16}$")
+    context: AgentTaskContext
+    created_at: datetime = Field(default_factory=now_utc)
+    completed_at: datetime | None = None
+
+
+class AgentObservation(StrictModel):
+    observation_id: str = Field(pattern=r"^obs-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    task_id: str = Field(pattern=r"^task-[a-f0-9]{16}$")
+    agent_id: str = Field(pattern=r"^agent-[a-f0-9]{16}$")
+    observation_type: ObservationType
+    summary: str = Field(min_length=1, max_length=500)
+    operation_ids: list[str] = Field(default_factory=list, max_length=32)
+    resource_refs: list[str] = Field(default_factory=list, max_length=32)
+    statuses: dict[str, int] = Field(default_factory=dict)
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_bytes: int = Field(ge=0, le=262_144)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class AgentHypothesis(StrictModel):
+    hypothesis_id: str = Field(pattern=r"^hyp-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    task_id: str = Field(pattern=r"^task-[a-f0-9]{16}$")
+    agent_id: str = Field(pattern=r"^agent-[a-f0-9]{16}$")
+    category: Literal["BOLA"]
+    operation_id: str = Field(max_length=100)
+    owner_credential_alias: str = Field(pattern=r"^cred-[a-z0-9-]+$")
+    alternate_credential_alias: str = Field(pattern=r"^cred-[a-z0-9-]+$")
+    owner_resource_ref: str = Field(pattern=r"^resource-[a-z0-9-]+$")
+    alternate_resource_ref: str = Field(pattern=r"^resource-[a-z0-9-]+$")
+    rationale: str = Field(min_length=3, max_length=500)
+
+
+class AgentActionRequest(StrictModel):
+    action_id: str = Field(pattern=r"^action-[a-f0-9]{16}$")
+    nonce: str = Field(pattern=r"^[a-f0-9]{32}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    task_id: str = Field(pattern=r"^task-[a-f0-9]{16}$")
+    agent_id: str = Field(pattern=r"^agent-[a-f0-9]{16}$")
+    role: AgentRole
+    capability_id: str = Field(pattern=r"^[a-z0-9_.-]+$")
+    operation_id: str = Field(max_length=100)
+    credential_aliases: list[str] = Field(min_length=1, max_length=4)
+    resource_refs: list[str] = Field(min_length=1, max_length=8)
+    issued_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def expiry_after_issue(self) -> AgentActionRequest:
+        if self.expires_at <= self.issued_at:
+            raise ValueError("ACTION_EXPIRY_INVALID")
+        return self
+
+
+class AgentActionResult(StrictModel):
+    action_id: str = Field(pattern=r"^action-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    task_id: str = Field(pattern=r"^task-[a-f0-9]{16}$")
+    agent_id: str = Field(pattern=r"^agent-[a-f0-9]{16}$")
+    capability_id: str
+    accepted: bool
+    observation_ref: str | None = Field(default=None, pattern=r"^obs-[a-f0-9]{16}$")
+    rejection_code: str | None = Field(default=None, max_length=100)
+    target_requests: int = Field(ge=0, le=32)
+
+
+class FindingCandidate(StrictModel):
+    candidate_id: str = Field(pattern=r"^candidate-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    hypothesis_id: str = Field(pattern=r"^hyp-[a-f0-9]{16}$")
+    observation_ref: str = Field(pattern=r"^obs-[a-f0-9]{16}$")
+    category: Literal["BOLA"]
+    verifier_confirmed: bool = False
+
+
+class VerifierResultRef(StrictModel):
+    reference: str = Field(pattern=r"^verify-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    authority: Literal["DETERMINISTIC_RANGE_VERIFIER"]
+    status: Literal["CONFIRMED", "PASS", "INCOMPLETE"]
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_bytes: int = Field(ge=0, le=262_144)
+    summary: str = Field(max_length=300)
+
+
+class AgentAuditEvent(StrictModel):
+    event_id: str = Field(pattern=r"^maevt-[a-f0-9]{16}$")
+    run_id: str = Field(pattern=r"^marun-[a-f0-9]{16}$")
+    task_id: str | None = Field(default=None, pattern=r"^task-[a-f0-9]{16}$")
+    agent_id: str | None = Field(default=None, pattern=r"^agent-[a-f0-9]{16}$")
+    actor: Literal["CONTROLLER", "AGENT", "TOOL_BROKER", "VERIFIER"]
+    event_type: str = Field(pattern=r"^[A-Z0-9_]+$", max_length=80)
+    summary: str = Field(min_length=1, max_length=500)
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class RunMetrics(StrictModel):
+    surface_discovery: int = Field(ge=0)
+    valid_hypotheses: int = Field(ge=0)
+    verifier_confirmed_findings: int = Field(ge=0)
+    false_positives: int = Field(ge=0)
+    model_calls: int = Field(ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    target_requests: int = Field(ge=0)
+    elapsed_ms: int = Field(ge=0)
+    adaptation_after_failed_approach: bool
+    cleanup_reset_succeeded: bool
+
+
+class RunEvaluation(StrictModel):
+    run: AgentRun
+    tasks: list[AgentTask]
+    observations: list[AgentObservation]
+    hypotheses: list[AgentHypothesis]
+    action_requests: list[AgentActionRequest]
+    action_results: list[AgentActionResult]
+    finding_candidates: list[FindingCandidate]
+    verifier_results: list[VerifierResultRef]
+    global_budget: AgentBudgetLedger
+    agent_budgets: list[AgentBudgetLedger]
+    metrics: RunMetrics
+    audit_events: list[AgentAuditEvent]
+
+
+# Model-authored output types. Identity, authority, verdict, URL and raw-request fields are absent.
+class LeadTaskOutput(StrictModel):
+    task_type: Literal["OBSERVE_SURFACE", "TEST_AUTHORIZATION"]
+    objective: str = Field(min_length=3, max_length=300)
+
+
+class SurfaceAgentOutput(StrictModel):
+    summary: str = Field(min_length=3, max_length=500)
+    operation_ids: list[str] = Field(min_length=1, max_length=16)
+    resource_refs: list[str] = Field(min_length=1, max_length=16)
+
+
+class AuthorizationAgentOutput(StrictModel):
+    category: Literal["BOLA"]
+    operation_id: str = Field(max_length=100)
+    owner_credential_alias: str = Field(pattern=r"^cred-[a-z0-9-]+$")
+    alternate_credential_alias: str = Field(pattern=r"^cred-[a-z0-9-]+$")
+    owner_resource_ref: str = Field(pattern=r"^resource-[a-z0-9-]+$")
+    alternate_resource_ref: str = Field(pattern=r"^resource-[a-z0-9-]+$")
+    rationale: str = Field(min_length=3, max_length=500)
+    capability_id: Literal["aegis.authorization.compare"]
+
+
+class SingleAgentOutput(StrictModel):
+    summary: str = Field(min_length=3, max_length=500)
+    operation_ids: list[str] = Field(min_length=1, max_length=16)
+    resource_refs: list[str] = Field(min_length=1, max_length=16)
+    authorization: AuthorizationAgentOutput
+
+
+class ModelUsage(StrictModel):
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+
+
+class ModelResult(StrictModel):
+    payload_json: str = Field(min_length=2, max_length=32_768)
+    usage: ModelUsage
+
+
+class AgentGatewayRequest(StrictModel):
+    role: Literal[
+        "LEAD_ORCHESTRATOR",
+        "SURFACE_AGENT",
+        "AUTHORIZATION_AGENT",
+        "INJECTION_AGENT",
+        "CHAIN_AGENT",
+    ]
+    task_type: Literal[
+        "PLAN_SURFACE",
+        "OBSERVE_SURFACE",
+        "PLAN_AUTHORIZATION",
+        "TEST_AUTHORIZATION",
+        "SINGLE_AGENT_BOLA",
+    ]
+    context: dict[str, Any]
+    max_output_tokens: int = Field(ge=64, le=8192)
+
+
+class AgentGatewayResponse(StrictModel):
+    model: str = Field(min_length=1, max_length=200)
+    payload_json: str = Field(min_length=2, max_length=32_768)
+    usage: ModelUsage
+    request_projection: AgentGatewayRequestProjection
+
+
+class AgentGatewayRequestProjection(StrictModel):
+    correlation_id: str = Field(pattern=r"^agreq-[a-f0-9]{24}$")
+    projection_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    role: AgentRole
+    task_type: str = Field(pattern=r"^[A-Z_]+$", max_length=80)
+    requested_model: str = Field(min_length=1, max_length=200)
+    schema_identifier: str = Field(pattern=r"^[A-Za-z0-9_]+$", max_length=100)
+    message_field_classifications: dict[
+        str,
+        Literal[
+            "BOUNDED_SYSTEM_CONTRACT",
+            "BOUNDED_REFERENCE_CONTEXT",
+            "STRICT_OUTPUT_SCHEMA",
+        ],
+    ]
+    context_field_names: list[str] = Field(max_length=40)
+    context_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    system_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    redaction_status: Literal["CLEAN"]
+    forbidden_categories_present: list[str] = Field(max_length=8)
+
+
+class GatewayCallRecord(StrictModel):
+    role: AgentRole
+    task_type: str = Field(pattern=r"^[A-Z_]+$", max_length=80)
+    request_projection: AgentGatewayRequestProjection
+    validated_output: dict[str, Any]
+    usage: ModelUsage

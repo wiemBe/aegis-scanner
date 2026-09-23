@@ -96,10 +96,10 @@ SELECTION_SYSTEM_PROMPT = (
     _V3_COMMON
     + " STEP: bounded selection. You are given a list of already-validated candidates, each with a "
     "controller-assigned `candidate_id`. Return a single JSON object that either: selects exactly "
-    "one candidate (`selection_type`=\"select\" with its `candidate_id` and a `rationale`); "
+    'one candidate (`selection_type`="select" with its `candidate_id` and a `rationale`); '
     "rejects "
-    "all of them (`selection_type`=\"reject_all\" with a structured `reason` for every "
-    "`candidate_id`); or requests review (`selection_type`=\"review\" with a machine-checkable "
+    'all of them (`selection_type`="reject_all" with a structured `reason` for every '
+    '`candidate_id`); or requests review (`selection_type`="review" with a machine-checkable '
     "blocking `reason`). Reference only the given candidate_ids. Do not invent, add or modify any "
     "candidate field. Generic prose such as 'manual review recommended' is not a sufficient reason."
 )
@@ -270,9 +270,18 @@ class DemoPlanner(Planner):
 class PlannerFailure(ValueError):
     """Safe diagnostic code only; never include provider bodies or validation inputs."""
 
-    def __init__(self, code: str, response_digest: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        response_digest: str | None = None,
+        *,
+        provider_reported_model: str | None = None,
+    ) -> None:
         super().__init__(code)
         self.response_digest = response_digest
+        # Model identity is non-secret and is retained only for exact binding diagnosis. Provider
+        # bodies, prompts, headers and credentials remain unavailable to callers.
+        self.provider_reported_model = provider_reported_model
 
 
 def _gateway_error(raw: bytes) -> tuple[str, str | None]:
