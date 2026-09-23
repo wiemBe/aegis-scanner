@@ -2,133 +2,456 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
-class FakeEventSource {
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  constructor(url: string) { void url; setTimeout(() => this.onopen?.(), 0) }
-  addEventListener() { /* no live messages in unit tests */ }
-  close() { /* no-op */ }
-}
+// A secret value the browser must never receive or render, and a hostile string that must render
+// as inert text.
+const SECRET = 'super-secret-credential-value'
+const hostile = '<img src=x onerror=alert(1)>'
 
 const run = {
-  id: 'scan-aaaaaaaaaaaa', status: 'FAIL', target_name: 'Synthetic Bank API', scope: 'approved', planner: 'LOCAL_LLM', mode: 'LOCAL_LLM', model: 'qwen3:8b', model_digest: 'a'.repeat(64), variant: 'vulnerable', scenario: 'positive_vulnerable', created_at: '2026-09-18T19:00:00Z', completed_at: '2026-09-18T19:00:04Z', planner_contract_version: 3, execution_policy_version: 1, usage: { requests: 4, model_calls: 1, reserved_tokens: 2048, reported_tokens: 700 }, budgets: { target_requests: 8, model_calls: 6, token_reservations: 80000 }, candidate_counts: { generated: 1, validated: 1, rejected: 0 }, safety_rejections: 0, finding_count: 1, finding_ids: ['finding-1'], retest_of: null, linked_retests: ['scan-bbbbbbbbbbbb'], verification: 'CONFIRMED', terminal_reason: 'DETERMINISTIC_CONFIRMED', scope_badges: [],
+  id: 'scan-aaaaaaaaaaaa',
+  status: 'FAIL',
+  target_name: 'Synthetic Bank API',
+  scope: 'approved',
+  planner: 'DEMO_HEURISTIC',
+  mode: 'DEMO_HEURISTIC',
+  model: null,
+  variant: 'vulnerable',
+  scenario: 'positive_vulnerable',
+  created_at: '2026-09-18T19:00:00Z',
+  completed_at: '2026-09-18T19:00:04Z',
+  planner_contract_version: 3,
+  execution_policy_version: 1,
+  usage: { requests: 4, model_calls: 0, reserved_tokens: 0, reported_tokens: 0 },
+  budgets: { target_requests: 8, model_calls: 6, token_reservations: 80000 },
+  candidate_counts: { generated: 1, validated: 1, rejected: 0 },
+  safety_rejections: 0,
+  finding_count: 1,
+  finding_ids: ['finding-1'],
+  retest_of: null,
+  linked_retests: [],
+  verification: 'CONFIRMED',
+  terminal_reason: 'DETERMINISTIC_CONFIRMED',
+  engine: 'AEGIS_NATIVE',
+  adapter_version: 'aegis-native/1.1.0',
+  tool_reported_count: 1,
+  verifier_confirmed_count: 1,
 }
-const hostile = '<img src=x onerror=alert(1)>'
-const event = { event_id: 'evt-000000000001', sequence: 1, timestamp: '2026-09-18T19:00:01Z', run_id: run.id, scan_id: run.id, finding_id: 'finding-1', retest_scan_id: null, parent_event_id: null, actor_type: 'AI_PLANNER', event_type: 'CANDIDATE_GENERATED', stage: 'AI_HYPOTHESIS', status: 'RECORDED', engine: 'AEGIS_NATIVE', summary: hostile, evidence_refs: [], redaction_status: 'REDACTED', metadata: {}, integrity: { algorithm: 'SHA-256', digest: 'b'.repeat(64) } }
-const finding = { id: 'finding-1', severity: 'HIGH', confidence: 'CONFIRMED', status: 'REMEDIATED', vulnerability_class: 'BOLA', owasp_mapping: 'API1:2023', source_engine: 'AEGIS_NATIVE', affected_operation: 'GET /api/v1/accounts/{account_id}', principal_object_direction: 'user_a → user_b', discovery_scan: run.id, linked_retest: 'scan-bbbbbbbbbbbb', evidence_completeness: 'COMPLETE', created_at: run.created_at, updated_at: run.completed_at, title: 'Broken object authorization', provenance: 'VERIFIER', ai_hypothesis: 'One direction', controller_execution: 'Three requests', deterministic_evidence: 'Vulnerable: 200 / 200 / 200', verifier_conclusion: 'Confirmed', patched_retest: 'Patched: 200 / 200 / 403', final_state: 'PASS' }
+
+const passRun = { ...run, id: 'scan-bbbbbbbbbbbb', status: 'PASS', finding_count: 0, verification: null }
+
+const confirmedFinding = {
+  id: 'finding-1',
+  severity: 'HIGH',
+  confidence: 'CONFIRMED',
+  status: 'CONFIRMED',
+  vulnerability_class: 'API1:2023 BOLA',
+  owasp_mapping: 'API1:2023 Broken Object Level Authorization',
+  source_engine: 'AEGIS_NATIVE',
+  affected_operation: 'GET /api/v1/accounts/{account_id}',
+  principal_object_direction: 'user_a → user_b',
+  discovery_scan: run.id,
+  linked_retest: null,
+  evidence_completeness: 'PARTIAL',
+  created_at: run.created_at,
+  updated_at: run.completed_at,
+  title: hostile,
+  provenance: 'VERIFIER',
+  ai_hypothesis: 'One direction',
+  controller_execution: 'Three requests',
+  deterministic_evidence: 'Vulnerable: 200 / 200 / 200',
+  verifier_conclusion: 'Confirmed',
+  patched_retest: 'Not run',
+  final_state: 'FAIL',
+}
+
+const targetDefaults = {
+  target_type: 'SYNTHETIC' as const,
+  synthetic: true,
+  status: 'AVAILABLE_FOR_ASSESSMENT',
+  enabled: true,
+  authorization_reference: 'SYNTHETIC_LAB_SCOPE',
+  authorized_scope: ['synthetic-bank-api (in-process synthetic lab)'],
+  allowed_path_prefixes: [] as string[],
+  excluded_path_prefixes: [] as string[],
+  credential_reference: null,
+  last_assessment_at: null,
+}
+
+const targets = {
+  custom_target_entry: true,
+  items: [
+    {
+      ...targetDefaults,
+      target_ref: 'synthetic-bank-api',
+      name: 'Synthetic Bank API',
+      type: 'REST API',
+      environment: 'SYNTHETIC_LAB',
+      description: 'Authorized in-process synthetic banking API.',
+      supported_profile_ids: ['aegis-native-bola-synthetic'],
+    },
+    {
+      ...targetDefaults,
+      target_ref: 'range-bank',
+      name: 'Aegis Bank',
+      type: 'REST API',
+      environment: 'SYNTHETIC_RANGE',
+      description: 'Authorized synthetic range application.',
+      authorized_scope: ['http://range-bank.local (synthetic range)'],
+      supported_profile_ids: ['NUCLEI_LAB_SAFE_HTTP_V1'],
+    },
+  ],
+}
+
+const nativeCap = {
+  capability_id: 'bola_object_read_v1',
+  title: 'Object-level authorization read comparison (BOLA)',
+  activity: 'ACTIVE',
+  request_budget: 8,
+  concurrency_budget: 1,
+  time_budget_ms: 90000,
+  requires_authentication: true,
+  state_changing_possible: false,
+  verified_severity: 'HIGH',
+  required_approvals: ['SYNTHETIC_LAB_SCOPE'],
+}
+
+const profiles = {
+  items: [
+    {
+      profile_id: 'aegis-native-bola-synthetic',
+      display_name: 'Web & API Authorization',
+      operator_summary: 'Examines authorized API object-access boundaries and produces hypotheses for independent verification.',
+      how_it_runs: 'Runs the Aegis-native object-authorization capability.',
+      advanced: false,
+      engine: 'AEGIS_NATIVE',
+      environment: 'SYNTHETIC_LAB',
+      available: true,
+      unavailable_reason: '',
+      capabilities: [nativeCap],
+      isolation_boundary: 'in-process',
+    },
+    {
+      profile_id: 'NUCLEI_LAB_SAFE_HTTP_V1',
+      display_name: 'Exposure & Misconfiguration Scan',
+      operator_summary: 'Checks the authorized target for exposed source-control metadata.',
+      how_it_runs: 'Runs one anonymous read-only request per admitted template.',
+      advanced: false,
+      engine: 'NUCLEI',
+      environment: 'SYNTHETIC_LAB',
+      available: false,
+      unavailable_reason: 'The Nuclei adapter is not enabled in this deployment.',
+      capabilities: [{ ...nativeCap, capability_id: 'nuclei_scm_metadata_exposure_v1' }],
+      isolation_boundary: 'isolated runner',
+    },
+  ],
+}
+
+let postedBodies: Record<string, unknown>[] = []
+
+function stubFetch(overrides: { runs?: unknown[] } = {}) {
+  postedBodies = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (init?.method === 'POST') {
+        postedBodies.push(JSON.parse(String(init.body)))
+        return {
+          ok: true,
+          json: async () => ({
+            run_id: 'scan-cccccccccccc',
+            target_id: 'synthetic-bank-api',
+            profile_id: 'aegis-native-bola-synthetic',
+            status: 'RUNNING',
+          }),
+        } as Response
+      }
+      const runsList = overrides.runs ?? [run, passRun]
+      const payload = path.includes('/runs/')
+        ? { run, events: [], evidence: [] }
+        : path.includes('/console/runs')
+          ? { items: runsList, count: runsList.length }
+          : path.includes('/console/findings')
+            ? { items: [confirmedFinding] }
+            : path.includes('/console/targets')
+              ? targets
+              : path.includes('/console/profiles')
+                ? profiles
+                : path.includes('/console/audit')
+                  ? { items: [] }
+                  : path.includes('/console/health')
+                    ? { control_plane: 'HEALTHY', lab: 'HEALTHY' }
+                    : path.includes('/console/config')
+                      ? { console_version: '1.0.0', operational_engines: ['AEGIS_NATIVE'] }
+                      : {}
+      return { ok: true, json: async () => payload } as Response
+    }),
+  )
+}
 
 beforeEach(() => {
-  vi.stubGlobal('EventSource', FakeEventSource)
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-    const path = String(input)
-    const lifecycle = [{ normalized_id: 'scan-aaaaaaaaaaaa:k', engine: 'AEGIS_NATIVE', adapter_version: 'aegis-native/1.1.0', capability_id: 'bola_object_read_v1', lifecycle_state: 'VERIFIED', ai_hypothesis: 'One direction', controller_authorization: 'job x', engine_reported: 'API1:2023 BOLA: raw', aegis_finding_id: 'finding-1', severity: 'HIGH', confidence: 'CONFIRMED', provenance: 'VERIFIER', verifier_status: 'CONFIRMED' }]
-    const executionPolicy = { engine: 'AEGIS_NATIVE', adapter_version: 'aegis-native/1.1.0', engine_kernel_version: 1, execution_policy_version: 1, jobs_created: [{ engine: 'AEGIS_NATIVE', job_id: 'job-000000000001', execution_id: 'exec-000000000001', status: 'COMPLETED', observation_count: 3, reported_finding_count: 1 }], jobs_rejected: [] }
-    const engines = { items: [
-      { engine: 'AEGIS_NATIVE', name: 'Aegis Native — synthetic BOLA', adapter_version: 'aegis-native/1.1.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'native', profile_id: 'aegis-native-bola-synthetic', environment: 'SYNTHETIC_LAB', isolation_boundary: 'in-process', capabilities: [], kernel_version: 1 },
-      { engine: 'NUCLEI', name: 'Nuclei — lab-safe HTTP', adapter_version: 'nuclei-adapter/1.2.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'Pinned runner attested', profile_id: 'NUCLEI_LAB_SAFE_HTTP_V1', environment: 'SYNTHETIC_LAB', isolation_boundary: 'isolated sidecar', capabilities: [], kernel_version: 1, provenance: { pinned_engine_version: 'v3.11.1', attested_binary_sha256: 'f'.repeat(64), manifest_version: '1.2.0', manifest_digest: 'c'.repeat(64), admitted_template_count: 1, signature_probe: 'SIGNED_VERIFIED', last_health_check: run.completed_at, latest_execution: { scan_id: 'scan-nucleinuclei', status: 'FAIL', http_connections: 1, request_budget: 1, records: 1, tool_reported: 1, verifier_confirmed: 1 }, responsibility: 'Nuclei is an Aegis-controlled detection engine. Its results are independently correlated and verified; Nuclei does not directly confirm Aegis findings.' } },
-      { engine: 'ZAP', name: 'ZAP — passive scan (disabled)', adapter_version: 'zap-adapter/0.0.0-disabled', configured: true, reachable: null, enabled: false, authorized: false, state: 'DISABLED', detail: 'planned', profile_id: 'zap-passive-synthetic', environment: 'SYNTHETIC_LAB', isolation_boundary: 'FUTURE isolated sidecar', capabilities: [], kernel_version: 1 },
-    ] }
-    const payload = path.includes('/runs/') ? { run, events: [event], evidence: [], lifecycle, execution_policy: executionPolicy } : path.includes('/runs') ? { items: [run] } : path.includes('/audit') ? { items: [event] } : path.includes('/findings') ? { items: [finding] } : path.includes('/engines') ? engines : path.includes('/integrations') ? { items: [{ name: 'Aegis Native', engine: 'AEGIS_NATIVE', state: 'CONNECTED' }, { name: 'Nuclei', engine: 'NUCLEI', state: 'CONNECTED' }, { name: 'ZAP', engine: 'ZAP', state: 'PLANNED_NOT_CONNECTED' }] } : path.includes('/health') ? { checked_at: run.completed_at, control_plane: 'HEALTHY', gateway: 'HEALTHY', ollama: 'HEALTHY', lab: 'HEALTHY', dashboard_api: 'HEALTHY', database: 'HEALTHY', network_isolation: 'CONFIGURED_NOT_RUNTIME_ATTESTED', last_topology_test: 'NOT_AVAILABLE_IN_RUNTIME', last_secret_scan: 'NOT_AVAILABLE_IN_RUNTIME', event_stream: {}, evidence_storage: {} } : { enabled: false }
-    return { ok: true, json: async () => payload } as Response
-  }))
+  window.location.hash = ''
+  stubFetch()
 })
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
-describe('Operator Console', () => {
-  it('renders mission state and permanent scope labels', async () => {
+describe('Operator console — landing and navigation', () => {
+  it('shows a run-first landing with one obvious New Assessment action', async () => {
     render(<App />)
-    expect(await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')).toBeInTheDocument()
-    expect(screen.getAllByText('SYNTHETIC LAB').length).toBeGreaterThan(0)
-    expect(screen.getByText('AI proposed')).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Runs' })
+    expect(screen.getAllByRole('button', { name: 'New Assessment' }).length).toBeGreaterThan(0)
+    expect(await screen.findByText('Recent runs')).toBeInTheDocument()
   })
 
-  it('navigates to disconnected integrations without calling them operational', async () => {
+  it('has no Presentation Mode and no Engineering Dashboard in navigation', async () => {
     render(<App />)
-    await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
-    fireEvent.click(screen.getByRole('button', { name: /Integrations/ }))
-    expect(screen.getByText('PLANNED NOT CONNECTED')).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Runs' })
+    expect(screen.queryByText(/Presentation/i)).toBeNull()
+    expect(screen.queryByText(/Engineering/i)).toBeNull()
+    expect(screen.queryByText(/Engineering dashboard/i)).toBeNull()
   })
 
-  it('renders hostile event text as text, never markup', async () => {
+  it('gates the Debug route behind the development build flag', async () => {
+    // Debug is a development-only affordance guarded by import.meta.env.DEV. Vitest runs in DEV, so
+    // here the Debug nav item is present; the production build (DEV=false) omits it entirely, which
+    // is confirmed by the production build + visual verification.
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    if (import.meta.env.DEV) {
+      expect(screen.getByRole('button', { name: 'Debug' })).toBeInTheDocument()
+    } else {
+      expect(screen.queryByRole('button', { name: 'Debug' })).toBeNull()
+      window.location.hash = '#/debug'
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Runs' })).toBeInTheDocument())
+    }
+  })
+})
+
+describe('New assessment workflow', () => {
+  it('selects an authorized target, shows profile availability, reviews, and starts a real job', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getAllByText('New Assessment')[0]!)
+
+    // Step 1: authorized inventory targets.
+    await screen.findByText('Choose an authorized target')
+    expect(screen.getByText('Aegis Bank')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Synthetic Bank API'))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    // Step 2: profile description shown; availability drives selectability.
+    await screen.findByText('Choose an assessment')
+    expect(screen.getByText(/Examines authorized API object-access boundaries/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Web & API Authorization'))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    // Step 3: controls.
+    await screen.findByText('Execution controls')
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    // Step 4: review summary + start.
+    await screen.findByText('Review and start')
+    expect(screen.getByText('Web & API Authorization')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Start assessment' }))
+
+    await waitFor(() => expect(postedBodies.length).toBe(1))
+    // The browser sends a stable inventory target id and profile id — never an origin or a scanner
+    // argument. The controller resolves and enforces the target's stored scope.
+    expect(postedBodies[0]).toMatchObject({
+      target_id: 'synthetic-bank-api',
+      profile_id: 'aegis-native-bola-synthetic',
+    })
+  })
+
+  it('prevents duplicate submits while a start is in flight', async () => {
+    // Make the POST hang so the button stays in its pending state.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        if (init?.method === 'POST') {
+          postedBodies.push(JSON.parse(String(init.body)))
+          await new Promise(() => {}) // never resolves
+        }
+        const payload = path.includes('/console/runs')
+          ? { items: [run], count: 1 }
+          : path.includes('/console/findings')
+            ? { items: [] }
+            : path.includes('/console/targets')
+              ? targets
+              : path.includes('/console/profiles')
+                ? profiles
+                : path.includes('/console/health')
+                  ? { control_plane: 'HEALTHY', lab: 'HEALTHY' }
+                  : { console_version: '1.0.0', operational_engines: ['AEGIS_NATIVE'] }
+        return { ok: true, json: async () => payload } as Response
+      }),
+    )
+    postedBodies = []
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getAllByText('New Assessment')[0]!)
+    await screen.findByText('Choose an authorized target')
+    fireEvent.click(screen.getByText('Synthetic Bank API'))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByText('Web & API Authorization'))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    const start = await screen.findByRole('button', { name: 'Start assessment' })
+    fireEvent.click(start)
+    const pending = await screen.findByRole('button', { name: 'Starting…' })
+    fireEvent.click(pending)
+    fireEvent.click(pending)
+    await waitFor(() => expect(postedBodies.length).toBe(1))
+  })
+})
+
+describe('Findings, run detail and honest states', () => {
+  it('renders a confirmed finding distinctly and never as raw markup', async () => {
     const { container } = render(<App />)
-    await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
-    fireEvent.click(screen.getByRole('button', { name: /Audit/ }))
-    expect(screen.getByText(hostile)).toBeInTheDocument()
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getByRole('button', { name: 'Findings' }))
+    expect(await screen.findByText('CONFIRMED FINDING')).toBeInTheDocument()
+    // Hostile finding title renders as inert text, not an <img>.
+    expect(screen.getAllByText(hostile).length).toBeGreaterThan(0)
     expect(container.querySelector('img')).toBeNull()
   })
 
-  it('shows disabled engine adapters with honest four-state readiness', async () => {
+  it('shows the stop control disabled with an honest reason on a completed run', async () => {
     render(<App />)
-    await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
-    fireEvent.click(screen.getByRole('button', { name: /Integrations/ }))
-    expect(await screen.findByText('Engine adapters')).toBeInTheDocument()
-    expect(screen.getAllByText('ENABLED')).toHaveLength(2)
-    expect(screen.getByText('DISABLED')).toBeInTheDocument()
-    expect(screen.getAllByText('Authorized').length).toBeGreaterThan(0)
-    expect(screen.getByText(/Future isolation boundary/)).toBeInTheDocument()
-    expect(screen.getByText('v3.11.1 · ffffffffffffffffffff…')).toBeInTheDocument()
-    expect(screen.getByText(/1 tool-reported · 1 verifier-confirmed/)).toBeInTheDocument()
-    expect(screen.getByText(/Nuclei does not directly confirm/)).toBeInTheDocument()
-  })
-
-  it('separates tool-reported from verifier-confirmed in the run replay lifecycle', async () => {
-    render(<App />)
-    await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
-    fireEvent.click(screen.getByRole('button', { name: /Runs/ }))
+    await screen.findByRole('heading', { name: 'Runs' })
     fireEvent.click(await screen.findByText(/scan-aaaaaaaaaaaa/))
-    expect(await screen.findByText('Tool-reported vs verifier-confirmed')).toBeInTheDocument()
-    expect(screen.getByText('Deterministic decisions')).toBeInTheDocument()
-    expect(screen.getAllByText('VERIFIER').length).toBeGreaterThan(0)
+    const stop = await screen.findByRole('button', { name: 'Stop assessment' })
+    expect(stop).toBeDisabled()
+    expect(screen.getByText(/Stop is unavailable/)).toBeInTheDocument()
   })
 
-  it('shows honest limitations in presentation mode', async () => {
+  it('shows cleanup as complete with no residual resources', async () => {
     render(<App />)
-    await screen.findByText('RESPONSIBILITY-AWARE WORKFLOW')
-    fireEvent.click(screen.getByRole('button', { name: 'Presentation mode' }))
-    expect(screen.getByText('Not production readiness')).toBeInTheDocument()
-    expect(screen.getByText('No broad vulnerability coverage')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByText('The system proves.')).toBeInTheDocument())
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(await screen.findByText(/scan-aaaaaaaaaaaa/))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Cleanup' }))
+    expect(await screen.findByText(/disposable containers or networks/)).toBeInTheDocument()
   })
 })
 
-describe('Operator Console — Phase 1.3 ZAP passive integration', () => {
-  const zapRun = { ...run, id: 'scan-zzzzzzzzzzzz', engine: 'ZAP', adapter_version: 'zap-adapter/1.3.0', target_name: 'Synthetic ZAP passive header scenario (vulnerable)', finding_count: 1, zap: { profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', profile_version: '1.3.0', engine_version: '2.17.0', image_index_digest: 'sha256:781a2bdaea47', projection_digest: 'd'.repeat(64), operation_count: 2, imported_urls: 2, expected_requests: 2, observed_requests: 2, blocked_requests: 0, passive_queue_drained: true, plan_validated: true, tool_reported_alerts: 1, correlated_alerts: 1, verifier_confirmed: 1, coverage_state: 'COMPLETE', exit_class: 'OK', error_code: null, rules: [{ plugin_id: 10021, name: 'X-Content-Type-Options Header Missing' }] } }
-  const zapEvent = { ...event, event_id: 'evt-000000000009', scan_id: zapRun.id, run_id: zapRun.id, actor_type: 'TOOL_RUNNER', event_type: 'ZAP_ALERT_REPORTED', stage: 'TOOL_FINDING', engine: 'ZAP', summary: 'ZAP reported an untrusted passive alert (TOOL_REPORTED only).' }
-  const alertCard = { artifact_type: 'ZAP_ALERT_CARD', artifact_id: `${zapRun.id}:zap-alert-0`, scan_id: zapRun.id, method: 'GET', normalized_route: '/lab/zap/vulnerable/catalog/synthetic-catalog-1', principal_profile_name: 'anonymous', object_reference: 'synthetic-zap-vulnerable', response_status: null, response_size: null, response_characteristics: { bounded: true, body_redacted: true }, timestamp: zapRun.completed_at, request_id: 'e'.repeat(24), evidence_hash: 'f'.repeat(64), control_probe_role: 'TOOL ALERT · UNTRUSTED', provenance: 'TOOL_REPORTED', plugin_id: 10021, rule_name: hostile, claimed_risk: 'high', claimed_confidence: 'medium' }
-  const probeCard = { ...alertCard, artifact_type: 'VERIFIER_PROBE_CARD', artifact_id: `${zapRun.id}:verify-header`, provenance: 'VERIFIER', control_probe_role: 'VERIFIER PROBE', response_status: 200, property_observed: 'HEADER_ABSENT', rule_name: undefined }
-  const zapEngine = { engine: 'ZAP', name: 'ZAP — lab passive OpenAPI (pinned, projected, read-only)', adapter_version: 'zap-adapter/1.3.0', configured: true, reachable: true, enabled: true, authorized: true, state: 'ENABLED', detail: 'Isolated runner attested', profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', environment: 'SYNTHETIC_LAB', isolation_boundary: 'isolated runner + scope guard', capabilities: [], kernel_version: 1, provenance: { pinned_engine_version: '2.17.0', pinned_image_index_digest: 'sha256:781a2bdaea47324e7bab583e2263f21d', add_on_inventory_digest: 'a'.repeat(64), attested_add_on_inventory_digest: 'a'.repeat(64), profile_id: 'ZAP_LAB_PASSIVE_OPENAPI_V1', profile_version: '1.3.0', approved_rule_count: 1, guard_version: 'zap-scope-guard/1.3.0', guard_reachable: true, last_health_check: zapRun.completed_at, latest_execution: { scan_id: zapRun.id, status: 'PASS', projection_digest: 'd'.repeat(64), operation_count: 2, imported_urls: 2, expected_requests: 2, observed_requests: 2, passive_queue_drained: true, tool_reported: 0, correlated: 0, verifier_confirmed: 0, coverage_state: 'COMPLETE' }, responsibility: 'ZAP passively analyzes responses from controller-approved read-only API operations. ZAP alerts are independently correlated and verified by Aegis.' } }
+describe('Credential safety', () => {
+  it('never renders a credential value present in run data', async () => {
+    // Even if a hostile backend leaked a secret into a field, the console must not display it.
+    const leaky = { ...run, scope: SECRET }
+    stubFetch({ runs: [leaky] })
+    const { container } = render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    expect(container.textContent).not.toContain(SECRET)
+  })
+})
 
-  const stub = () => vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
-    const path = String(input)
-    const payload = path.includes('/runs/') ? { run: zapRun, events: [zapEvent], evidence: [alertCard, probeCard], lifecycle: [], execution_policy: { engine: 'ZAP', adapter_version: 'zap-adapter/1.3.0', engine_kernel_version: 1, execution_policy_version: 1, jobs_created: [], jobs_rejected: [] } } : path.includes('/runs') ? { items: [zapRun] } : path.includes('/audit') ? { items: [zapEvent] } : path.includes('/findings') ? { items: [] } : path.includes('/engines') ? { items: [zapEngine] } : path.includes('/integrations') ? { items: [{ name: 'ZAP', engine: 'ZAP', state: 'CONNECTED' }] } : path.includes('/health') ? { checked_at: run.completed_at } : { enabled: false }
-    return { ok: true, json: async () => payload } as Response
-  }))
+describe('Company target onboarding', () => {
+  const companyTarget = {
+    ...targetDefaults,
+    target_ref: 'tgt-abc123def456',
+    target_type: 'WEBSITE' as const,
+    synthetic: false,
+    name: 'Company Marketing Site',
+    type: 'Website / FQDN',
+    environment: 'PRODUCTION',
+    description: '',
+    authorization_reference: 'CHG-1029',
+    authorized_scope: ['https://example.company.com'],
+    supported_profile_ids: ['NUCLEI_LAB_SAFE_HTTP_V1', 'ZAP_LAB_PASSIVE_OPENAPI_V1'],
+  }
 
-  it('shows ZAP pins, passive coverage and the responsibility boundary', async () => {
-    stub()
+  function stubOnboarding() {
+    postedBodies = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        if (init?.method === 'POST') {
+          postedBodies.push(JSON.parse(String(init.body)))
+          if (path.endsWith('/targets/preview')) {
+            return { ok: true, json: async () => ({
+              authorized_scope: ['https://example.company.com'],
+              origins: ['https://example.company.com'],
+              addresses: [], wildcard_subdomains: [],
+              allowed_path_prefixes: [], excluded_path_prefixes: [], openapi_url: null,
+            }) } as Response
+          }
+          return { ok: true, json: async () => companyTarget } as Response
+        }
+        const payload = path.includes('/console/runs')
+          ? { items: [run], count: 1 }
+          : path.includes('/console/findings')
+            ? { items: [] }
+            : path.includes('/console/targets')
+              ? targets
+              : path.includes('/console/profiles')
+                ? profiles
+                : path.includes('/console/health')
+                  ? { control_plane: 'HEALTHY', lab: 'HEALTHY' }
+                  : { console_version: '1.0.0', operational_engines: ['AEGIS_NATIVE'] }
+        return { ok: true, json: async () => payload } as Response
+      }),
+    )
+  }
+
+  it('offers Add authorized target on the target step and returns to the flow with it selected', async () => {
+    stubOnboarding()
     render(<App />)
-    expect(await screen.findByText('Passive analysis of approved read-only operations')).toBeInTheDocument()
-    expect(screen.getByText('COVERAGE COMPLETE')).toBeInTheDocument()
-    expect(screen.getByText('OPENAPI PROJECTION')).toBeInTheDocument()
-    expect(screen.getByText('PASSIVE SCAN')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Integrations/ }))
-    expect(await screen.findByText("ZAP 2.17.0 · sha256:781a2bdaea47324…")).toBeInTheDocument()
-    expect(screen.getByText('ZAP_LAB_PASSIVE_OPENAPI_V1 · v1.3.0')).toBeInTheDocument()
-    expect(screen.getByText(/2 observed \/ 2 expected · queue drained YES/)).toBeInTheDocument()
-    expect(screen.getAllByText(/ZAP alerts are independently correlated and verified by Aegis/).length).toBeGreaterThan(0)
-    expect(screen.queryByText(/active scan(ning)? (is )?enabled/i)).toBeNull()
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getAllByText('New Assessment')[0]!)
+    await screen.findByText('Choose an authorized target')
+
+    // The onboarding action is visible on the target step — not hidden in advanced settings.
+    fireEvent.click(screen.getByRole('button', { name: '+ Add authorized target' }))
+    await screen.findByRole('dialog', { name: 'Add authorized target' })
+
+    fireEvent.change(screen.getByPlaceholderText('Company Marketing Site'), {
+      target: { value: 'Company Marketing Site' },
+    })
+    fireEvent.change(screen.getByPlaceholderText('CHG-1029 / ticket ID'), {
+      target: { value: 'CHG-1029' },
+    })
+    fireEvent.change(screen.getByPlaceholderText(/example.company.com/), {
+      target: { value: 'example.company.com' },
+    })
+    fireEvent.click(screen.getByLabelText('I confirm that I am authorized to assess these targets'))
+
+    // Preview shows the controller-normalized scope before saving.
+    fireEvent.click(screen.getByRole('button', { name: 'Preview scope' }))
+    await screen.findByText('Normalized authorized scope')
+
+    // Add and continue persists via the typed endpoint and returns to the flow with it selected.
+    fireEvent.click(screen.getByRole('button', { name: 'Add and continue' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Add authorized target' })).toBeNull(),
+    )
+    expect(await screen.findByText('Company Marketing Site')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByText('Choose an assessment')
+
+    // The create posted a typed, bounded scope — an origin, never a scanner argument or secret.
+    const createBody = postedBodies.find((b) => b.display_name === 'Company Marketing Site')
+    expect(createBody).toMatchObject({
+      target_type: 'WEBSITE',
+      authorization_attested: true,
+      origins: ['example.company.com'],
+    })
+    expect(JSON.stringify(postedBodies)).not.toContain(SECRET)
   })
 
-  it('renders untrusted ZAP alert content as text, never markup', async () => {
-    stub()
-    const { container } = render(<App />)
-    await screen.findByText('Passive analysis of approved read-only operations')
-    fireEvent.click(screen.getByRole('button', { name: /Runs/ }))
-    fireEvent.click(await screen.findByText(/scan-zzzzzzzzzzzz/))
-    expect(await screen.findByText(`10021 · ${hostile}`)).toBeInTheDocument()
-    expect(screen.getByText('risk high · confidence medium')).toBeInTheDocument()
-    expect(screen.getByText('HEADER_ABSENT')).toBeInTheDocument()
-    expect(screen.getByText('ZAP_ALERT_CARD')).toBeInTheDocument()
-    expect(container.querySelector('img')).toBeNull()
+  it('makes the Targets page functional with add and company/synthetic distinction', async () => {
+    stubOnboarding()
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getByRole('button', { name: 'Targets' }))
+    await screen.findByRole('heading', { name: 'Targets' })
+    // The synthetic seed is labeled as such, and the add action is present.
+    expect(screen.getByText('Synthetic Bank API')).toBeInTheDocument()
+    expect(screen.getAllByText('Synthetic').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: '+ Add authorized target' })).toBeInTheDocument()
   })
 })

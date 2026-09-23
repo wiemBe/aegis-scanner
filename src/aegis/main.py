@@ -17,11 +17,24 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aegis import scm_verifier, zap_verifier
 from aegis.beast.contracts import BeastRunRequest, LeaseRequest
+from aegis.console_catalog import (
+    ProfileAvailability,
+    profile_directory,
+    target_directory,
+)
+from aegis.target_inventory import (
+    TargetCreate,
+    TargetInventoryStore,
+    TargetValidationError,
+    scope_preview,
+)
 from aegis.beast.controller import BeastController, BeastRejected
 from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
+from aegis.multi_agent.runtime import console_projection as multi_agent_projection
+from aegis.multi_agent.store import MultiAgentStore
 from aegis.operator import (
     ActorType,
     AuditEnvelope,
@@ -66,6 +79,10 @@ service = ScanService(settings, store, planner, safety)
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
 beast_store = BeastStore(settings.database_path)
+multi_agent_store = MultiAgentStore(settings.database_path)
+# Controller-owned operator target inventory (Phase 1.9.5). Persists onboarded company targets;
+# the browser never holds authority over scope.
+target_store = TargetInventoryStore(settings.database_path)
 beast = BeastController(settings, beast_store)
 # Phase 1.5. Constructing the controller is inert: it holds no lease and contacts nothing until an
 # operator completes the activation ceremony. When ZAP Active is enabled the lease-signing secret
@@ -107,6 +124,8 @@ streams = StreamConnections()
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     store.initialize()
     beast_store.initialize()
+    multi_agent_store.initialize()
+    target_store.initialize()
     yield
 
 
@@ -164,6 +183,17 @@ async def management_demo(request: Request) -> HTMLResponse:
             "model_name": settings.ai_model if planner.name != "DEMO_HEURISTIC" else "",
             "contract_version": PLANNER_CONTRACT_VERSION,
         },
+    )
+
+
+@app.get("/multi-agent", response_class=HTMLResponse)
+async def multi_agent_console(request: Request) -> HTMLResponse:
+    """Read-only Phase 1.7 console projection; execution remains controller/API owned."""
+
+    return templates.TemplateResponse(
+        request=request,
+        name="multi_agent.html",
+        context={},
     )
 
 
@@ -255,6 +285,26 @@ async def console_config() -> dict[str, object]:
         # carries only availability and never the activation ceremony or target details.
         "zap_active": {"enabled": zap_active.enabled},
     }
+
+
+@app.get("/api/console/multi-agent/runs")
+async def console_multi_agent_runs(
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, object]:
+    return {
+        "items": [multi_agent_projection(item) for item in multi_agent_store.list_recent(limit)],
+        "zap_active_agent_capability": "DISABLED",
+    }
+
+
+@app.get("/api/console/multi-agent/runs/{run_id}")
+async def console_multi_agent_run(run_id: str) -> dict[str, object]:
+    if not re.fullmatch(r"marun-[a-f0-9]{16}", run_id):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    item = multi_agent_store.get(run_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return multi_agent_projection(item)
 
 
 class EmergencyStopRequest(BaseModel):
@@ -864,6 +914,190 @@ async def console_engines() -> dict[str, object]:
         "items": engine_readiness(healths, extras),
         "kernel_version": ENGINE_KERNEL_VERSION,
         "operational_engines": operational,
+    }
+
+
+def _merged_target_directory() -> list[dict[str, object]]:
+    """Controller-seeded synthetic targets plus operator-onboarded company targets."""
+
+    return target_directory() + [record.projection() for record in target_store.list()]
+
+
+def _resolve_target(target_id: str) -> dict[str, object] | None:
+    return next(
+        (item for item in _merged_target_directory() if item["target_ref"] == target_id), None
+    )
+
+
+async def _profile_availability() -> dict[str, ProfileAvailability]:
+    """The single source of truth for whether each catalog profile can execute right now."""
+
+    if service.nuclei.enabled:
+        await service.nuclei.attest()
+    if service.zap.enabled:
+        await service.zap.attest()
+    nuclei_ok = service.nuclei.enabled and service.nuclei.health().authorized
+    zap_ok = service.zap.enabled and service.zap.health().authorized
+
+    def engine_reason(enabled: bool, authorized: bool, enable_flag: str) -> ProfileAvailability:
+        if not enabled:
+            return {
+                "available": False,
+                "reason": f"The {enable_flag} adapter is not enabled in this deployment.",
+            }
+        if not authorized:
+            return {
+                "available": False,
+                "reason": (
+                    f"The {enable_flag} runner has not returned an authorized attestation."
+                ),
+            }
+        return {"available": True, "reason": ""}
+
+    return {
+        "aegis-native-bola-synthetic": {"available": True, "reason": ""},
+        "NUCLEI_LAB_SAFE_HTTP_V1": engine_reason(service.nuclei.enabled, nuclei_ok, "Nuclei"),
+        "ZAP_LAB_PASSIVE_OPENAPI_V1": engine_reason(service.zap.enabled, zap_ok, "ZAP"),
+        "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1": (
+            {"available": True, "reason": ""}
+            if zap_active.enabled
+            else {
+                "available": False,
+                "reason": (
+                    "Requires the operator ZAP Active activation lease, which is not enabled in "
+                    "this deployment."
+                ),
+            }
+        ),
+    }
+
+
+@app.get("/api/console/targets")
+async def console_targets() -> dict[str, object]:
+    """Authorized target inventory for the New Assessment flow. Controller-owned; never built from
+    planner input. Credentials, management origins and answer keys are never projected. Operators
+    add company targets through POST /api/console/targets, not by editing files."""
+
+    return {
+        "items": _merged_target_directory(),
+        "environment": "SYNTHETIC_LAB / SYNTHETIC_RANGE / OPERATOR_ONBOARDED",
+        # Custom entry now happens through the typed onboarding endpoint, not free-text scan input.
+        "custom_target_entry": True,
+    }
+
+
+@app.post("/api/console/targets/preview")
+async def console_target_preview(request: TargetCreate) -> dict[str, object]:
+    """Dry-run normalization so the console can show the exact authorized scope before saving."""
+
+    try:
+        return scope_preview(request)
+    except TargetValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from None
+
+
+@app.post("/api/console/targets", status_code=201)
+async def console_create_target(request: TargetCreate) -> dict[str, object]:
+    """Persist a real controller-owned inventory record for an authorized operator target."""
+
+    try:
+        record = target_store.create(request, operator_id="local-operator")
+    except TargetValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from None
+    return record.projection()
+
+
+@app.get("/api/console/targets/{target_id}")
+async def console_get_target(target_id: str) -> dict[str, object]:
+    resolved = _resolve_target(target_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return resolved
+
+
+@app.put("/api/console/targets/{target_id}")
+async def console_update_target(target_id: str, request: TargetCreate) -> dict[str, object]:
+    if target_store.get(target_id) is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    try:
+        record = target_store.update_scope(target_id, request)
+    except TargetValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.code) from None
+    assert record is not None
+    return record.projection()
+
+
+@app.post("/api/console/targets/{target_id}/disable")
+async def console_disable_target(target_id: str) -> dict[str, object]:
+    record = target_store.set_enabled(target_id, False)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return record.projection()
+
+
+@app.post("/api/console/targets/{target_id}/enable")
+async def console_enable_target(target_id: str) -> dict[str, object]:
+    record = target_store.set_enabled(target_id, True)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return record.projection()
+
+
+class AssessmentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: str = Field(min_length=3, max_length=80)
+    profile_id: str = Field(min_length=3, max_length=100)
+
+
+@app.post("/api/console/assessments", status_code=202)
+async def console_create_assessment(
+    request: AssessmentCreate, background_tasks: BackgroundTasks
+) -> dict[str, object]:
+    """Typed assessment creation that references a stable inventory target id and enforces its
+    stored scope. Execution stays controller-side; a request for a disabled target, an unknown
+    target, or a profile the backend cannot execute for that target fails closed with an auditable
+    reason and never reaches an engine."""
+
+    target = _resolve_target(request.target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="TARGET_NOT_FOUND")
+    if not target.get("enabled", False) or target.get("status") == "DISABLED":
+        raise HTTPException(status_code=409, detail="TARGET_DISABLED")
+    if request.profile_id not in target.get("supported_profile_ids", []):
+        raise HTTPException(status_code=409, detail="PROFILE_INCOMPATIBLE_WITH_TARGET")
+    availability = await _profile_availability()
+    state = availability.get(request.profile_id, {"available": False, "reason": "UNKNOWN_PROFILE"})
+    if not state["available"]:
+        # The only executable path in this deployment is the synthetic-native combination; a company
+        # target's engine profiles are unavailable, so no real company scan is ever started here.
+        raise HTTPException(status_code=409, detail="PROFILE_UNAVAILABLE_FOR_DEPLOYMENT")
+
+    if request.target_id == "synthetic-bank-api" and request.profile_id == "aegis-native-bola-synthetic":
+        result = service.create(ScanCreate())
+        background_tasks.add_task(service.run, result.id)
+        return {
+            "run_id": result.id,
+            "target_id": request.target_id,
+            "profile_id": request.profile_id,
+            "status": result.status.value,
+        }
+    # A supported, available, but non-native combination (e.g. a range target with an enabled engine
+    # adapter). Not reachable in the default deployment; fail closed rather than guess an executor.
+    raise HTTPException(status_code=409, detail="NO_EXECUTOR_FOR_TARGET_PROFILE")
+
+
+@app.get("/api/console/profiles")
+async def console_profiles() -> dict[str, object]:
+    """Plain-language assessment profiles backed by the real enabled catalog profiles. A profile is
+    only advertised as available when the backing adapter can actually execute it; otherwise it is
+    returned unavailable with a precise operator-readable reason (never a clickable fake option)."""
+
+    return {
+        "items": profile_directory(await _profile_availability()),
+        "provenance_policy": (
+            "Profiles are backed by the controller-owned engine capability catalog. Engine and "
+            "tool results are unconfirmed until the independent Aegis verifier promotes them."
+        ),
     }
 
 

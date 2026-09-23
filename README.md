@@ -1,7 +1,57 @@
-# Aegis AI Security Lab — Phase 1.6 vulnerability catalog
+# Aegis AI Security Lab — Phase 1.7 multi-agent evaluation runtime
 
 A bounded, guardrailed security-testing demonstration for the included synthetic services.
 **Not production-ready. No external or production targets are authorized.**
+
+Phase 1.7 adds an incremental, controlled
+[multi-agent evaluation runtime](docs/phase-1.7-multi-agent-runtime.md) over the existing range,
+provider gateway, tool controls, verifier, SQLite audit storage and Operator Console. The initial
+vertical slice implements Lead Orchestrator, Surface Agent and Authorization Agent roles for the
+`aegis-bank` BOLA scenario. Agent communication is strict and typed; targets, credentials and
+resources remain controller-owned references; global/per-agent budgets are atomic; replayed,
+stale, spoofed and unauthorized actions fail closed; and only the independent range verifier can
+confirm or PASS a run. Vulnerable and patched offline synthetic acceptance passes for both the
+single-agent baseline and multi-agent path with equal budget limits and seven target requests each.
+The baseline uses one structured model call and the multi-agent path four. These measurements use
+an offline structured fixture, not a live model, and do not establish a multi-agent improvement.
+The read-only view is at `/multi-agent`. Phase 1.7-B adds a bounded, **offline-accepted** Injection
+and Chain slice: controller-owned reflected-XSS and boolean-SQL-injection detection probes (the model
+selects a registered payload class and never authors payloads), and a `DELEGATION_WORKFLOW_CHAIN` that
+delegates recon → injection → independent verification. That chain is a workflow delegation, **not**
+a multi-primitive attack chain, and it does **not** complete any Phase 1.6 range attack chain. The
+independent range verifier remains the sole PASS/CONFIRMED authority. Live-provider execution of the
+1.7-B gates is **not yet available**: the gateway serves only the 1.7-A task types, so the 1.7-B
+matrix is proven offline only.
+
+Phase 1.7-C upgrades the recon role into a **controlled Recon Agent** (offline-accepted) with four
+registered capabilities: `aegis.recon.network_service_discovery` (a typed `NmapScanPlan` rendered to
+a shell-free argv; full-port/UDP/OS-detection/NSE are capability- and **scope-gated**, not
+prohibited), `aegis.recon.nuclei_reviewed_exposure` and `aegis.recon.zap_passive_openapi` (which
+**reuse** the pinned Phase 1.2 Nuclei and Phase 1.3 passive-ZAP controllers — alerts stay unconfirmed
+candidates), and the existing `aegis.surface.openapi`. The model only selects registered capabilities
+and approved profiles; source spoofing, decoy/fragmentation evasion, and credentialed brute-force are
+**`UNSUPPORTED_IN_PHASE_1_7C_RECON`** (representable but rejected pre-execution, zero traffic; reserved
+for future dedicated Adversary-Simulation / Authentication-Testing capabilities, not architecturally
+prohibited). Recon produces typed, bounded observations only — it never confirms, PASSes, or sets
+severity. The Nmap capability has a **real containerized acceptance** (CONTAINERIZED PASS: Bank/Shop
+service discovery executed in an isolated, egress-blocked, non-root worker, with negative controls
+verified experimentally); the Nuclei/ZAP passive runners are reused from Phase 1.2/1.3 and not
+re-executed in that harness. See
+[docs/phase-1.7-controlled-recon.md](docs/phase-1.7-controlled-recon.md). ZAP Active and Beast Mode
+remain excluded and are not agent capabilities.
+
+**Phase 1.7-A live-provider smoke: NO-GO (2026-09-23).** The exact four-case matrix was started
+against the configured DeepSeek OpenAI-compatible gateway and synthetic Bank range. Case 1
+(`single-agent / vulnerable`) failed closed on its first and only provider call with
+`PROVIDER_MODEL_MISMATCH`: the provider-reported model identity did not equal the requested
+`deepseek-chat` binding. Per the stop rule, cases 2–4 were not attempted and no retry or model-name
+relaxation was used. One documented-surface target request occurred; no hypothesis, broker action,
+verifier result or finding was produced. Cleanup and final range health passed, the isolated stack
+was removed, structural secret scans were clean, and all 1,034 offline tests remain green. Provider
+token usage and the required gateway request projection were unavailable after the rejected
+provider envelope, so their gates also fail. Evidence is under
+`artifacts/phase-1.7a-live-20260922T210938Z/`. This does not change the offline initial-slice GO and
+does not support a Phase 1.7 completion or multi-agent-superiority claim.
 
 Phase 1.6 now includes the completed
 [Aegis Vulnerable Application Range catalog](docs/phase-1.6-aegis-vulnerable-application-range.md):
@@ -38,8 +88,8 @@ endpoint; no test-environment, staging or production readiness, broad active sca
 coverage, authenticated scanning, arbitrary rules, AI-selected attacks or browser execution is
 claimed. Phase 1.3 passive ZAP is untouched and retains its GO.
 
-Phase 1.5 remains preserved. ZAP Active has not been run against the range (its Phase 1.6
-integration is separate, unimplemented work).
+Phase 1.5 remains preserved. ZAP Active has not been run against the range and remains isolated
+from Phase 1.7 agent execution.
 
 ## Phase 1.4 baseline
 

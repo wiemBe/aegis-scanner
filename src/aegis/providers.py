@@ -44,6 +44,8 @@ from aegis.models import (
     ProviderUsage,
     SelectionCandidateView,
 )
+from aegis.multi_agent.contracts import AgentRole
+from aegis.multi_agent.model import OfflineBankModel
 from aegis.planner import (
     ENUMERATION_SYSTEM_PROMPT,
     SELECTION_SYSTEM_PROMPT,
@@ -115,6 +117,49 @@ _TOOL_CALL_TYPES = frozenset(
 )
 
 
+# Compact, role/task-specific directives. Each is one short clause so the outbound system contract
+# stays small (fewer input tokens, less pressure on the completion budget) without weakening the
+# server-selected output schema, which remains the sole authority on shape. The safety envelope
+# below (reference-only, no URL/credential/verdict) is kept verbatim across every task.
+_AGENT_TASK_DIRECTIVE: dict[str, str] = {
+    "PLAN_SURFACE": "select the next bounded surface task",
+    "OBSERVE_SURFACE": "report documented operations and resource references",
+    "PLAN_AUTHORIZATION": "select the next bounded authorization task",
+    "TEST_AUTHORIZATION": "select one BOLA comparison over credential aliases",
+    "SINGLE_AGENT_BOLA": "select one bounded BOLA comparison over aliases",
+    "PLAN_RECON": (
+        "select one registered recon capability and emit exactly its required plan fields: for "
+        "aegis.recon.network_service_discovery emit both profile_id and a typed nmap_plan; for the "
+        "nuclei or zap passive capabilities emit only scanner_profile_id; for the surface "
+        "capability emit none of these plan fields"
+    ),
+    "INTERPRET_RECON_OBSERVATIONS": "summarise the normalised observations without confirming",
+    "DELEGATE_RECON_HYPOTHESIS": "route a reference-only hypothesis to a registered agent",
+    "PLAN_CLOUD_BOUNDARY": (
+        "select one registered cloud-boundary capability, a typed boundary_class hypothesis and a "
+        "symbolic probe destination reference; emit no URL, credential, header or raw body"
+    ),
+    "INTERPRET_CLOUD_BOUNDARY_OBSERVATIONS": (
+        "summarise the normalised cloud-boundary observations without confirming a violation"
+    ),
+    "SUBMIT_CLOUD_BOUNDARY_FOR_VERIFICATION": (
+        "recommend the observations be submitted to the independent deterministic verifier; never "
+        "confirm, PASS or set severity yourself"
+    ),
+}
+
+
+def agent_system_prompt(role: AgentRole, task_type: str) -> str:
+    directive = _AGENT_TASK_DIRECTIVE.get(task_type, "produce the required bounded output")
+    return (
+        f"You are the Aegis {role.value}; {directive}. "
+        "Return only one JSON object for the provided schema: no markdown, no commentary, no "
+        "reasoning outside the object. Use only supplied target, operation, credential-alias and "
+        "resource references. Never emit a URL, credential, raw request, finding verdict, "
+        "severity, cleanup result, answer key or budget decision."
+    )
+
+
 @dataclass(frozen=True)
 class ProviderResult:
     model: str
@@ -154,6 +199,14 @@ class BeastProviderResult:
     metadata: ProviderRunMetadata
 
 
+@dataclass(frozen=True)
+class AgentProviderResult:
+    model: str
+    payload_json: str
+    usage: ProviderUsage
+    metadata: ProviderRunMetadata
+
+
 class PlannerProvider(ABC):
     """Typed provider contract the gateway depends on. No provider specifics leak past this."""
 
@@ -182,6 +235,16 @@ class PlannerProvider(ABC):
         validated: list[SelectionCandidateView],
     ) -> SelectionResult:
         """Contract V3 stage 3: select over the controller's validated candidates only."""
+
+    @abstractmethod
+    async def generate_agent(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> AgentProviderResult: ...
 
 
 def _duration_ms(value: Any) -> int | None:
@@ -416,6 +479,24 @@ class OllamaProvider(_HttpModelProvider):
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
+    async def generate_agent(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> AgentProviderResult:
+        await self._load_metadata()
+        prompt = agent_system_prompt(role, task_type)
+        try:
+            content, data = await self._chat(prompt, context, schema, max_output_tokens)
+            return AgentProviderResult(self.model, content, self._usage(data), self._metadata(data))
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
     async def enumerate_candidates(
         self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
     ) -> CandidateResult:
@@ -561,8 +642,7 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
         return (
             system_prompt
             + "\nReturn only a single JSON object that validates against this JSON Schema "
-            "(no markdown, no commentary, no extra keys):\n"
-            + json.dumps(schema, ensure_ascii=True)
+            "(no markdown, no commentary, no extra keys):\n" + json.dumps(schema, ensure_ascii=True)
         )
 
     def _response_format(self, schema: dict[str, Any]) -> dict[str, Any]:
@@ -610,12 +690,33 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             headers=headers,
         )
         data = json.loads(raw)
-        if data.get("model") and data["model"] != self.model:
-            raise PlannerFailure("PROVIDER_MODEL_MISMATCH")
+        reported_model = data.get("model")
+        if not isinstance(reported_model, str) or not reported_model:
+            raise PlannerFailure("PROVIDER_MODEL_IDENTITY_MISSING")
+        if reported_model != self.model:
+            raise PlannerFailure("PROVIDER_MODEL_MISMATCH", provider_reported_model=reported_model)
         choice = data["choices"][0]
         finish = choice.get("finish_reason")
         if finish not in (None, "stop"):
-            raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}")
+            # A non-stop finish (e.g. 'length') fails closed. Before raising we capture bounded,
+            # non-secret diagnostics so the operator can tell a truncation apart from a refusal:
+            # the finish reason, provider usage, the *length* of the visible content, and whether a
+            # reasoning field was present (a boolean plus its length). The raw content and the raw
+            # reasoning_content text are never captured, returned or logged.
+            message_obj = choice.get("message") or {}
+            content_field = message_obj.get("content")
+            reasoning_field = message_obj.get("reasoning_content")
+            raise PlannerFailure(
+                f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}",
+                # reported_model was already validated equal to self.model above; retain it so an
+                # identity check can run before structured-output validation is even attempted.
+                provider_reported_model=reported_model,
+                finish_reason=str(finish),
+                provider_usage=self._safe_usage_counts(data.get("usage") or {}),
+                content_length=len(content_field) if isinstance(content_field, str) else 0,
+                reasoning_present=isinstance(reasoning_field, str) and bool(reasoning_field),
+                reasoning_length=len(reasoning_field) if isinstance(reasoning_field, str) else 0,
+            )
         # Use ONLY the structured content field. Any provider reasoning field (e.g. DeepSeek's
         # 'reasoning_content') is deliberately never read, persisted, returned or logged.
         message = choice["message"].get("content")
@@ -634,6 +735,31 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             stop_reason=finish,
         )
         return message, usage, metadata
+
+    @staticmethod
+    def _safe_usage_counts(usage: dict[str, Any]) -> dict[str, int] | None:
+        """Best-effort, non-raising usage extraction for the fail-closed diagnostic path.
+
+        Unlike :meth:`_usage`, this never raises: on a truncation we want to record whatever the
+        provider reported without turning a missing/odd usage block into a second failure. Only
+        non-negative integer counts are kept; anything absent is simply omitted so the caller can
+        treat missing usage as UNKNOWN rather than as a ceiling breach.
+        """
+        counts: dict[str, int] = {}
+        for key, field in (
+            ("input_tokens", "prompt_tokens"),
+            ("output_tokens", "completion_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = usage.get(field)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counts[key] = value
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict):
+            reasoning = details.get("reasoning_tokens")
+            if isinstance(reasoning, int) and not isinstance(reasoning, bool) and reasoning >= 0:
+                counts["reasoning_tokens"] = reasoning
+        return counts or None
 
     def _usage(self, usage: dict[str, Any]) -> ProviderUsage:
         prompt = usage.get("prompt_tokens") or 0
@@ -660,6 +786,28 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             )
             decision = state_adapter(permitted).validate_json(content)
             return ProviderResult(self.model, decision, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+
+    async def generate_agent(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> AgentProviderResult:
+        try:
+            content, usage, metadata = await self._chat(
+                agent_system_prompt(role, task_type),
+                context,
+                schema,
+                max_output_tokens,
+                self._headers(),
+            )
+            return AgentProviderResult(self.model, content, usage, metadata)
         except PlannerFailure:
             raise
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -1031,6 +1179,34 @@ class OpenAIResponsesProvider(_HttpModelProvider):
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}", digest) from None
 
+    async def generate_agent(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> AgentProviderResult:
+        digest: str | None = None
+        try:
+            result, usage, digest = await self._structured_call(
+                agent_system_prompt(role, task_type), context, max_output_tokens, schema
+            )
+            metadata = ProviderRunMetadata(
+                provider_type=self.provider_type,
+                runtime=self.provider_type,
+                model=self.model,
+                prompt_eval_count=usage.input_tokens,
+                eval_count=usage.output_tokens,
+                stop_reason=result.get("status"),
+            )
+            return AgentProviderResult(self.model, self._output_text(result), usage, metadata)
+        except PlannerFailure as exc:
+            exc.response_digest = digest
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}", digest) from None
+
     async def enumerate_candidates(
         self, context: dict[str, Any], max_output_tokens: int, max_candidates: int
     ) -> CandidateResult:
@@ -1123,6 +1299,28 @@ class DemoHeuristicProvider(PlannerProvider):
             decision,
             ProviderUsage(input_tokens=0, output_tokens=0, total_tokens=0),
             metadata,
+        )
+
+    async def generate_agent(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> AgentProviderResult:
+        del max_output_tokens
+        result = await OfflineBankModel().generate(role, task_type, context, schema)
+        usage = ProviderUsage(
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            total_tokens=result.usage.input_tokens + result.usage.output_tokens,
+        )
+        return AgentProviderResult(
+            self.model,
+            result.payload_json,
+            usage,
+            ProviderRunMetadata(provider_type=self.provider_type, runtime="demo", model=self.model),
         )
 
     async def enumerate_candidates(

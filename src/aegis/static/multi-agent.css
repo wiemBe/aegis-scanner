@@ -1,0 +1,16 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+body { margin: 0; background: #081018; color: #e7eef5; }
+header, main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
+header { padding: 48px 0 24px; }
+h1 { margin: 4px 0 8px; font-size: clamp(2rem, 5vw, 3.6rem); }
+.eyebrow { color: #70d6b3; font-size: .78rem; font-weight: 800; letter-spacing: .16em; }
+.statusbar { display: flex; justify-content: space-between; gap: 20px; padding: 14px 0; border-top: 1px solid #263746; }
+.disabled { color: #ffcc73; }
+#runs { display: grid; gap: 16px; padding: 16px 0 56px; }
+.run { padding: 20px; background: #101c27; border: 1px solid #263746; border-radius: 10px; }
+.run h2 { margin: 0 0 12px; font-size: 1.05rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.metric { padding: 10px; background: #0a141d; border-radius: 6px; }
+.metric span { display: block; color: #91a5b7; font-size: .72rem; text-transform: uppercase; }
+.metric strong { display: block; margin-top: 5px; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .statusbar { flex-direction: column; } }

@@ -1,652 +1,771 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { ZapActiveView } from './ZapActive'
-import { useZapActive } from './useZapActive'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type {
+  AssessmentProfile,
+  ConsoleConfig,
+  Finding,
+  Health,
+  Run,
+  RunDetail,
+  TargetEntry,
+} from './api'
+import { consoleApi } from './api'
+import { Empty, HealthDot, Kv, Loading, Pill, RunStatePill } from './components'
+import { findingStateView, short, when } from './format'
+import { AddTarget } from './AddTarget'
+import { NewAssessment } from './NewAssessment'
+import { RunDetailView } from './RunDetail'
 
-type View = 'Mission Control' | 'Runs' | 'Findings' | 'ZAP Active' | 'Audit' | 'Evidence' | 'Integrations' | 'System Health'
-type StreamState = 'CONNECTING' | 'LIVE' | 'STALE' | 'GAP'
+type Route =
+  | { name: 'home' }
+  | { name: 'new' }
+  | { name: 'runs' }
+  | { name: 'run'; id: string; tab?: 'Report' }
+  | { name: 'findings' }
+  | { name: 'targets' }
+  | { name: 'reports' }
+  | { name: 'audit' }
+  | { name: 'debug' }
 
-type Run = {
-  id: string
-  status: string
-  target_name: string
-  scope: string
-  planner: string
-  mode: string
-  model: string | null
-  model_digest: string | null
-  variant: string
-  scenario: string
-  created_at: string
-  completed_at: string | null
-  planner_contract_version: number
-  execution_policy_version: number
-  usage: { requests: number; model_calls: number; reserved_tokens: number; reported_tokens: number }
-  budgets: { target_requests: number; model_calls: number; token_reservations: number }
-  candidate_counts: { generated: number; validated: number; rejected: number }
-  safety_rejections: number
-  finding_count: number
-  finding_ids: string[]
-  retest_of: string | null
-  linked_retests: string[]
-  verification: string | null
-  terminal_reason: string | null
-  scope_badges: string[]
-  engine?: string
-  adapter_version?: string | null
-  engine_kernel_version?: number | null
-  lifecycle_counts?: Record<string, number>
-  engine_job_rejections?: number
-  tool_reported_count?: number
-  verifier_confirmed_count?: number
-  zap?: ZapSummary | null
-}
+const DEV = import.meta.env.DEV
 
-type ZapSummary = {
-  profile_id?: string
-  profile_version?: string
-  engine_version?: string | null
-  image_index_digest?: string | null
-  add_on_inventory_digest?: string | null
-  projection_digest?: string | null
-  operation_count?: number | null
-  imported_urls?: number | null
-  expected_requests?: number | null
-  observed_requests?: number | null
-  blocked_requests?: number | null
-  passive_queue_drained?: boolean
-  plan_validated?: boolean
-  tool_reported_alerts?: number
-  correlated_alerts?: number
-  verifier_confirmed?: number
-  coverage_state?: string
-  exit_class?: string | null
-  error_code?: string | null
-  session_destroyed?: boolean
-  rules?: { plugin_id?: number; name?: string }[]
-}
-
-type EngineReadiness = {
-  engine: string
-  name: string
-  adapter_version: string | null
-  configured: boolean
-  reachable: boolean | null
-  enabled: boolean
-  authorized: boolean
-  state: string
-  detail: string
-  profile_id: string | null
-  environment: string | null
-  isolation_boundary: string
-  capabilities: Record<string, unknown>[]
-  kernel_version: number
-  provenance?: {
-    pinned_engine_version?: string
-    pinned_binary_sha256?: Record<string, string>
-    attested_engine_version?: string | null
-    attested_binary_sha256?: string | null
-    template_set_id?: string
-    manifest_version?: string
-    manifest_digest?: string
-    attested_manifest_digest?: string | null
-    admitted_template_count?: number
-    upstream_templates?: string
-    signature_probe?: string | null
-    pinned_image_index_digest?: string
-    attested_arch?: string | null
-    add_on_inventory_digest?: string
-    attested_add_on_inventory_digest?: string | null
-    profile_id?: string
-    profile_version?: string | null
-    approved_rule_count?: number
-    guard_version?: string | null
-    guard_reachable?: boolean
-    last_health_check?: string | null
-    latest_execution?: {
-      scan_id?: string
-      status?: string
-      terminal_reason?: string | null
-      http_connections?: number | null
-      request_budget?: number | null
-      matched?: number | null
-      records?: number | null
-      lifecycle_states?: string[]
-      tool_reported?: number
-      correlated?: number
-      verifier_confirmed?: number
-      projection_digest?: string | null
-      operation_count?: number | null
-      imported_urls?: number | null
-      expected_requests?: number | null
-      observed_requests?: number | null
-      passive_queue_drained?: boolean | null
-      coverage_state?: string
-      completed_at?: string | null
-    } | null
-    responsibility?: string
-  } | null
-}
-
-type LifecycleCard = {
-  normalized_id: string
-  engine: string
-  adapter_version: string | null
-  capability_id: string
-  lifecycle_state: string
-  ai_hypothesis: string
-  controller_authorization: string
-  engine_reported: string
-  aegis_finding_id: string | null
-  severity: string | null
-  confidence: string | null
-  provenance: string
-  verifier_status: string | null
-}
-
-type ExecutionPolicy = {
-  engine: string
-  adapter_version: string | null
-  engine_kernel_version: number | null
-  execution_policy_version: number
-  jobs_created: { engine: string; job_id: string; execution_id: string; status: string; observation_count: number; reported_finding_count: number }[]
-  jobs_rejected: { engine: string; code: string; detail: string }[]
-}
-
-type EventRecord = {
-  event_id: string
-  sequence: number
-  timestamp: string
-  run_id: string
-  scan_id: string
-  finding_id: string | null
-  retest_scan_id: string | null
-  parent_event_id: string | null
-  child_event_ids: string[]
-  actor_type: 'OPERATOR' | 'AI_PLANNER' | 'CONTROLLER' | 'TOOL_RUNNER' | 'VERIFIER' | 'SYSTEM'
-  event_type: string
-  stage: string
-  status: string
-  engine: string
-  summary: string
-  evidence_refs: Record<string, unknown>[]
-  redaction_status: string
-  metadata: Record<string, unknown>
-  integrity: { algorithm: string; digest: string }
-}
-
-type Evidence = {
-  artifact_type: 'API_EVIDENCE_CARD' | 'NUCLEI_EXECUTION_CARD' | 'VERIFIER_PROBE_CARD' | 'ZAP_EXECUTION_CARD' | 'ZAP_ALERT_CARD'
-  artifact_id: string
-  scan_id: string
-  method: string
-  normalized_route: string
-  principal_profile_name: string
-  object_reference: string
-  response_status: number | null
-  response_size: number | null
-  response_characteristics: { bounded: boolean; body_redacted: boolean }
-  timestamp: string
-  request_id: string
-  evidence_hash: string
-  control_probe_role: string
-  provenance?: string
-  plugin_id?: number
-  rule_name?: string
-  claimed_risk?: string
-  claimed_confidence?: string
-  property_observed?: string
-  coverage_state?: string
-  observed_requests?: number | null
-  expected_requests?: number | null
-}
-
-type Finding = {
-  id: string
-  severity: string
-  confidence: string
-  status: string
-  vulnerability_class: string
-  owasp_mapping: string
-  source_engine: string
-  affected_operation: string
-  principal_object_direction: string
-  discovery_scan: string
-  linked_retest: string | null
-  evidence_completeness: string
-  created_at: string
-  updated_at: string
-  title: string
-  provenance: string
-  ai_hypothesis: string
-  controller_execution: string
-  deterministic_evidence: string
-  verifier_conclusion: string
-  patched_retest: string
-  final_state: string
-}
-
-type Integration = { name: string; engine: string; state: string; model?: string | null; digest?: string | null; provider?: string | null }
-
-type BeastConfig = {
-  enabled: boolean
-  mode: string
-  available_mode: string | null
-  profile_id: string
-  required_model: string
-  synthetic_lab_only: boolean
-  target_refs: string[]
-  technical_subtitle: string
-  boundary_description: string
-}
-
-type BeastPreflight = {
-  profile_id: string
-  target: {
-    target_ref: string; name: string; origin: string; base_path: string; environment: string
-    owner: string; approval_reference: string; allowed_methods: string[]; allowed_path_prefix: string
-    reset_strategy: string; synthetic_credential_profiles: string[]; expected_impact: string
-    prohibited_operations: string[]; max_blast_radius: string
+function parseHash(): Route {
+  const hash = window.location.hash.replace(/^#\/?/, '')
+  const [head, param] = hash.split('/')
+  switch (head) {
+    case 'new':
+      return { name: 'new' }
+    case 'runs':
+      return param ? { name: 'run', id: param } : { name: 'runs' }
+    case 'findings':
+      return { name: 'findings' }
+    case 'targets':
+      return { name: 'targets' }
+    case 'reports':
+      return { name: 'reports' }
+    case 'audit':
+      return { name: 'audit' }
+    case 'debug':
+      return DEV ? { name: 'debug' } : { name: 'home' }
+    default:
+      return { name: 'home' }
   }
-  enabled_capabilities: string[]
-  enabled_engines: string[]
-  resources: Record<string, number>
-  automatic_expiry_seconds: number
-  emergency_stop: string
-  technical_subtitle: string
-  boundary_description: string
 }
 
-type BeastRun = {
-  run_id: string; lease_id: string; target_ref: string; scenario_id: string; state: string
-  model: string; profile_id: string; created_at: string; lease_expires_at: string | null; started_at: string | null
-  completed_at: string | null; resources: Record<string, number>
-  commands: { command_id: string; command_text: string; expected_intent: string; hypothesis_reference: string; sequence: number }[]
-  results: { command_id: string; exit_code: number | null; duration_ms: number; stdout: string; stderr: string; resource_usage: Record<string, number>; network_destinations: string[]; artifact_references: string[] }[]
-  observations: { observation_id: string; summary: string; facts: Record<string, unknown> }[]
-  model_calls: Record<string, unknown>[]; verifier_conclusion: Record<string, unknown> | null
-  stop_reason: string | null; workspace_destroyed: boolean; cleanup_verified: boolean
-  emergency_stopped: boolean
+const go = (path: string) => {
+  window.location.hash = path
 }
 
-type BeastEvent = { event_id: string; event_type: string; actor_type: string; timestamp: string; details: Record<string, unknown>; digest: string }
+const PRIMARY_NAV: { label: string; path: string; match: Route['name'][] }[] = [
+  { label: 'New Assessment', path: '#/new', match: ['new'] },
+  { label: 'Runs', path: '#/', match: ['home', 'runs', 'run'] },
+  { label: 'Findings', path: '#/findings', match: ['findings'] },
+  { label: 'Targets', path: '#/targets', match: ['targets'] },
+  { label: 'Reports', path: '#/reports', match: ['reports'] },
+]
+const SECONDARY_NAV: { label: string; path: string; match: Route['name'][] }[] = [
+  { label: 'Audit Log', path: '#/audit', match: ['audit'] },
+]
 
-const NAV: View[] = ['Mission Control', 'Runs', 'Findings', 'ZAP Active', 'Audit', 'Evidence', 'Integrations', 'System Health']
-const WORKFLOW = ['PREFLIGHT', 'AI_HYPOTHESIS', 'CANDIDATE_VALIDATION', 'QUEUE_ADMISSION', 'REQUEST_COMPILATION', 'SAFETY_AUTHORIZATION', 'EXECUTION', 'VERIFICATION', 'FINDING', 'LINKED_RETEST', 'COMPLETE']
-const ZAP_WORKFLOW = ['PREFLIGHT', 'OPENAPI_PROJECTION', 'ENGINE_JOB', 'RUNNER_ATTESTATION', 'PLAN_VALIDATION', 'OPENAPI_IMPORT', 'PASSIVE_SCAN', 'EXECUTION', 'TOOL_FINDING', 'CORRELATION', 'VERIFICATION', 'COMPLETE']
-const ZAP_RESPONSIBILITY = 'ZAP passively analyzes responses from controller-approved read-only API operations. ZAP alerts are independently correlated and verified by Aegis.'
-const yesNo = (value: boolean | null | undefined) => value === undefined || value === null ? '—' : value ? 'YES' : 'NO'
-
-const api = async <T,>(path: string): Promise<T> => {
-  const response = await fetch(path, { headers: { Accept: 'application/json' } })
-  if (!response.ok) throw new Error(`Request failed (${response.status})`)
-  return response.json() as Promise<T>
-}
-
-const apiPost = async <T,>(path: string, body: Record<string, unknown>): Promise<T> => {
-  const csrf = sessionStorage.getItem('aegis-zap-active-csrf')
-  const response = await fetch(path, {
-    method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}) }, body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({})) as { detail?: string }
-    throw new Error(problem.detail ?? `Request failed (${response.status})`)
-  }
-  return response.json() as Promise<T>
-}
-
-const auditHistory = async (): Promise<EventRecord[]> => {
-  const hydrated: EventRecord[] = []
-  let cursor = 0
-  for (let page = 0; page < 5; page += 1) {
-    const result = await api<{ items: EventRecord[]; next_cursor: number | null }>(
-      `/api/console/audit?limit=100&cursor=${cursor}`,
-    )
-    hydrated.push(...result.items)
-    if (typeof result.next_cursor !== 'number' || result.next_cursor <= cursor) break
-    cursor = result.next_cursor
-  }
-  return hydrated
-}
-
-const short = (value: string | null | undefined, size = 16) => value ? (value.length > size ? `${value.slice(0, size)}…` : value) : '—'
-const when = (value: string | null | undefined) => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)) : '—'
-const elapsed = (run?: Run) => {
-  if (!run) return '—'
-  const end = run.completed_at ? new Date(run.completed_at).getTime() : Date.now()
-  const seconds = Math.max(0, Math.round((end - new Date(run.created_at).getTime()) / 1000))
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-}
-
-function Badge({ children, tone = 'neutral' }: { children: ReactNode; tone?: string }) {
-  return <span className={`badge ${tone}`}>{children}</span>
-}
-
-function ScopeBadges() {
-  return <div className="scope-badges" aria-label="Permanent scope labels">
-    {['SYNTHETIC LAB', 'LOCAL LLM', 'READ-ONLY', 'AUTHORIZED TARGET'].map((label) => <Badge key={label} tone="scope">{label}</Badge>)}
-  </div>
-}
-
-function Meter({ value, maximum, label }: { value: number; maximum: number; label: string }) {
-  const percent = Math.min(100, Math.round((value / Math.max(maximum, 1)) * 100))
-  return <div className="meter"><div className="meter-copy"><span>{label}</span><strong>{value.toLocaleString()} / {maximum.toLocaleString()}</strong></div><div className="meter-track"><i style={{ width: `${percent}%` }} /></div></div>
-}
-
-function Empty({ title, copy }: { title: string; copy: string }) {
-  return <div className="empty-state"><div className="empty-mark">A</div><h3>{title}</h3><p>{copy}</p></div>
-}
-
-function Loading() { return <div className="loading"><i /><span>Loading verified local records…</span></div> }
-
-function MissionControl({ run, events, onOpenRun, streamState }: { run?: Run; events: EventRecord[]; onOpenRun: (id: string) => void; streamState: StreamState }) {
-  if (!run) return <Empty title="No scan records yet" copy="Start an authorized synthetic scan from the engineering dashboard. Mission Control will hydrate its persisted audit trail here." />
-  const runEvents = events.filter((item) => item.scan_id === run.id)
-  const latest = runEvents.at(-1)
-  const currentStage = latest?.stage ?? (run.completed_at ? 'COMPLETE' : 'PREFLIGHT')
-  const workflow = run.engine === 'ZAP' ? ZAP_WORKFLOW : WORKFLOW
-  return <div className="view-stack">
-    <section className="mission-head panel">
-      <div><p className="eyebrow">LIVE OPERATIONAL OVERVIEW</p><h2>{run.target_name}</h2><p className="muted mono">{run.id}</p></div>
-      <div className="mission-status"><Badge tone={run.status === 'FAIL' ? 'danger' : run.status === 'PASS' ? 'good' : 'blue'}>{run.status}</Badge><Badge tone={streamState === 'LIVE' ? 'good' : 'warning'}>{streamState}</Badge><button className="secondary" onClick={() => onOpenRun(run.id)}>Open replay</button></div>
-    </section>
-    <section className="stat-grid">
-      <div className="stat panel"><span>CURRENT STAGE</span><strong>{currentStage.replaceAll('_', ' ')}</strong><small>Sequence {latest?.sequence ?? '—'}</small></div>
-      <div className="stat panel"><span>MODEL / PROVIDER</span><strong>{run.model ?? run.planner}</strong><small>{run.mode}</small></div>
-      <div className="stat panel"><span>ENGINE / ADAPTER</span><strong>{run.engine ?? 'AEGIS_NATIVE'}</strong><small>{run.adapter_version ?? 'aegis-native'} · policy v{run.execution_policy_version}</small></div>
-      <div className="stat panel"><span>ELAPSED</span><strong>{elapsed(run)}</strong><small>Started {when(run.created_at)}</small></div>
-    </section>
-    <section className="panel workflow-panel">
-      <div className="section-head"><div><p className="eyebrow">RESPONSIBILITY-AWARE WORKFLOW</p><h3>Live control path</h3></div><span className="muted">Planner contract v{run.planner_contract_version} · policy v{run.execution_policy_version}</span></div>
-      <div className="workflow">
-        {workflow.map((stage, index) => {
-          const reached = runEvents.some((item) => item.stage === stage) || index <= workflow.indexOf(currentStage)
-          const active = stage === currentStage
-          const actor = stage === 'AI_HYPOTHESIS' ? 'ai' : stage === 'VERIFICATION' || stage === 'FINDING' ? 'verifier' : stage === 'SAFETY_AUTHORIZATION' ? 'safety' : 'controller'
-          return <div className={`workflow-step ${reached ? 'reached' : ''} ${active ? 'active' : ''} ${actor}`} key={stage}><i>{String(index + 1).padStart(2, '0')}</i><span>{stage.replaceAll('_', ' ')}</span></div>
-        })}
-      </div>
-      <div className="actor-legend"><span className="ai-dot">AI proposed</span><span className="controller-dot">Controller decided / sent</span><span className="verifier-dot">Verifier proved</span><span className="operator-dot">Operator initiated</span><span className="safety-dot">Safety decision</span></div>
-    </section>
-    <div className="two-col">
-      <section className="panel"><div className="section-head"><h3>Bounded resources</h3><Badge tone="scope">FAIL CLOSED</Badge></div>
-        <Meter label="Target requests" value={run.usage.requests} maximum={run.budgets.target_requests} />
-        <Meter label="Model calls" value={run.usage.model_calls} maximum={run.budgets.model_calls} />
-        <Meter label="Token reservations" value={run.usage.reserved_tokens} maximum={run.budgets.token_reservations} />
-      </section>
-      <section className="panel"><div className="section-head"><h3>Run outcomes</h3><Badge tone={run.finding_count ? 'danger' : 'neutral'}>{run.finding_count} findings</Badge></div>
-        <dl className="metrics"><div><dt>Generated candidates</dt><dd>{run.candidate_counts.generated}</dd></div><div><dt>Validated candidates</dt><dd>{run.candidate_counts.validated}</dd></div><div><dt>Tool-reported (untrusted)</dt><dd>{run.tool_reported_count ?? 0}</dd></div><div><dt>Verifier-confirmed</dt><dd>{run.verifier_confirmed_count ?? 0}</dd></div><div><dt>Safety rejections</dt><dd>{run.safety_rejections}</dd></div><div><dt>Linked retest</dt><dd>{run.linked_retests.length ? 'AVAILABLE' : run.retest_of ? 'THIS RUN' : 'NONE'}</dd></div></dl>
-      </section>
-    </div>
-    {run.zap && <ZapCoverage zap={run.zap} />}
-    <section className="panel event-slice"><div className="section-head"><h3>Latest structured events</h3><button className="text-button" onClick={() => onOpenRun(run.id)}>Full chronological replay →</button></div>{runEvents.slice(-5).reverse().map((event) => <EventRow key={event.event_id} event={event} />)}</section>
-  </div>
-}
-
-function ZapCoverage({ zap }: { zap: ZapSummary }) {
-  return <section className="panel zap-coverage"><div className="section-head"><div><p className="eyebrow">ZAP PASSIVE COVERAGE · CONTROLLER-PROJECTED OPENAPI</p><h3>Passive analysis of approved read-only operations</h3></div><Badge tone={zap.coverage_state === 'COMPLETE' ? 'good' : 'warning'}>{zap.coverage_state === 'COMPLETE' ? 'COVERAGE COMPLETE' : 'COVERAGE INCOMPLETE'}</Badge></div>
-    <dl className="metrics zap-metrics"><div><dt>Projected operations</dt><dd>{zap.operation_count ?? '—'}</dd></div><div><dt>Imported messages</dt><dd>{zap.imported_urls ?? '—'}</dd></div><div><dt>Target requests (observed / expected)</dt><dd>{zap.observed_requests ?? '—'} / {zap.expected_requests ?? '—'}</dd></div><div><dt>Passive queue drained</dt><dd>{yesNo(zap.passive_queue_drained)}</dd></div><div><dt>Tool-reported alerts (untrusted)</dt><dd>{zap.tool_reported_alerts ?? 0}</dd></div><div><dt>Correlated alerts</dt><dd>{zap.correlated_alerts ?? 0}</dd></div><div><dt>Verifier-owned conclusions</dt><dd>{zap.verifier_confirmed ?? 0}</dd></div><div><dt>Blocked by scope guard</dt><dd>{zap.blocked_requests ?? '—'}</dd></div></dl>
-    <dl className="detail-list compact"><div><dt>Engine</dt><dd className="mono">ZAP {zap.engine_version ?? '—'} · {short(zap.image_index_digest, 22)}</dd></div><div><dt>Projection</dt><dd className="mono">{short(zap.projection_digest, 22)}</dd></div><div><dt>Passive rules</dt><dd>{(zap.rules ?? []).map((rule) => `${rule.plugin_id ?? '—'} ${rule.name ?? ''}`).join(', ') || '—'}</dd></div><div><dt>Exit</dt><dd>{zap.exit_class ?? '—'}{zap.error_code ? ` · ${zap.error_code}` : ''}</dd></div></dl>
-    <p className="responsibility-note">{ZAP_RESPONSIBILITY}</p>
-  </section>
-}
-
-function EventRow({ event, onClick }: { event: EventRecord; onClick?: () => void }) {
-  return <button className="event-row" onClick={onClick} disabled={!onClick}>
-    <time>{new Date(event.timestamp).toLocaleTimeString()}</time><Badge tone={event.actor_type.toLowerCase()}>{event.actor_type}</Badge><span className="event-stage">{event.stage.replaceAll('_', ' ')}</span><span className="event-summary">{event.summary}</span><Badge tone={event.status === 'FAILED' || event.status === 'REJECTED' ? 'warning' : 'neutral'}>{event.status}</Badge><span className="mono event-id">{short(event.scan_id, 12)}</span>
-  </button>
-}
-
-function RunList({ runs, onOpen }: { runs: Run[]; onOpen: (id: string) => void }) {
-  if (!runs.length) return <Empty title="No historical runs" copy="Completed and active scans will appear here in stable creation order." />
-  return <section className="panel table-panel"><div className="section-head"><div><p className="eyebrow">HISTORICAL INDEX</p><h2>Runs</h2></div><span className="muted">{runs.length} local records</span></div><div className="table-scroll"><table><thead><tr><th>Run</th><th>Status</th><th>Profile</th><th>Engine</th><th>Model</th><th>Requests</th><th>Candidates</th><th>Findings</th><th>Retest</th><th>Started</th></tr></thead><tbody>{runs.map((run) => <tr key={run.id} onClick={() => onOpen(run.id)} tabIndex={0}><td className="mono">{short(run.id, 19)}</td><td><Badge tone={run.status === 'FAIL' ? 'danger' : run.status === 'PASS' ? 'good' : 'blue'}>{run.status}</Badge></td><td>{run.variant.toUpperCase()}</td><td className="mono">{run.engine ?? 'AEGIS_NATIVE'}</td><td>{run.model ?? run.planner}</td><td>{run.usage.requests}/{run.budgets.target_requests}</td><td>{run.candidate_counts.validated}/{run.candidate_counts.generated}</td><td>{run.finding_count}</td><td>{run.retest_of ? 'RETEST' : run.linked_retests.length ? 'LINKED' : '—'}</td><td>{when(run.created_at)}</td></tr>)}</tbody></table></div></section>
-}
-
-function LifecyclePanel({ lifecycle, policy }: { lifecycle?: LifecycleCard[]; policy?: ExecutionPolicy }) {
-  const stages = ['TOOL_REPORTED', 'AEGIS_CORRELATED', 'VERIFIED', 'REVIEW_REQUIRED', 'REJECTED']
-  return <div className="two-col">
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">FINDING LIFECYCLE</p><h3>Tool-reported vs verifier-confirmed</h3></div><Badge tone="scope">ENGINE ≠ VERIFIER</Badge></div>
-      {lifecycle && lifecycle.length ? lifecycle.map((item) => <article className={`lifecycle-card ${item.lifecycle_state.toLowerCase()}`} key={item.normalized_id}>
-        <div className="lifecycle-track">{stages.map((stage) => { const reached = stages.indexOf(stage) <= stages.indexOf(item.lifecycle_state) && item.lifecycle_state !== 'REJECTED'; const isState = stage === item.lifecycle_state; return <span key={stage} className={`lifecycle-step ${isState ? 'active' : ''} ${reached ? 'reached' : ''}`}>{stage.replaceAll('_', ' ')}</span> })}</div>
-        <dl className="detail-list compact"><div><dt>Engine (untrusted)</dt><dd>{item.engine_reported}</dd></div><div><dt>AI hypothesis</dt><dd>{item.ai_hypothesis}</dd></div><div><dt>Controller authorized</dt><dd className="mono">{item.controller_authorization}</dd></div><div><dt>Provenance</dt><dd><Badge tone={item.provenance === 'VERIFIER' ? 'good' : 'warning'}>{item.provenance}</Badge></dd></div><div><dt>Aegis finding</dt><dd className="mono">{item.aegis_finding_id ?? 'Not promoted'}</dd></div></dl>
-      </article>) : <Empty title="No engine-reported findings" copy="This run produced no untrusted engine observation to correlate." />}
-    </section>
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">EXECUTION POLICY</p><h3>Deterministic decisions</h3></div><Badge tone="scope">{policy ? `KERNEL v${policy.engine_kernel_version ?? '—'}` : 'KERNEL'}</Badge></div>
-      <dl className="detail-list"><div><dt>Engine</dt><dd>{policy?.engine ?? '—'}</dd></div><div><dt>Adapter</dt><dd className="mono">{policy?.adapter_version ?? '—'}</dd></div><div><dt>Jobs constructed</dt><dd>{policy?.jobs_created.length ?? 0}</dd></div><div><dt>Jobs rejected (zero traffic)</dt><dd>{policy?.jobs_rejected.length ?? 0}</dd></div></dl>
-      {policy?.jobs_created.map((job) => <div className="policy-row" key={job.job_id}><Badge tone="controller">{job.status}</Badge><span className="mono">{short(job.job_id, 16)}</span><small>{job.observation_count} obs · {job.reported_finding_count} reported</small></div>)}
-      {policy?.jobs_rejected.map((job, index) => <div className="policy-row rejected" key={index}><Badge tone="warning">{job.code}</Badge><span>{job.engine}</span><small>{job.detail}</small></div>)}
-    </section>
-  </div>
-}
-
-function RunReplay({ detail, onBack }: { detail: { run: Run; events: EventRecord[]; evidence: Evidence[]; lifecycle?: LifecycleCard[]; execution_policy?: ExecutionPolicy }; onBack: () => void }) {
-  const [index, setIndex] = useState(Math.max(0, detail.events.length - 1))
-  const [following, setFollowing] = useState(false)
-  const event = detail.events[index]
-  const linkedEvidence = detail.evidence.filter((item) => event?.evidence_refs.some((ref) => ref.evidence_id === item.artifact_id) || event?.event_type === 'OBSERVATION')
-  const jump = (types: string[]) => { const found = detail.events.findIndex((item) => types.includes(item.event_type)); if (found >= 0) setIndex(found) }
-  return <div className="view-stack replay"><section className="replay-bar panel"><button className="text-button" onClick={onBack}>← Runs</button><div><h2>Chronological replay</h2><p className="mono muted">{detail.run.id}</p></div><div className="replay-controls"><button aria-label="Previous event" onClick={() => setIndex((value) => Math.max(0, value - 1))}>←</button><span>{index + 1} / {detail.events.length}</span><button aria-label="Next event" onClick={() => setIndex((value) => Math.min(detail.events.length - 1, value + 1))}>→</button><button className="secondary" onClick={() => setFollowing(!following)}>{following ? 'Pause live following' : 'Resume live following'}</button></div></section>
-    {detail.run.engine === 'ZAP' ? <section className="jump-bar panel"><span>Jump to</span><button onClick={() => jump(['ZAP_PROJECTION_CREATED', 'ZAP_PROJECTION_REJECTED'])}>Projection</button><button onClick={() => jump(['ZAP_OPENAPI_IMPORT_COMPLETED'])}>Import</button><button onClick={() => jump(['ZAP_PASSIVE_SCAN_DRAINED'])}>Passive queue</button><button onClick={() => jump(['ZAP_ALERT_REPORTED'])}>Tool alert</button><button onClick={() => jump(['ZAP_VERIFICATION_COMPLETED'])}>Verification</button></section> : <section className="jump-bar panel"><span>Jump to</span><button onClick={() => jump(['CANDIDATE_GENERATED'])}>Candidate</button><button onClick={() => jump(['REQUEST_STARTED'])}>Request</button><button onClick={() => jump(['VERIFIER_RESULT'])}>Finding</button><button onClick={() => jump(['RETEST_PLAN'])}>Retest</button></section>}
-    <div className="replay-grid"><section className="panel timeline-panel"><div className="section-head"><h3>Actor-separated timeline</h3><Badge tone={following ? 'good' : 'neutral'}>{following ? 'FOLLOWING' : 'PAUSED'}</Badge></div><div className="vertical-timeline">{detail.events.map((item, itemIndex) => <button key={item.event_id} className={`timeline-node ${item.actor_type.toLowerCase()} ${itemIndex === index ? 'selected' : ''}`} onClick={() => setIndex(itemIndex)}><i /><div><span>{item.stage.replaceAll('_', ' ')}</span><strong>{item.summary}</strong><small>{item.actor_type} · {new Date(item.timestamp).toLocaleTimeString()} · {item.event_id}</small></div></button>)}</div></section>
-      <aside className="panel evidence-viewport"><div className="section-head"><h3>Evidence viewport</h3><Badge tone="scope">REDACTED</Badge></div>{event ? <><p className="eyebrow">SELECTED EVENT</p><h4>{event.event_type.replaceAll('_', ' ')}</h4><p>{event.summary}</p><dl className="detail-list"><div><dt>Actor</dt><dd>{event.actor_type}</dd></div><div><dt>Engine</dt><dd>{event.engine}</dd></div><div><dt>Status</dt><dd>{event.status}</dd></div><div><dt>Integrity</dt><dd className="mono">SHA-256 · {short(event.integrity.digest, 20)}</dd></div></dl>{(linkedEvidence.length ? linkedEvidence : detail.evidence.slice(0, 3)).map((card) => <EvidenceCard key={card.artifact_id} card={card} />)}</> : <Empty title="No event selected" copy="Choose an event from the replay." />}</aside></div>
-    <LifecyclePanel lifecycle={detail.lifecycle} policy={detail.execution_policy} />
-    {detail.run.zap && <ZapCoverage zap={detail.run.zap} />}
-    {detail.run.engine === 'ZAP' ? <section className="panel comparison"><div><p className="eyebrow">DISCOVERY</p><h3>Vulnerable</h3><strong>NO NOSNIFF</strong><small>Catalog route JSON without X-Content-Type-Options · verifier-confirmed</small></div><span>→</span><div><p className="eyebrow">LINKED RETEST</p><h3>Patched</h3><strong className="good-text">NOSNIFF</strong><small>Complete passive coverage · independent verifier PASS</small></div></section> : <section className="panel comparison"><div><p className="eyebrow">DISCOVERY</p><h3>Vulnerable</h3><strong>200 / 200 / 200</strong><small>Owner control · alternate-owner control · cross-owner probe</small></div><span>→</span><div><p className="eyebrow">LINKED RETEST</p><h3>Patched</h3><strong className="good-text">200 / 200 / 403</strong><small>Same controller-constructed access direction · remediation PASS</small></div></section>}
-  </div>
-}
-
-function EvidenceCard({ card }: { card: Evidence }) {
-  const untrusted = card.provenance === 'TOOL_REPORTED'
-  const status = card.response_status ?? (untrusted ? 'TOOL' : 'ERR')
-  return <article className="evidence-card"><div className="evidence-title"><Badge tone={untrusted ? 'warning' : card.provenance === 'VERIFIER' ? 'good' : 'blue'}>{card.artifact_type}</Badge><span>{card.control_probe_role}</span></div><div className="request-line"><b>{card.method}</b><code>{card.normalized_route}</code><strong className={card.response_status === 403 ? 'good-text' : ''}>{status}</strong></div><dl className="detail-list compact"><div><dt>Principal</dt><dd>{card.principal_profile_name}</dd></div><div><dt>Object</dt><dd>{card.object_reference}</dd></div>{card.artifact_type === 'ZAP_ALERT_CARD' && <><div><dt>Passive rule</dt><dd>{card.plugin_id ?? '—'} · {card.rule_name ?? '—'}</dd></div><div><dt>ZAP claim (untrusted)</dt><dd>risk {card.claimed_risk ?? '—'} · confidence {card.claimed_confidence ?? '—'}</dd></div></>}{card.artifact_type === 'ZAP_EXECUTION_CARD' && <div><dt>Coverage</dt><dd>{card.coverage_state ?? '—'} · {card.observed_requests ?? '—'}/{card.expected_requests ?? '—'} requests</dd></div>}{card.property_observed && <div><dt>Property observed</dt><dd>{card.property_observed}</dd></div>}<div><dt>Request</dt><dd className="mono">{short(card.request_id, 20)}</dd></div><div><dt>Evidence hash</dt><dd className="mono">{short(card.evidence_hash, 18)}</dd></div></dl><p className="redaction-note">Response body, credentials, cookies, and sensitive values omitted.{untrusted ? ' Tool output is untrusted until the independent verifier concludes.' : ''}</p></article>
-}
-
-function FindingsView({ findings, selected, setSelected }: { findings: Finding[]; selected?: Finding; setSelected: (finding?: Finding) => void }) {
-  if (selected) return <FindingDetail finding={selected} onBack={() => setSelected(undefined)} />
-  if (!findings.length) return <Empty title="No verifier-confirmed findings" copy="Hypotheses and incomplete evidence never appear as confirmed findings." />
-  return <section className="panel table-panel"><div className="section-head"><div><p className="eyebrow">VERIFIER-OWNED RECORDS</p><h2>Findings</h2></div><Badge tone="scope">AEGIS NATIVE</Badge></div><div className="table-scroll"><table><thead><tr><th>Severity</th><th>Finding</th><th>Confidence</th><th>Status</th><th>OWASP</th><th>Operation</th><th>Direction</th><th>Evidence</th><th>Retest</th></tr></thead><tbody>{findings.map((finding) => <tr key={finding.id} onClick={() => setSelected(finding)} tabIndex={0}><td><Badge tone="danger">{finding.severity}</Badge></td><td><strong>{finding.title}</strong><small className="mono block">{short(finding.id, 22)}</small></td><td>{finding.confidence}</td><td><Badge tone={finding.status === 'REMEDIATED' ? 'good' : 'danger'}>{finding.status}</Badge></td><td>{finding.owasp_mapping}</td><td className="mono">{finding.affected_operation}</td><td>{finding.principal_object_direction}</td><td>{finding.evidence_completeness}</td><td className="mono">{short(finding.linked_retest, 14)}</td></tr>)}</tbody></table></div></section>
-}
-
-function FindingDetail({ finding, onBack }: { finding: Finding; onBack: () => void }) {
-  const steps = [['AI hypothesis', finding.ai_hypothesis, 'ai'], ['Controller execution', finding.controller_execution, 'controller'], ['Deterministic evidence', finding.deterministic_evidence, 'controller'], ['Verifier conclusion', finding.verifier_conclusion, 'verifier'], ['Patched retest', finding.patched_retest, 'controller'], ['Final state', finding.final_state, 'verifier']]
-  return <div className="view-stack"><section className="panel finding-head"><button className="text-button" onClick={onBack}>← Findings</button><div><div className="badge-line"><Badge tone="danger">{finding.severity}</Badge><Badge tone="good">{finding.confidence}</Badge><Badge tone="scope">{finding.source_engine}</Badge></div><h2>{finding.title}</h2><p className="mono muted">{finding.id}</p></div><Badge tone={finding.status === 'REMEDIATED' ? 'good' : 'danger'}>{finding.status}</Badge></section><div className="two-col"><section className="panel"><h3>Technical record</h3><dl className="detail-list"><div><dt>Class</dt><dd>{finding.vulnerability_class}</dd></div><div><dt>OWASP</dt><dd>{finding.owasp_mapping}</dd></div><div><dt>Operation</dt><dd className="mono">{finding.affected_operation}</dd></div><div><dt>Direction</dt><dd>{finding.principal_object_direction}</dd></div><div><dt>Discovery scan</dt><dd className="mono">{finding.discovery_scan}</dd></div><div><dt>Linked retest</dt><dd className="mono">{finding.linked_retest ?? 'Not available'}</dd></div></dl></section><section className="panel comparison compact-comparison"><div><span>VULNERABLE</span><strong>200 / 200 / 200</strong></div><span>→</span><div><span>PATCHED</span><strong className="good-text">200 / 200 / 403</strong></div></section></div><section className="panel"><div className="section-head"><h3>Responsibility chain</h3><span className="muted">Finding provenance: {finding.provenance}</span></div><div className="provenance-chain">{steps.map(([title, copy, tone], index) => <div className={`provenance-step ${tone}`} key={title}><i>{index + 1}</i><div><strong>{title}</strong><p>{copy}</p></div></div>)}</div></section></div>
-}
-
-function AuditView({ events }: { events: EventRecord[] }) {
-  const [filters, setFilters] = useState({ q: '', actor: '', stage: '', status: '', engine: '', event: '' })
-  const [selected, setSelected] = useState<EventRecord>()
-  const filtered = events.filter((event) => {
-    const haystack = `${event.summary} ${event.scan_id} ${event.finding_id ?? ''} ${event.event_type}`.toLowerCase()
-    return (!filters.q || haystack.includes(filters.q.toLowerCase())) && (!filters.actor || event.actor_type === filters.actor) && (!filters.stage || event.stage === filters.stage) && (!filters.status || event.status === filters.status) && (!filters.engine || event.engine === filters.engine) && (!filters.event || event.event_type === filters.event)
-  })
-  const update = (key: keyof typeof filters, value: string) => setFilters((current) => ({ ...current, [key]: value }))
-  return <div className="view-stack"><section className="panel filter-panel"><div className="section-head"><div><p className="eyebrow">SEARCHABLE STRUCTURED RECORD</p><h2>Audit Explorer</h2></div><Badge tone="scope">CHECKSUMMED · REDACTED</Badge></div><div className="filters"><label className="search-field"><span>Search IDs or summaries</span><input value={filters.q} onChange={(e) => update('q', e.target.value)} placeholder="scan, finding, event…" /></label>{(['actor', 'stage', 'status', 'engine', 'event'] as const).map((key) => <label key={key}><span>{key === 'event' ? 'Event type' : key}</span><select value={filters[key]} onChange={(e) => update(key, e.target.value)}><option value="">All</option>{Array.from(new Set(events.map((item) => key === 'actor' ? item.actor_type : key === 'event' ? item.event_type : item[key]))).sort().map((value) => <option key={value}>{value}</option>)}</select></label>)}</div></section><section className="panel audit-list"><div className="audit-header"><span>Time</span><span>Actor</span><span>Stage</span><span>Summary</span><span>Status</span><span>Entity</span></div>{filtered.length ? filtered.slice().reverse().map((event) => <EventRow key={event.event_id} event={event} onClick={() => setSelected(event)} />) : <Empty title="No matching events" copy="Adjust the filters to expand the structured audit record." />}</section>{selected && <EventDrawer event={selected} onClose={() => setSelected(undefined)} />}</div>
-}
-
-function EventDrawer({ event, onClose }: { event: EventRecord; onClose: () => void }) {
-  return <div className="drawer-scrim" onClick={onClose}><aside className="drawer" onClick={(e) => e.stopPropagation()} aria-label="Audit event detail"><div className="drawer-head"><div><p className="eyebrow">STRUCTURED EVENT</p><h2>{event.event_type.replaceAll('_', ' ')}</h2></div><button aria-label="Close detail" onClick={onClose}>×</button></div><div className="badge-line"><Badge tone={event.actor_type.toLowerCase()}>{event.actor_type}</Badge><Badge>{event.stage}</Badge><Badge>{event.status}</Badge></div><p className="drawer-summary">{event.summary}</p><dl className="detail-list"><div><dt>Event ID</dt><dd className="mono">{event.event_id}</dd></div><div><dt>Sequence</dt><dd>{event.sequence}</dd></div><div><dt>Timestamp</dt><dd>{when(event.timestamp)}</dd></div><div><dt>Scan</dt><dd className="mono">{event.scan_id}</dd></div><div><dt>Finding</dt><dd className="mono">{event.finding_id ?? '—'}</dd></div><div><dt>Retest</dt><dd className="mono">{event.retest_scan_id ?? '—'}</dd></div><div><dt>Parent event</dt><dd className="mono">{event.parent_event_id ?? '—'}</dd></div><div><dt>Child events</dt><dd className="mono">{event.child_event_ids?.join(', ') || '—'}</dd></div><div><dt>Engine</dt><dd>{event.engine}</dd></div><div><dt>Redaction</dt><dd>{event.redaction_status}</dd></div></dl><h3>Redacted metadata</h3><pre>{JSON.stringify(event.metadata, null, 2)}</pre><h3>Evidence references</h3><pre>{JSON.stringify(event.evidence_refs, null, 2)}</pre><h3>Integrity</h3><p className="mono digest">{event.integrity.algorithm} · {event.integrity.digest}</p></aside></div>
-}
-
-function EvidenceView({ evidence, screenshotPolicy }: { evidence: Evidence[]; screenshotPolicy: Record<string, unknown> | null }) {
-  return <div className="view-stack"><section className="panel"><div className="section-head"><div><p className="eyebrow">APPROVED REDACTED FIELDS ONLY</p><h2>Evidence</h2></div><Badge tone="scope">NO RAW RESPONSES</Badge></div>{evidence.length ? <div className="evidence-grid">{evidence.map((card) => <EvidenceCard key={card.artifact_id} card={card} />)}</div> : <Empty title="No API evidence cards loaded" copy="Select or execute a run with fresh deterministic evidence." />}</section><section className="panel screenshot-fixture"><div><Badge tone="warning">BROWSER_SCREENSHOT · FIXTURE · NOT SCAN EVIDENCE</Badge><h3>Browser capture interface inactive</h3><p>No approved browser runner is connected. Screenshots are disabled by default, restricted to synthetic allowlisted origins, redacted before persistence, quota-bound, and never sent to the LLM by default.</p></div><dl className="detail-list"><div><dt>Capture runner</dt><dd>INACTIVE</dd></div><div><dt>Storage</dt><dd>LOCAL / PROJECT-SCOPED</dd></div><div><dt>Enabled</dt><dd>NO</dd></div><div><dt>Policy loaded</dt><dd>{screenshotPolicy ? 'YES' : 'UNAVAILABLE'}</dd></div></dl></section></div>
-}
-
-function ReadyDot({ label, value }: { label: string; value: boolean | null }) {
-  const state = value === null ? 'unknown' : value ? 'ok' : 'bad'
-  const text = value === null ? 'N/A' : value ? 'YES' : 'NO'
-  return <div className={`ready-state ${state}`}><i /><span>{label}</span><strong>{text}</strong></div>
-}
-
-function IntegrationsView({ integrations, engines }: { integrations: Integration[]; engines: EngineReadiness[] }) {
-  return <div className="view-stack">
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">ENGINE REGISTRY</p><h2>Integrations</h2></div><span className="muted">Aegis Native, the bounded Nuclei profile and the passive ZAP profile are operational in Phase 1.3</span></div><div className="integration-grid">{integrations.map((item) => <article className={`integration-card ${item.state.toLowerCase()}`} key={item.name}><div className="integration-mark">{item.name.slice(0, 1)}</div><div><h3>{item.name}</h3><p>{item.engine}</p>{item.model && <p className="mono">{item.model} · {short(item.digest, 14)}</p>}</div><Badge tone={item.state === 'CONNECTED' ? 'good' : item.state.startsWith('PLANNED') ? 'neutral' : 'warning'}>{item.state.replaceAll('_', ' ')}</Badge></article>)}</div></section>
-    <section className="panel"><div className="section-head"><div><p className="eyebrow">INTEGRATION READINESS · SECURITY-TOOL KERNEL</p><h2>Engine adapters</h2></div><Badge tone="scope">CONFIGURED ≠ ENABLED ≠ REACHABLE ≠ AUTHORIZED</Badge></div><div className="engine-grid">{engines.map((engine) => {
-      const provenance = engine.engine === 'NUCLEI' ? engine.provenance : null
-      const zapProvenance = engine.engine === 'ZAP' && engine.enabled ? engine.provenance : null
-      const zapLatest = zapProvenance?.latest_execution
-      const latest = provenance?.latest_execution
-      return <article className={`engine-card ${engine.enabled ? 'enabled' : 'disabled'}`} key={engine.engine}><div className="engine-head"><div><h3>{engine.name}</h3><p className="mono">{engine.engine} · {engine.adapter_version ?? '—'}</p></div><Badge tone={engine.enabled ? 'good' : 'neutral'}>{engine.state}</Badge></div><div className="ready-grid"><ReadyDot label="Configured" value={engine.configured} /><ReadyDot label="Reachable" value={engine.reachable} /><ReadyDot label="Enabled" value={engine.enabled} /><ReadyDot label="Authorized" value={engine.authorized} /></div><p className="engine-detail">{engine.detail}</p>{provenance && <div className="nuclei-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">{provenance.pinned_engine_version ?? '—'} · {short(provenance.attested_binary_sha256, 20)}</dd></div><div><dt>Template manifest</dt><dd className="mono">{provenance.manifest_version ?? '—'} · {short(provenance.manifest_digest, 20)}</dd></div><div><dt>Admitted templates</dt><dd>{provenance.admitted_template_count ?? 0} · signature {provenance.signature_probe ?? '—'}</dd></div><div><dt>Last health check</dt><dd>{when(provenance.last_health_check)}</dd></div><div><dt>Latest execution</dt><dd>{latest ? <><span className="mono">{short(latest.scan_id, 18)}</span> · {latest.status} · {latest.http_connections ?? 0}/{latest.request_budget ?? 0} requests · {latest.records ?? 0} results</> : 'No execution recorded'}</dd></div><div><dt>Finding authority</dt><dd>{latest ? `${latest.tool_reported ?? 0} tool-reported · ${latest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div></dl><p className="responsibility-note">{provenance.responsibility}</p></div>}{zapProvenance && <div className="nuclei-provenance zap-provenance"><dl className="detail-list compact"><div><dt>Engine pin</dt><dd className="mono">ZAP {zapProvenance.pinned_engine_version ?? '—'} · {short(zapProvenance.pinned_image_index_digest, 22)}</dd></div><div><dt>Add-on inventory</dt><dd className="mono">{short(zapProvenance.add_on_inventory_digest, 22)}{zapProvenance.attested_add_on_inventory_digest ? ' · attested' : ''}</dd></div><div><dt>Passive profile</dt><dd>{zapProvenance.profile_id ?? '—'} · v{zapProvenance.profile_version ?? '—'}</dd></div><div><dt>Approved passive rules</dt><dd>{zapProvenance.approved_rule_count ?? 0}</dd></div><div><dt>Scope guard</dt><dd>{zapProvenance.guard_version ?? '—'} · {zapProvenance.guard_reachable ? 'reachable' : 'not attested'}</dd></div><div><dt>Last health check</dt><dd>{when(zapProvenance.last_health_check)}</dd></div><div><dt>Latest projection</dt><dd>{zapLatest ? <><span className="mono">{short(zapLatest.projection_digest, 18)}</span> · {zapLatest.operation_count ?? 0} operations · {zapLatest.imported_urls ?? 0} imported</> : 'No execution recorded'}</dd></div><div><dt>Target requests</dt><dd>{zapLatest ? `${zapLatest.observed_requests ?? 0} observed / ${zapLatest.expected_requests ?? 0} expected · queue drained ${yesNo(zapLatest.passive_queue_drained)}` : '—'}</dd></div><div><dt>Finding authority</dt><dd>{zapLatest ? `${zapLatest.tool_reported ?? 0} tool-reported · ${zapLatest.correlated ?? 0} correlated · ${zapLatest.verifier_confirmed ?? 0} verifier-confirmed` : 'No finding lifecycle recorded'}</dd></div><div><dt>Coverage</dt><dd>{zapLatest?.coverage_state ?? '—'}</dd></div></dl><p className="responsibility-note">{zapProvenance.responsibility ?? ZAP_RESPONSIBILITY}</p></div>}{!engine.enabled && <p className="isolation-note"><b>Future isolation boundary:</b> {engine.isolation_boundary}</p>}</article>
-    })}</div></section>
-  </div>
-}
-
-function HealthView({ health }: { health: Record<string, unknown> | null }) {
-  if (!health) return <Empty title="Health checks unavailable" copy="The console could not load current subsystem checks." />
-  const checks = [['Control plane', health.control_plane], ['Gateway', health.gateway], ['Ollama', health.ollama], ['Synthetic lab', health.lab], ['Dashboard / API', health.dashboard_api], ['Database', health.database], ['Network isolation', health.network_isolation], ['Topology test', health.last_topology_test], ['Secret scan', health.last_secret_scan]]
-  return <div className="view-stack"><section className="panel"><div className="section-head"><div><p className="eyebrow">ACTUAL RUNTIME CHECKS</p><h2>System Health</h2></div><span className="muted">Checked {when(String(health.checked_at))}</span></div><div className="health-grid">{checks.map(([label, value]) => { const text = String(value ?? 'UNKNOWN'); const okay = text === 'HEALTHY'; return <div className="health-card" key={String(label)}><i className={okay ? 'ok' : text.includes('UNAVAILABLE') ? 'bad' : 'unknown'} /><span>{String(label)}</span><strong>{text.replaceAll('_', ' ')}</strong></div> })}</div></section><div className="two-col"><section className="panel"><h3>Model runtime</h3><dl className="detail-list"><div><dt>Model</dt><dd>{String(health.model ?? '—')}</dd></div><div><dt>Digest</dt><dd className="mono">{short(String(health.model_digest ?? ''), 28)}</dd></div></dl></section><section className="panel"><h3>Event & evidence state</h3><pre>{JSON.stringify({ event_stream: health.event_stream, evidence_storage: health.evidence_storage }, null, 2)}</pre></section></div></div>
-}
-
-function ManagementView({ finding, onClose }: { finding?: Finding; onClose: () => void }) {
-  return <div className="management"><header><div className="brand"><i>A</i><span>AEGIS</span></div><Badge tone="scope">MANAGEMENT VIEW · PHASE 1.4</Badge><button onClick={onClose}>Exit presentation</button></header><main><ScopeBadges /><p className="eyebrow">LOCAL, BOUNDED, DETERMINISTIC</p><h1>The AI proposes.<br /><span>The system proves.</span></h1><p className="management-narrative">Within a disposable and network-isolated attacker environment, the AI is allowed to create and execute its own commands and payloads, adapt its attack strategy from observed results, and produce evidence for independent verification.</p><p className="management-narrative">BEAST MODE allows AI-generated attack hypotheses to be executed inside a disposable shell under deterministic scope, budget, authorization and evidence controls.</p><p className="management-narrative">Nuclei and ZAP remain controller-owned bounded engines. Their results never directly confirm Aegis findings.</p><div className="management-flow"><article className="ai"><span>01</span><h2>Private AI hypothesis</h2><p>Real model decisions and exact shell commands inside the disposable sandbox.</p></article><article className="controller"><span>02</span><h2>Immutable boundaries</h2><p>Target reachability, resources, lease, audit and emergency stop.</p></article><article className="verifier"><span>03</span><h2>Verified evidence</h2><p>Fresh deterministic evidence confirms the technical result.</p></article><article className="verifier"><span>04</span><h2>Cleanup verified</h2><p>Workspace destruction is required before a normal terminal result.</p></article></div>{finding && <div className="management-result"><div><span>CONFIRMED</span><strong>{finding.severity} · {finding.vulnerability_class}</strong></div><div><span>{finding.linked_retest ? 'RETEST' : 'FINDING STATE'}</span><strong className="good-text">{finding.final_state}</strong></div></div>}<section className="limitations"><h2>Honest limitations</h2><ul><li>Disposable synthetic lab only</li><li>Read-only target methods in Phase 1.4</li><li>No public egress or callbacks</li><li>No staging or production Beast shell</li><li>Findings remain verifier-owned</li><li>No broad vulnerability coverage</li><li>Not production readiness</li><li>Not unrestricted autonomous pentesting</li></ul></section></main></div>
-}
-
-function BeastControl({ config, run, events, onOpen, onStop }: {
-  config?: BeastConfig; run?: BeastRun; events: BeastEvent[]; onOpen: () => void; onStop: () => void
-}) {
-  const active = run && ['QUEUED', 'RUNNING'].includes(run.state)
-  const activeRunId = active ? run.run_id : undefined
-  const [leaseClock, setLeaseClock] = useState({ runId: '', elapsed: 0 })
-  useEffect(() => {
-    if (!activeRunId) return undefined
-    const timer = window.setInterval(() => setLeaseClock((value) => value.runId === activeRunId
-      ? { ...value, elapsed: value.elapsed + 1 }
-      : { runId: activeRunId, elapsed: 1 }), 1000)
-    return () => window.clearInterval(timer)
-  }, [activeRunId])
-  if (!config?.enabled) return null
-  const latestResult = run?.results.at(-1)
-  const latestCommand = run?.commands.at(-1)
-  const requestsUsed = latestResult?.resource_usage.target_connections ?? 0
-  const leaseDuration = run?.lease_expires_at ? Math.floor((new Date(run.lease_expires_at).getTime() - new Date(run.created_at).getTime()) / 1000) : 0
-  const leaseSeconds = Math.max(0, leaseDuration - (leaseClock.runId === run?.run_id ? leaseClock.elapsed : 0))
-  return <section className={`beast-strip ${active ? 'active' : ''}`} aria-label="Beast Mode control">
-    <div className="beast-signal"><i /><div><strong>BEAST MODE</strong><span>Disposable AI Adversary Sandbox</span></div></div>
-    {active ? <>
-      <div className="beast-live"><span>{run.target_ref}</span><strong>{run.scenario_id.replaceAll('_', ' ')}</strong><small>AI_ADVERSARY_SHELL · {run.commands.length}/{run.resources.max_commands} commands · {requestsUsed}/{run.resources.max_target_connections} requests · concurrency {run.resources.max_concurrency} · {leaseSeconds}s lease remaining</small></div>
-      <button className="beast-stop" onClick={onStop}>STOP BEAST MODE</button>
-    </> : <>
-      <p>Unrestricted attack logic inside a strictly bounded execution environment. SYNTHETIC_LAB only.</p>
-      <button className="beast-launch" onClick={onOpen}>BEAST MODE</button>
-    </>}
-    {run && <details className="beast-telemetry"><summary>Live command, observation and verifier telemetry</summary><div><h4>Current hypothesis / authorized capability</h4><pre>{JSON.stringify({ capability: run.scenario_id, engine: 'AI_ADVERSARY_SHELL', hypothesis: latestCommand?.hypothesis_reference ?? null, expected_intent: latestCommand?.expected_intent ?? null, state_changing_operation: null }, null, 2)}</pre><h4>Exact model-selected command</h4><pre>{latestCommand?.command_text ?? 'Awaiting first model decision'}</pre><h4>Bounded result / normalized observation</h4><pre>{latestResult ? JSON.stringify({ exit_code: latestResult.exit_code, duration_ms: latestResult.duration_ms, network_destinations: latestResult.network_destinations, resource_usage: latestResult.resource_usage, artifacts: latestResult.artifact_references, stdout: latestResult.stdout, stderr: latestResult.stderr, observation: run.observations.at(-1) ?? null }, null, 2) : 'No result yet'}</pre><h4>Next decision / independent verifier / cleanup</h4><pre>{JSON.stringify({ latest_model_call: run.model_calls.at(-1) ?? null, verifier: run.verifier_conclusion, finding_authority: 'DETERMINISTIC_VERIFIER', cleanup_verified: run.cleanup_verified, workspace_destroyed: run.workspace_destroyed, stop_reason: run.stop_reason }, null, 2)}</pre><h4>Hash-chained audit stream</h4><ol>{events.slice(-6).map((event) => <li key={event.event_id}><span>{event.actor_type}</span><strong>{event.event_type}</strong><code>{event.digest.slice(0, 16)}…</code></li>)}</ol></div></details>}
-  </section>
-}
-
-function BeastPreflightModal({ preflight, busy, onClose, onActivate }: {
-  preflight: BeastPreflight; busy: boolean; onClose: () => void
-  onActivate: (confirmation: string, scenario: string) => void
-}) {
-  const [confirmation, setConfirmation] = useState('')
-  const [scenario, setScenario] = useState('endpoint_discovery')
-  const expected = `BEAST ${preflight.target.name}`
-  const resourceRows = Object.entries(preflight.resources)
-  return <div className="beast-modal-scrim" role="presentation"><section className="beast-modal" role="dialog" aria-modal="true" aria-label="BEAST MODE preflight">
-    <header><div><p className="eyebrow">TIME-BOUNDED CONTROLLED ACTIVE TESTING</p><h2>BEAST MODE preflight</h2><span>{preflight.technical_subtitle}</span></div><button aria-label="Close Beast preflight" onClick={onClose}>×</button></header>
-    <div className="beast-warning">Commands and payloads are model-selected inside the disposable shell. Target reachability, lease, resources, audit retention, emergency stop and verifier authority remain immutable.</div>
-    <div className="beast-preflight-grid">
-      <dl className="detail-list"><div><dt>Exact target</dt><dd>{preflight.target.name}</dd></div><div><dt>Origin</dt><dd className="mono">{preflight.target.origin}{preflight.target.base_path}</dd></div><div><dt>Environment</dt><dd>{preflight.target.environment}</dd></div><div><dt>Owner</dt><dd>{preflight.target.owner}</dd></div><div><dt>Approval</dt><dd>{preflight.target.approval_reference}</dd></div><div><dt>Methods / paths</dt><dd>{preflight.target.allowed_methods.join(', ')} · <span className="mono">{preflight.target.allowed_path_prefix}/**</span></dd></div><div><dt>Engines</dt><dd>{preflight.enabled_engines.join(', ')}</dd></div><div><dt>Active capabilities</dt><dd>{preflight.enabled_capabilities.join(', ')}</dd></div><div><dt>State-changing operations</dt><dd>None in Phase 1.4</dd></div><div><dt>Reset</dt><dd>{preflight.target.reset_strategy}</dd></div><div><dt>Synthetic credentials</dt><dd>{preflight.target.synthetic_credential_profiles.join(', ')}</dd></div><div><dt>Expected impact</dt><dd>{preflight.target.expected_impact}</dd></div><div><dt>Maximum blast radius</dt><dd>{preflight.target.max_blast_radius}</dd></div><div><dt>Automatic expiry</dt><dd>{Math.floor(preflight.automatic_expiry_seconds / 60)} minutes · single run</dd></div></dl>
-      <div><h3>Immutable resource envelope</h3><div className="beast-resource-grid">{resourceRows.map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><strong>{value.toLocaleString()}</strong></div>)}</div><h3>Emergency stop</h3><p className="muted">{preflight.emergency_stop}</p><h3>Prohibited target effects</h3><p className="muted">{preflight.target.prohibited_operations.join(' · ')}</p></div>
-    </div>
-    <label><span>Scenario</span><select value={scenario} onChange={(event) => setScenario(event.target.value)}>{preflight.enabled_capabilities.map((item) => <option value={item} key={item}>{item.replaceAll('_', ' ')}</option>)}</select></label>
-    <label><span>Type <code>{expected}</code> to issue a non-renewable lease</span><input autoComplete="off" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
-    <footer><button className="secondary" onClick={onClose}>Cancel</button><button className="beast-launch" disabled={busy || confirmation !== expected} onClick={() => onActivate(confirmation, scenario)}>{busy ? 'Activating…' : 'Activate one bounded run'}</button></footer>
-  </section></div>
+function healthState(health: Health): { state: 'ok' | 'warn' | 'bad' | 'unknown'; label: string } {
+  if (!health) return { state: 'unknown', label: 'Backend health unknown' }
+  const control = String(health.control_plane ?? '')
+  const lab = String(health.lab ?? '')
+  if (control === 'HEALTHY' && lab === 'HEALTHY') return { state: 'ok', label: 'Backend healthy' }
+  if (control === 'HEALTHY') return { state: 'warn', label: 'Backend degraded' }
+  return { state: 'bad', label: 'Backend unavailable' }
 }
 
 export function App() {
-  const [view, setView] = useState<View>('Mission Control')
+  const [route, setRoute] = useState<Route>(parseHash())
+  const [config, setConfig] = useState<ConsoleConfig>()
   const [runs, setRuns] = useState<Run[]>([])
-  const [events, setEvents] = useState<EventRecord[]>([])
   const [findings, setFindings] = useState<Finding[]>([])
-  const [integrations, setIntegrations] = useState<Integration[]>([])
-  const [engines, setEngines] = useState<EngineReadiness[]>([])
-  const [health, setHealth] = useState<Record<string, unknown> | null>(null)
-  const [screenshotPolicy, setScreenshotPolicy] = useState<Record<string, unknown> | null>(null)
-  const [selectedRun, setSelectedRun] = useState<{ run: Run; events: EventRecord[]; evidence: Evidence[]; lifecycle?: LifecycleCard[]; execution_policy?: ExecutionPolicy }>()
-  const [selectedFinding, setSelectedFinding] = useState<Finding>()
-  const [streamState, setStreamState] = useState<StreamState>('CONNECTING')
-  const [error, setError] = useState<string>()
+  const [targets, setTargets] = useState<TargetEntry[]>([])
+  const [profiles, setProfiles] = useState<AssessmentProfile[]>([])
+  const [health, setHealth] = useState<Health>(null)
+  const [detail, setDetail] = useState<RunDetail>()
   const [loading, setLoading] = useState(true)
-  const [presentation, setPresentation] = useState(new URLSearchParams(location.search).get('presentation') === '1')
-  const [beastConfig, setBeastConfig] = useState<BeastConfig>()
-  const [beastPreflight, setBeastPreflight] = useState<BeastPreflight>()
-  const [beastRun, setBeastRun] = useState<BeastRun>()
-  const [beastEvents, setBeastEvents] = useState<BeastEvent[]>([])
-  const [beastBusy, setBeastBusy] = useState(false)
-  const zapActive = useZapActive(api, apiPost)
-  const lastSequence = useRef(0)
+  const [error, setError] = useState<string>()
+
+  useEffect(() => {
+    const onHash = () => setRoute(parseHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   const hydrate = useCallback(async () => {
     try {
-      const [runData, auditItems, findingData, integrationData, engineData, healthData, screenshotData] = await Promise.all([
-        api<{ items: Run[] }>('/api/console/runs'), auditHistory(), api<{ items: Finding[] }>('/api/console/findings'), api<{ items: Integration[] }>('/api/console/integrations'), api<{ items: EngineReadiness[] }>('/api/console/engines'), api<Record<string, unknown>>('/api/console/health'), api<Record<string, unknown>>('/api/console/screenshots'),
+      const [cfg, runData, findingData, targetData, profileData, healthData] = await Promise.all([
+        consoleApi.config(),
+        consoleApi.runs(),
+        consoleApi.findings(),
+        consoleApi.targets(),
+        consoleApi.profiles(),
+        consoleApi.health(),
       ])
-      setRuns(runData.items); setEvents(auditItems); setFindings(findingData.items); setIntegrations(integrationData.items); setEngines(engineData.items ?? []); setHealth(healthData); setScreenshotPolicy(screenshotData)
-      lastSequence.current = auditItems.at(-1)?.sequence ?? 0
+      setConfig(cfg)
+      setRuns(runData.items)
+      setFindings(findingData.items)
+      setTargets(targetData.items)
+      setProfiles(profileData.items)
+      setHealth(healthData)
       setError(undefined)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Console data is unavailable') }
-    finally { setLoading(false) }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The console could not reach the controller.')
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  useEffect(() => { void hydrate() }, [hydrate])
-  const refreshBeast = useCallback(async () => {
-    try {
-      const config = await api<BeastConfig>('/api/beast/config')
-      setBeastConfig(config)
-      if (!config.enabled) return
-      const data = await api<{ items: BeastRun[] }>('/api/beast/runs?limit=5')
-      const current = data.items.find((item) => ['QUEUED', 'RUNNING'].includes(item.state)) ?? data.items[0]
-      setBeastRun(current)
-      if (current) {
-        const detail = await api<{ run: BeastRun; events: BeastEvent[] }>(`/api/beast/runs/${encodeURIComponent(current.run_id)}`)
-        setBeastRun(detail.run); setBeastEvents(detail.events)
-      }
-    } catch { /* Beast control has its own availability state; legacy console remains usable. */ }
-  }, [])
   useEffect(() => {
-    void refreshBeast()
-    const timer = window.setInterval(() => void refreshBeast(), 2000)
-    return () => window.clearInterval(timer)
-  }, [refreshBeast])
-  useEffect(() => {
-    const source = new EventSource(`/api/console/events?cursor=${lastSequence.current}`)
-    source.onopen = () => setStreamState('LIVE')
-    source.addEventListener('gap', () => { setStreamState('GAP'); void hydrate() })
-    source.addEventListener('audit', (message) => {
-      const incoming = JSON.parse((message as MessageEvent<string>).data) as EventRecord
-      if (incoming.sequence > lastSequence.current + 1 && lastSequence.current > 0) setStreamState('GAP')
-      if (incoming.sequence <= lastSequence.current) return
-      lastSequence.current = incoming.sequence
-      setEvents((current) => [...current, incoming].slice(-500))
-      setStreamState('LIVE')
-    })
-    source.onerror = () => setStreamState('STALE')
-    return () => source.close()
+    void hydrate()
   }, [hydrate])
 
-  const activeRun = useMemo(() => runs.find((run) => ['RUNNING', 'QUEUED'].includes(run.status)) ?? runs[0], [runs])
-  const evidence = selectedRun?.evidence ?? []
-  const openRun = async (id: string) => { try { const detail = await api<{ run: Run; events: EventRecord[]; evidence: Evidence[]; lifecycle?: LifecycleCard[]; execution_policy?: ExecutionPolicy }>(`/api/console/runs/${encodeURIComponent(id)}`); setSelectedRun(detail); setView('Runs') } catch { setError('Run detail could not be loaded.') } }
-  const chooseView = (next: View) => { setView(next); if (next !== 'Runs') setSelectedRun(undefined); if (next !== 'Findings') setSelectedFinding(undefined) }
-  const openBeast = async () => {
-    try { setBeastPreflight(await api<BeastPreflight>('/api/beast/preflight/beast-synthetic-vulnerable')) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'BEAST preflight unavailable') }
-  }
-  const activateBeast = async (confirmation: string, scenario: string) => {
-    setBeastBusy(true)
-    try {
-      const lease = await apiPost<{ lease_id: string }>('/api/beast/leases', { operator_id: 'local-operator', actor_type: 'OPERATOR', target_ref: beastPreflight?.target.target_ref, profile_id: beastPreflight?.profile_id, confirmation })
-      const created = await apiPost<BeastRun>('/api/beast/runs', { lease_id: lease.lease_id, scenario_id: scenario })
-      setBeastRun(created); setBeastEvents([]); setBeastPreflight(undefined); await refreshBeast()
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'BEAST activation rejected') }
-    finally { setBeastBusy(false) }
-  }
-  const stopBeast = async () => {
-    if (!beastRun) return
-    try { await apiPost(`/api/beast/runs/${encodeURIComponent(beastRun.run_id)}/stop`, { operator_id: 'local-operator' }); await refreshBeast() }
-    catch (reason) { setError(reason instanceof Error ? reason.message : 'Emergency stop failed') }
+  // Bounded refresh so active runs surface without a manual reload.
+  useEffect(() => {
+    const anyActive = runs.some((r) => r.status === 'RUNNING' || r.status === 'QUEUED')
+    if (!anyActive) return undefined
+    const timer = window.setInterval(() => {
+      void consoleApi.runs().then((d) => setRuns(d.items)).catch(() => undefined)
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [runs])
+
+  // Load run detail when viewing a run, and keep polling while the run is still active so the
+  // operator follows real execution state through to a terminal outcome.
+  const routeRunId = route.name === 'run' ? route.id : undefined
+  useEffect(() => {
+    if (!routeRunId) {
+      setDetail(undefined)
+      return undefined
+    }
+    let active = true
+    let timer: number | undefined
+    const load = () =>
+      consoleApi
+        .run(routeRunId)
+        .then((d) => {
+          if (!active) return
+          setDetail(d)
+          const running = d.run.status === 'RUNNING' || d.run.status === 'QUEUED'
+          if (running && timer === undefined) {
+            timer = window.setInterval(load, 2000)
+          } else if (!running && timer !== undefined) {
+            window.clearInterval(timer)
+            timer = undefined
+          }
+        })
+        .catch(() => {
+          if (active) setError('Run detail could not be loaded.')
+        })
+    void load()
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearInterval(timer)
+    }
+  }, [routeRunId])
+
+  const activeRuns = useMemo(() => runs.filter((r) => r.status === 'RUNNING' || r.status === 'QUEUED'), [runs])
+  const hs = healthState(health)
+  const environment = 'Synthetic Lab'
+
+  const startAssessment = async (target: TargetEntry, profile: AssessmentProfile) => {
+    // Typed controller job referencing the stable inventory target id. The controller enforces the
+    // target's stored scope; the browser never sends an origin or a scanner argument.
+    return consoleApi.startAssessment({
+      target_id: target.target_ref,
+      profile_id: profile.profile_id,
+    })
   }
 
-  if (presentation) return <ManagementView finding={findings[0]} onClose={() => setPresentation(false)} />
-  return <div className="shell"><aside className="sidebar"><a className="brand" href="/console/"><i>A</i><span>AEGIS<small>Operator Console</small></span></a><nav>{NAV.map((item, index) => <button className={view === item ? 'active' : ''} onClick={() => chooseView(item)} key={item}><span>{String(index + 1).padStart(2, '0')}</span>{item}</button>)}</nav><div className="sidebar-foot"><a href="/">Engineering dashboard ↗</a><button onClick={() => setPresentation(true)}>Presentation mode</button><div className={`stream-state ${streamState.toLowerCase()}`}><i />Event stream · {streamState}</div><small>Structured, checksummed audit evidence<br />Not an immutable audit store</small></div></aside><div className="workspace"><header className="topbar"><div><p className="eyebrow">AEGIS NATIVE · LOCAL CONTROL PLANE</p><h1>{selectedRun ? 'Run Replay' : view}</h1></div><ScopeBadges /></header><BeastControl config={beastConfig} run={beastRun} events={beastEvents} onOpen={() => void openBeast()} onStop={() => void stopBeast()} />{error && <div className="error-banner" role="alert"><strong>Console degraded</strong><span>{error}. Persisted views may be stale.</span><button onClick={() => void hydrate()}>Retry</button></div>}<main>{loading ? <Loading /> : selectedRun && view === 'Runs' ? <RunReplay detail={selectedRun} onBack={() => setSelectedRun(undefined)} /> : view === 'Mission Control' ? <MissionControl run={activeRun} events={events} onOpenRun={(id) => void openRun(id)} streamState={streamState} /> : view === 'Runs' ? <RunList runs={runs} onOpen={(id) => void openRun(id)} /> : view === 'Findings' ? <FindingsView findings={findings} selected={selectedFinding} setSelected={setSelectedFinding} /> : view === 'ZAP Active' ? <ZapActiveView config={zapActive.config} preflight={zapActive.preflight} session={zapActive.session} busy={zapActive.busy} authRequired={zapActive.authRequired} onLogin={(secret) => void zapActive.login(secret)} onActivate={(variant, phrase) => void zapActive.activate(variant, phrase)} onRun={() => void zapActive.run()} onStop={() => void zapActive.stop()} onRefresh={() => void zapActive.refresh()} /> : view === 'Audit' ? <AuditView events={events} /> : view === 'Evidence' ? <EvidenceView evidence={evidence} screenshotPolicy={screenshotPolicy} /> : view === 'Integrations' ? <IntegrationsView integrations={integrations} engines={engines} /> : <HealthView health={health} />}</main>{beastPreflight && <BeastPreflightModal preflight={beastPreflight} busy={beastBusy} onClose={() => setBeastPreflight(undefined)} onActivate={(confirmation, scenario) => void activateBeast(confirmation, scenario)} />}</div></div>
+  const onTargetCreated = (created: TargetEntry) => {
+    setTargets((current) => [...current, created])
+  }
+
+  const navActive = (match: Route['name'][]) => match.includes(route.name)
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <button className="brand" onClick={() => go('#/')} aria-label="Aegis home">
+          <span className="mark">A</span>
+          <span className="brand-name">
+            Aegis
+            <span className="brand-sub">Operator Console</span>
+          </span>
+        </button>
+
+        <nav className="nav-group" aria-label="Primary">
+          {PRIMARY_NAV.map((item) => (
+            <button
+              key={item.label}
+              className={`nav-item ${navActive(item.match) ? 'active' : ''}`}
+              onClick={() => go(item.path)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <nav className="nav-group" aria-label="Secondary">
+          <span className="nav-label">More</span>
+          {SECONDARY_NAV.map((item) => (
+            <button
+              key={item.label}
+              className={`nav-item ${navActive(item.match) ? 'active' : ''}`}
+              onClick={() => go(item.path)}
+            >
+              {item.label}
+            </button>
+          ))}
+          {DEV && (
+            <button
+              className={`nav-item ${navActive(['debug']) ? 'active' : ''}`}
+              onClick={() => go('#/debug')}
+            >
+              Debug
+            </button>
+          )}
+        </nav>
+
+        <div className="sidebar-foot">
+          <p className="sidebar-note">Structured, checksummed audit evidence. Synthetic lab only — not an immutable audit store.</p>
+        </div>
+      </aside>
+
+      <div className="workspace">
+        <header className="topbar">
+          <span className="env-chip">{environment}</span>
+          <HealthDot state={hs.state} label={hs.label} />
+          <span className="spacer" />
+          <button className="btn primary" onClick={() => go('#/new')}>
+            New Assessment
+          </button>
+        </header>
+
+        <main className="main">
+          {error && (
+            <div className="banner critical">
+              <div className="banner-body">
+                <strong>Console degraded</strong>
+                {error} Displayed data may be stale.
+              </div>
+              <button className="btn" onClick={() => void hydrate()}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {loading ? (
+            <Loading />
+          ) : route.name === 'new' ? (
+            <NewAssessment
+              targets={targets}
+              profiles={profiles}
+              onStart={startAssessment}
+              onStarted={(runId) => {
+                void hydrate()
+                go(`#/runs/${runId}`)
+              }}
+              onTargetCreated={onTargetCreated}
+              onCancel={() => go('#/')}
+            />
+          ) : route.name === 'run' ? (
+            detail ? (
+              <RunDetailView detail={detail} findings={findings} onBack={() => go('#/')} />
+            ) : (
+              <Loading label="Loading run…" />
+            )
+          ) : route.name === 'findings' ? (
+            <FindingsView findings={findings} />
+          ) : route.name === 'targets' ? (
+            <TargetsView
+              targets={targets}
+              profiles={profiles}
+              onTargetCreated={onTargetCreated}
+              onTargetUpdated={(t) =>
+                setTargets((current) => current.map((c) => (c.target_ref === t.target_ref ? t : c)))
+              }
+            />
+          ) : route.name === 'reports' ? (
+            <ReportsView runs={runs} onOpen={(id) => go(`#/runs/${id}`)} />
+          ) : route.name === 'audit' ? (
+            <AuditView />
+          ) : route.name === 'debug' && DEV ? (
+            <DebugView health={health} config={config} />
+          ) : (
+            <HomeView runs={runs} activeRuns={activeRuns} onOpen={(id) => go(`#/runs/${id}`)} />
+          )}
+        </main>
+      </div>
+    </div>
+  )
+}
+
+function RunsTable({ runs, onOpen }: { runs: Run[]; onOpen: (id: string) => void }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Run ID</th>
+            <th>Target</th>
+            <th>Assessment</th>
+            <th>State</th>
+            <th>Findings</th>
+            <th>Started</th>
+            <th>Cleanup</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.map((run) => (
+            <tr key={run.id} className="clickable" tabIndex={0} onClick={() => onOpen(run.id)}
+              onKeyDown={(e) => e.key === 'Enter' && onOpen(run.id)}>
+              <td className="mono">{short(run.id, 20)}</td>
+              <td>{run.target_name}</td>
+              <td>{run.engine ?? 'AEGIS_NATIVE'}</td>
+              <td>
+                <RunStatePill status={run.status} />
+              </td>
+              <td>{run.finding_count}</td>
+              <td className="muted">{when(run.created_at)}</td>
+              <td>
+                <Pill tone="success">Complete</Pill>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function HomeView({
+  runs,
+  activeRuns,
+  onOpen,
+}: {
+  runs: Run[]
+  activeRuns: Run[]
+  onOpen: (id: string) => void
+}) {
+  if (!runs.length) {
+    return (
+      <div>
+        <div className="page-head">
+          <h1>Runs</h1>
+          <p>Start an assessment to see live and completed runs here.</p>
+        </div>
+        <Empty
+          title="No assessments yet"
+          copy="Run your first assessment against an authorized target. It takes about four steps."
+          action={
+            <button className="btn primary" onClick={() => go('#/new')}>
+              New Assessment
+            </button>
+          }
+        />
+      </div>
+    )
+  }
+  return (
+    <div className="stack">
+      <div className="page-head">
+        <h1>Runs</h1>
+        <p>Current and recent assessments.</p>
+      </div>
+
+      {activeRuns.length > 0 && (
+        <div className="panel">
+          <div className="panel-head">
+            <h2>Active</h2>
+            <Pill tone="warning" running>
+              {activeRuns.length} running
+            </Pill>
+          </div>
+          <RunsTable runs={activeRuns} onOpen={onOpen} />
+        </div>
+      )}
+
+      <div className="panel">
+        <div className="panel-head">
+          <h2>Recent runs</h2>
+          <span className="sub">{runs.length} record(s)</span>
+        </div>
+        <RunsTable runs={runs} onOpen={onOpen} />
+      </div>
+    </div>
+  )
+}
+
+function FindingsView({ findings }: { findings: Finding[] }) {
+  if (!findings.length)
+    return (
+      <div>
+        <div className="page-head">
+          <h1>Findings</h1>
+          <p>Verifier-confirmed records only.</p>
+        </div>
+        <Empty
+          title="No confirmed findings"
+          copy="Hypotheses and incomplete evidence never appear here. Only the independent Aegis verifier can confirm a finding."
+        />
+      </div>
+    )
+  return (
+    <div>
+      <div className="page-head">
+        <h1>Findings</h1>
+        <p>Verifier-confirmed records. A hypothesis is never shown as a finding.</p>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>State</th>
+              <th>Severity</th>
+              <th>Finding</th>
+              <th>OWASP</th>
+              <th>Operation</th>
+              <th>Discovery run</th>
+            </tr>
+          </thead>
+          <tbody>
+            {findings.map((finding) => {
+              const state = findingStateView(finding)
+              return (
+                <tr key={finding.id}>
+                  <td>
+                    <Pill tone={state.tone}>{state.label}</Pill>
+                  </td>
+                  <td>
+                    <Pill tone={state.tone === 'success' ? 'success' : 'critical'}>{finding.severity}</Pill>
+                  </td>
+                  <td>
+                    <strong>{finding.title}</strong>
+                    <div className="mono muted" style={{ fontSize: 11 }}>
+                      {short(finding.id, 30)}
+                    </div>
+                  </td>
+                  <td>{finding.owasp_mapping}</td>
+                  <td className="mono">{finding.affected_operation}</td>
+                  <td className="mono muted">{short(finding.discovery_scan, 18)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function TargetsView({
+  targets,
+  profiles,
+  onTargetCreated,
+  onTargetUpdated,
+}: {
+  targets: TargetEntry[]
+  profiles: AssessmentProfile[]
+  onTargetCreated: (t: TargetEntry) => void
+  onTargetUpdated: (t: TargetEntry) => void
+}) {
+  const [adding, setAdding] = useState(false)
+  const [detail, setDetail] = useState<TargetEntry>()
+  const [busy, setBusy] = useState<string>()
+
+  const toggle = async (target: TargetEntry) => {
+    setBusy(target.target_ref)
+    try {
+      const updated = target.enabled
+        ? await consoleApi.disableTarget(target.target_ref)
+        : await consoleApi.enableTarget(target.target_ref)
+      onTargetUpdated(updated)
+    } catch {
+      /* transient; the controller remains the source of truth on next hydrate */
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const kind = (t: TargetEntry) =>
+    t.synthetic ? (
+      <Pill tone="neutral">Synthetic</Pill>
+    ) : t.environment.toUpperCase().includes('PRODUCTION') ? (
+      <Pill tone="warning">Production</Pill>
+    ) : (
+      <Pill tone="success">Company</Pill>
+    )
+
+  return (
+    <div>
+      <div className="page-head with-action">
+        <div>
+          <h1>Targets</h1>
+          <p>Controller-authorized inventory. Onboard company websites, APIs and authorized ranges.</p>
+        </div>
+        <button className="btn primary" onClick={() => setAdding(true)}>
+          + Add authorized target
+        </button>
+      </div>
+
+      {targets.length === 0 ? (
+        <Empty
+          title="No targets yet"
+          copy="Add an authorized company website, API or range to assess."
+          action={<button className="btn primary" onClick={() => setAdding(true)}>Add authorized target</button>}
+        />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Authorized scope</th>
+                <th>Environment</th>
+                <th>Authorization</th>
+                <th>Last assessment</th>
+                <th>State</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {targets.map((target) => (
+                <tr key={target.target_ref}>
+                  <td>
+                    <strong>{target.name}</strong>
+                    <div className="mono muted" style={{ fontSize: 11 }}>{target.target_ref}</div>
+                  </td>
+                  <td>{kind(target)}</td>
+                  <td className="mono">
+                    {target.authorized_scope.slice(0, 2).map((s) => (
+                      <div key={s}>{s}</div>
+                    ))}
+                    {target.authorized_scope.length > 2 && (
+                      <div className="muted">+{target.authorized_scope.length - 2} more</div>
+                    )}
+                  </td>
+                  <td>{target.environment}</td>
+                  <td>
+                    <Pill tone={target.status === 'AVAILABLE_FOR_ASSESSMENT' ? 'success' : 'neutral'}>
+                      {target.status.replaceAll('_', ' ')}
+                    </Pill>
+                  </td>
+                  <td className="muted">{target.last_assessment_at ? when(target.last_assessment_at) : '—'}</td>
+                  <td>
+                    <Pill tone={target.enabled ? 'success' : 'warning'}>
+                      {target.enabled ? 'Enabled' : 'Disabled'}
+                    </Pill>
+                  </td>
+                  <td className="target-actions">
+                    <button className="link-btn" onClick={() => setDetail(target)}>View</button>
+                    {!target.synthetic && (
+                      <button
+                        className="link-btn"
+                        disabled={busy === target.target_ref}
+                        onClick={() => void toggle(target)}
+                      >
+                        {target.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                    )}
+                    <button
+                      className="link-btn"
+                      disabled={!target.enabled}
+                      onClick={() => go('#/new')}
+                    >
+                      Start assessment
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {detail && (
+        <div className="modal-scrim" role="dialog" aria-modal="true" onClick={() => setDetail(undefined)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
+              <h2>{detail.name}</h2>
+              {kind(detail)}
+            </div>
+            <p className="muted">{detail.description || 'No description.'}</p>
+            <Kv
+              items={[
+                ['Target ID', <span className="mono" key="id">{detail.target_ref}</span>],
+                ['Type', detail.type],
+                ['Environment', detail.environment],
+                ['Authorization ref', <span className="mono" key="a">{detail.authorization_reference}</span>],
+                ['Authorized scope', detail.authorized_scope.map((s) => <div className="mono" key={s}>{s}</div>)],
+                ['Allowed paths', detail.allowed_path_prefixes.join(', ') || '— (all)'],
+                ['Excluded paths', detail.excluded_path_prefixes.join(', ') || '—'],
+                ['Credential', detail.credential_reference ? <span className="mono" key="c">{detail.credential_reference}</span> : 'None referenced'],
+                ['Compatible profiles', profiles.filter((p) => detail.supported_profile_ids.includes(p.profile_id)).map((p) => p.display_name).join(', ') || '—'],
+              ]}
+            />
+            <div className="modal-actions">
+              <button className="btn ghost" onClick={() => setDetail(undefined)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {adding && (
+        <AddTarget
+          onClose={() => setAdding(false)}
+          onCreated={(created) => {
+            onTargetCreated(created)
+            setAdding(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function ReportsView({ runs, onOpen }: { runs: Run[]; onOpen: (id: string) => void }) {
+  const completed = runs.filter((r) => r.status !== 'RUNNING' && r.status !== 'QUEUED')
+  return (
+    <div>
+      <div className="page-head">
+        <h1>Reports</h1>
+        <p>Evidence reports for completed assessments.</p>
+      </div>
+      {completed.length === 0 ? (
+        <Empty title="No reports yet" copy="Completed assessments produce an evidence report you can open here." />
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Run ID</th>
+                <th>Target</th>
+                <th>Outcome</th>
+                <th>Findings</th>
+                <th>Completed</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {completed.map((run) => (
+                <tr key={run.id} className="clickable" onClick={() => onOpen(run.id)}>
+                  <td className="mono">{short(run.id, 20)}</td>
+                  <td>{run.target_name}</td>
+                  <td>
+                    <RunStatePill status={run.status} />
+                  </td>
+                  <td>{run.finding_count}</td>
+                  <td className="muted">{when(run.completed_at)}</td>
+                  <td>
+                    <span className="muted">Open report →</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type AuditEvent = {
+  event_id: string
+  timestamp: string
+  actor_type: string
+  stage: string
+  status: string
+  summary: string
+  scan_id: string
+}
+
+function AuditView() {
+  const [events, setEvents] = useState<AuditEvent[]>([])
+  const [query, setQuery] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  useEffect(() => {
+    fetch('/api/console/audit?limit=100&cursor=0', { headers: { Accept: 'application/json' } })
+      .then((r) => r.json())
+      .then((d: { items: AuditEvent[] }) => setEvents(d.items ?? []))
+      .catch(() => undefined)
+      .finally(() => setLoaded(true))
+  }, [])
+  const filtered = events.filter((e) =>
+    !query ? true : `${e.summary} ${e.scan_id} ${e.stage}`.toLowerCase().includes(query.toLowerCase()),
+  )
+  return (
+    <div>
+      <div className="page-head">
+        <h1>Audit Log</h1>
+        <p>Structured, checksummed, redacted event record.</p>
+      </div>
+      <div className="filters">
+        <label className="field">
+          <span>Search</span>
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="run, stage, summary…" />
+        </label>
+      </div>
+      {!loaded ? (
+        <Loading />
+      ) : filtered.length === 0 ? (
+        <Empty title="No events" copy="No structured audit events match this filter." />
+      ) : (
+        <div className="panel">
+          {filtered
+            .slice()
+            .reverse()
+            .map((event) => (
+              <div className="activity-item" key={event.event_id}>
+                <time>{new Date(event.timestamp).toLocaleTimeString()}</time>
+                <Pill tone={event.actor_type === 'VERIFIER' ? 'success' : 'neutral'}>
+                  {event.actor_type.replace('_', ' ')}
+                </Pill>
+                <span className="summary">
+                  {event.stage.replaceAll('_', ' ')} — {event.summary}
+                </span>
+                <span className="addr mono">{short(event.scan_id, 14)}</span>
+              </div>
+            ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DebugView({ health, config }: { health: Health; config?: ConsoleConfig }) {
+  return (
+    <div>
+      <div className="page-head">
+        <h1>Debug</h1>
+        <p>Development-only diagnostics. Not part of the operator workflow.</p>
+      </div>
+      <div className="grid-2">
+        <div className="panel">
+          <div className="panel-head">
+            <h3>Operational engines</h3>
+          </div>
+          <div className="row">
+            {(config?.operational_engines ?? []).map((engine) => (
+              <Pill key={engine} tone="success">
+                {engine}
+              </Pill>
+            ))}
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel-head">
+            <h3>Subsystem health</h3>
+          </div>
+          <Kv
+            items={Object.entries(health ?? {})
+              .filter(([, v]) => typeof v === 'string')
+              .map(([k, v]) => [k.replaceAll('_', ' '), String(v)])}
+          />
+        </div>
+      </div>
+    </div>
+  )
 }

@@ -1,0 +1,84 @@
+# Phase 1.7 COMBINED single-project overlay for scripts/phase_1_7_combined_live.sh.
+#
+# Unlike docker-compose.phase-1-7a.yml (which ATTACHES to already-running base + aegis-range
+# projects via external networks), this overlay is self-contained: every network is Compose-managed
+# and owned by the runner's unique Compose project. It therefore has NO dependency on a pre-existing
+# `aegis-range` project or on any fixed-name external network such as `aegis-range_bank-backend`.
+#
+# Networks used here:
+#   * planner-rpc / gateway-egress / provider-egress / security-lab  -> defined (managed) by
+#     docker-compose.yml + docker-compose.deepseek.yml; inherited as-is, NOT redeclared external.
+#   * bank-runtime  -> defined below as a project-owned, Compose-managed, internal network. Only
+#     aegis-bank-live and the acceptance runner (the controller/client) attach to it.
+#
+# The Bank service publishes no host port. The provider credential lives only in llm-gateway
+# (via .env.gateway in the deepseek overlay) and is never referenced here.
+
+services:
+  aegis-bank-live:
+    image: aegis-range:1.6.0-dev
+    command: uvicorn aegis_range.bank:app --host 0.0.0.0 --port 8101
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    restart: "no"
+    # No `ports:` — the Bank service is reachable only on the internal bank-runtime network.
+    networks:
+      bank-runtime:
+        aliases: [aegis-bank, aegis-bank-control]
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  phase-1-7a-runner:
+    build: .
+    image: aegis-phase-1-7a-runner:1.7.0-dev
+    command: python scripts/phase_1_7a_live_acceptance.py
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      # Phase 1.7-A has one exact, operator-authorized binding. Do not inherit stale .env defaults.
+      AI_MODEL: deepseek-v4-pro
+      AI_ALLOWED_MODELS: deepseek-v4-pro
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-90}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-131072}
+      DATABASE_PATH: /tmp/aegis-unused.db
+    volumes:
+      - ./artifacts:/app/artifacts
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    depends_on:
+      llm-gateway: {condition: service_healthy}
+      aegis-bank-live: {condition: service_healthy}
+    # The runner is the only controller/client that joins the Bank network; planner-rpc reaches
+    # the gateway.
+    networks: [planner-rpc, bank-runtime]
+
+  llm-gateway:
+    environment:
+      # Override Compose interpolation from old local defaults for this acceptance profile only.
+      AI_MODEL: deepseek-v4-pro
+      AI_ALLOWED_MODELS: deepseek-v4-pro
+
+networks:
+  # Project-owned, Compose-managed, internal-only network for the Bank service. It has NO fixed
+  # `name:` and is NOT external, so Compose creates and destroys it with this project's lifecycle
+  # (effective name: <project>_bank-runtime). No dependency on any pre-existing aegis-range project.
+  bank-runtime:
+    internal: true

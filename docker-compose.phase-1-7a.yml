@@ -1,0 +1,72 @@
+services:
+  aegis-bank-live:
+    image: aegis-range:1.6.0-dev
+    command: uvicorn aegis_range.bank:app --host 0.0.0.0 --port 8101
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=65532,gid=65532,nosuid,nodev,noexec
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    cpus: 0.5
+    restart: "no"
+    networks:
+      bank-runtime:
+        aliases: [aegis-bank, aegis-bank-control]
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8101/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  phase-1-7a-runner:
+    build: .
+    image: aegis-phase-1-7a-runner:1.7.0-dev
+    command: python scripts/phase_1_7a_live_acceptance.py
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      # Phase 1.7-A has one exact, operator-authorized binding. Do not inherit stale .env defaults.
+      AI_MODEL: deepseek-v4-pro
+      AI_ALLOWED_MODELS: deepseek-v4-pro
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-30}
+      MAX_COMPLETION_TOKENS: ${MAX_COMPLETION_TOKENS:-2048}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-131072}
+      DATABASE_PATH: /tmp/aegis-unused.db
+    volumes:
+      - ./artifacts:/app/artifacts
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1.0
+    depends_on:
+      llm-gateway: {condition: service_healthy}
+      aegis-bank-live: {condition: service_healthy}
+    networks: [planner-rpc, bank-runtime]
+
+  llm-gateway:
+    environment:
+      # Override Compose interpolation from old local defaults for this acceptance profile only.
+      AI_MODEL: deepseek-v4-pro
+      AI_ALLOWED_MODELS: deepseek-v4-pro
+
+networks:
+  planner-rpc:
+    external: true
+    name: ai-security-lab-copy_planner-rpc
+  gateway-egress:
+    external: true
+    name: ai-security-lab-copy_gateway-egress
+  provider-egress:
+    external: true
+    name: ai-security-lab-copy_provider-egress
+  bank-runtime:
+    external: true
+    name: aegis-range_bank-backend

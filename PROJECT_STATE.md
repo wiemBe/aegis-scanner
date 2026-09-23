@@ -1,14 +1,58 @@
 # Canonical project state
 
-Updated: 2026-09-21 (Europe/Istanbul)
-Phase: **1.6 Aegis Vulnerable Application Range — VULNERABILITY CATALOG AND THREE ATTACK CHAINS
-IMPLEMENTED, NOT a GO. Four isolated applications, 19 vulnerable/patched scenarios, independent
-fresh-evidence verifiers, controller-owned ground truth, three end-to-end chains and private
-ops/browser/metadata/admin workers are operational. Container acceptance confirms 19/19 vulnerable,
-19/19 patched, 3/3 vulnerable-chain and 3/3 patched-chain outcomes plus scanner-network isolation.
-Evaluation aggregation, engine integration/AI benchmarking and the Range UI remain unimplemented.
-Phase 1.5 is now a final GO (see below) and remains preserved.**
-Version: 1.6.0-dev (Phase 1.5 is the newest ZAP profile with a GO verdict)
+Updated: 2026-09-22 (Europe/Istanbul)
+Phase: **1.7 Multi-Agent Evaluation Runtime — INITIAL AEGIS-BANK BOLA VERTICAL SLICE IMPLEMENTED,
+OFFLINE SYNTHETIC ACCEPTANCE ONLY, NOT a production or live-model GO. Lead, Surface and
+Authorization roles execute through strict typed records, atomic global/per-agent budgets, the
+controller-owned target/credential/resource registry, controlled broker, fresh range verifier,
+existing SQLite database and a bounded console projection. Vulnerable and patched modes pass for
+single-agent and multi-agent paths under equal limits and seven target requests. The offline
+fixture records one versus four model calls; no multi-agent improvement is claimed. Injection and
+Chain execution, live-model benchmarking and broader range coverage remain unimplemented. Phase
+1.6 and the isolated Phase 1.5 ZAP Active profile remain preserved; ZAP Active is not agent-enabled.**
+Version: 1.7.0-dev (Phase 1.5 remains the newest ZAP profile with a GO verdict)
+
+### Phase 1.7-A live-provider smoke — NO-GO
+
+On 2026-09-23, the authorized four-case DeepSeek smoke stopped at case 1 as required. The
+`single-agent / vulnerable BOLA` path made one documented-surface request and one provider call;
+the gateway rejected the response as `PROVIDER_MODEL_MISMATCH` because the provider-reported model
+identity did not match the requested `deepseek-chat` binding. No retry, schema weakening, output
+repair, offline fallback or model-identity relaxation occurred. Cases 2–4 were not attempted. No
+hypothesis, broker action, verifier outcome or finding was produced; provider token usage and the
+gateway request projection were unavailable after rejection and are recorded as failed/unknown,
+not zero or inferred.
+
+Cleanup reset and health passed (generations 5 then final 6); zero agent commands executed; the
+isolated Compose project has zero remaining containers. Structural scans of the acceptance SQLite
+database, artifacts, logs, captured console/API material and non-gateway container metadata were
+clean without reading or comparing the configured provider key. Post-smoke Ruff and strict mypy
+pass, and 1,034/1,034 offline tests pass. Checksummed evidence:
+`artifacts/phase-1.7a-live-20260922T210938Z/`. Verdict: **NO-GO** for live Phase 1.7-A; the accepted
+offline runtime semantics remain scoped only to the initial BOLA slice.
+
+## Phase 1.7 — Multi-Agent Evaluation Runtime (initial slice, offline only)
+
+Architecture and trust boundaries:
+[Phase 1.7 — Multi-Agent Evaluation Runtime](docs/phase-1.7-multi-agent-runtime.md).
+
+Implemented: all ten core typed records; registries for five eventual roles; operational Lead,
+Surface and Authorization roles; shared provider-gateway generation; controller-resolved Bank BOLA
+broker actions; nonce/expiry/identity/capability checks; atomic global/per-agent budgets; monotonic
+run states and stop propagation; verifier-owned vulnerable confirmation and patched PASS; verified
+reset/cleanup; equivalent single-agent baseline; SQLite persistence; and `/multi-agent` plus bounded
+read APIs. ZAP Active is absent from the capability registry.
+
+Offline acceptance (`OFFLINE_STRUCTURED_FIXTURE`): vulnerable single/multi `CONFIRMED`, patched
+single/multi `PASS`, one surface discovery, one valid hypothesis, zero false positives, seven target
+requests, cleanup verified in every run. Single-agent uses 1 model call / 104 input / 151 output
+fixture tokens; multi-agent uses 4 calls / 212 input / 206 output fixture tokens. Limits are equal:
+6 model calls, 12,000 tokens, 8 target requests, 0 commands, 30 seconds, 524,288 evidence bytes.
+Elapsed milliseconds are not used for comparison because in-process fixture timing is noise.
+
+Dedicated acceptance: 10/10 Phase 1.7 tests pass. Repository gates: Ruff PASS; strict mypy PASS
+across 145 source files; 1,034/1,034 offline tests PASS. No live provider was invoked, so this phase
+makes no model-quality, adaptation or superiority claim.
 
 ## Phase 1.6 — Aegis Vulnerable Application Range (active, not a GO)
 
