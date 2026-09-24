@@ -93,9 +93,11 @@ _DELEGATE_OBJECTIVE = (
 )
 _PLAN_OBJECTIVE = (
     "Select the registered authentication capability, a typed authentication control class, the "
-    "opaque account and invalid-candidate-set references, and the smallest number of invalid "
-    "attempts needed to test whether repeated invalid credential submissions against the "
-    "authorized synthetic account are rate-limited or locked out. Request no more than necessary."
+    "registered probe profile, and the opaque account and invalid-candidate-set references for a "
+    "test of whether repeated invalid credential submissions against the authorized synthetic "
+    "account are rate-limited or locked out. The selected probe profile — not this plan — "
+    "determines the sufficient invalid-attempt sequence; any attempt count you state is only a "
+    "non-authoritative hint that the controller may override to keep the test sufficient."
 )
 
 
@@ -224,6 +226,7 @@ async def _step_plan() -> dict[str, Any]:
         AUTH_CANDIDATE_SET_REFS,
         AUTH_CAPABILITIES,
         AUTH_CONTROL_CLASSES,
+        AUTH_PROBE_PROFILE_IDS,
     )
     from aegis.multi_agent.contracts import AgentRole, AuthenticationPlanOutput
     from aegis.multi_agent.model import GatewayAgentModel
@@ -240,6 +243,7 @@ async def _step_plan() -> dict[str, Any]:
                 "target_ref": TARGET_REF,
                 "capability_catalog": sorted(AUTH_CAPABILITIES),
                 "control_classes": sorted(AUTH_CONTROL_CLASSES),
+                "probe_profile_ids": sorted(AUTH_PROBE_PROFILE_IDS),
                 "account_refs": ["PRIMARY_SYNTHETIC_ACCOUNT"],
                 "candidate_set_refs": sorted(AUTH_CANDIDATE_SET_REFS),
                 "positive_control_refs": ["POSITIVE_CONTROL_CREDENTIAL"],
@@ -717,6 +721,13 @@ def _run_mode(env: dict[str, str], mode: str, db_path: str) -> dict[str, Any]:
             "control_class": execution.control_class,
             "account_ref": execution.account_ref,
             "attempt_ceiling": execution.attempt_ceiling,
+            "model_requested_profile_id": execution.model_requested_profile_id,
+            "model_requested_invalid_attempts": execution.model_requested_invalid_attempts,
+            "controller_effective_profile_id": execution.controller_effective_profile_id,
+            "controller_effective_invalid_attempts": (
+                execution.controller_effective_invalid_attempts
+            ),
+            "controller_adjustment_reason": execution.controller_adjustment_reason,
             "requested_invalid_attempts": execution.requested_invalid_attempts,
             "rendered_invalid_attempts": execution.rendered_invalid_attempts,
             "total_attempts": execution.total_attempts,
@@ -944,6 +955,98 @@ def _invalid_never_authenticated(mode_rec: dict[str, Any]) -> bool:
     )
 
 
+def _profile_sufficient_attempts() -> int:
+    """The controller-owned sufficient invalid-burst length, read from the profile registry."""
+
+    from aegis.multi_agent.authentication import (
+        AUTH_PROBE_PROFILES,
+        CRED_RATE_LIMIT_THRESHOLD_PROBE_V1,
+    )
+
+    return AUTH_PROBE_PROFILES[CRED_RATE_LIMIT_THRESHOLD_PROBE_V1].sufficient_invalid_attempts
+
+
+def _invalid_attempts(mode_rec: dict[str, Any]) -> list[dict[str, Any]]:
+    return [a for a in _worker_attempts(mode_rec) if a.get("label") == "INVALID_ATTEMPT"]
+
+
+def _post_control(mode_rec: dict[str, Any]) -> dict[str, Any] | None:
+    for attempt in _worker_attempts(mode_rec):
+        if attempt.get("label") == "POST_CONTROL":
+            return attempt
+    return None
+
+
+def _broker_effective(mode_rec: dict[str, Any]) -> int | None:
+    broker = mode_rec.get("broker") or {}
+    value = broker.get("controller_effective_invalid_attempts")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _worker_executed_sufficient(mode_rec: dict[str, Any], sufficient: int) -> bool:
+    """The worker itself ran pre-control(200) + the controller-sufficient invalid burst + post."""
+
+    if not _worker_executed(mode_rec):
+        return False
+    invalids = _invalid_attempts(mode_rec)
+    effective = _broker_effective(mode_rec)
+    return (
+        len(invalids) >= sufficient
+        and effective == sufficient
+        and len(invalids) == effective
+        and _post_control(mode_rec) is not None
+    )
+
+
+def _worker_crossed_threshold(mode_rec: dict[str, Any], sufficient: int) -> bool:
+    return len(_invalid_attempts(mode_rec)) >= sufficient
+
+
+def _vulnerable_no_throttle(mode_rec: dict[str, Any]) -> bool:
+    invalids = _invalid_attempts(mode_rec)
+    post = _post_control(mode_rec)
+    return (
+        bool(invalids)
+        and not any(a.get("locked_out") is True for a in invalids)
+        and not any(int(a.get("status_code", 0)) == 429 for a in invalids)
+        and post is not None
+        and int(post.get("status_code", 0)) == 200
+    )
+
+
+def _patched_throttle_or_lockout(mode_rec: dict[str, Any]) -> bool:
+    invalids = _invalid_attempts(mode_rec)
+    post = _post_control(mode_rec)
+    burst_throttled = any(
+        a.get("locked_out") is True or int(a.get("status_code", 0)) == 429 for a in invalids
+    )
+    post_blocked = post is not None and int(post.get("status_code", 0)) == 429
+    return bool(invalids) and (burst_throttled or post_blocked)
+
+
+def _hint_not_authoritative(mode_rec: dict[str, Any], sufficient: int) -> bool:
+    """The controller-effective invalid count is profile-driven, never the model's hint."""
+
+    broker = mode_rec.get("broker") or {}
+    effective = broker.get("controller_effective_invalid_attempts")
+    rendered = broker.get("rendered_invalid_attempts")
+    return effective == sufficient and rendered == sufficient
+
+
+def _budget_enforced(mode_rec: dict[str, Any], sufficient: int) -> bool:
+    broker = mode_rec.get("broker") or {}
+    total = broker.get("total_attempts")
+    effective = broker.get("controller_effective_invalid_attempts")
+    concurrency = broker.get("concurrency")
+    return (
+        isinstance(total, int)
+        and total <= 12
+        and effective == sufficient
+        and total == sufficient + 2
+        and concurrency == 1
+    )
+
+
 def _observations_live(mode_rec: dict[str, Any]) -> bool:
     kinds = mode_rec.get("observation_kinds") or []
     return "LOGIN_ATTEMPT_RESPONSE" in kinds and _worker_executed(mode_rec)
@@ -1167,6 +1270,69 @@ def _verdict(record: dict[str, Any]) -> dict[str, Any]:  # noqa: C901, PLR0912, 
     else:
         checks["observations_derived_from_current_live_execution"] = NOT_EVALUATED
 
+    # ------------------------------------------------------------------ #
+    # Worker-sufficiency checks (the Phase 2.1 correction). The disposable worker — not the
+    # verifier — must execute the controller-sufficient sequence and cross the rate-limit
+    # evaluation threshold in both arms; the model's requested attempt count is only a
+    # non-authoritative hint; and the verifier adjudicates, never substitutes for, that evidence.
+    # ------------------------------------------------------------------ #
+    sufficient = _profile_sufficient_attempts()
+    if vuln.get("worker") and patched.get("worker"):
+        checks["worker_executed_controller_sufficient_sequence"] = _both(
+            _worker_executed_sufficient(vuln, sufficient),
+            _worker_executed_sufficient(patched, sufficient),
+        )
+        checks["worker_crossed_rate_limit_evaluation_threshold"] = _both(
+            _worker_crossed_threshold(vuln, sufficient),
+            _worker_crossed_threshold(patched, sufficient),
+        )
+        checks["worker_observed_vulnerable_no_throttle"] = _vulnerable_no_throttle(vuln)
+        checks["worker_observed_patched_throttle_or_lockout"] = _patched_throttle_or_lockout(
+            patched
+        )
+        checks["model_attempt_hint_not_authoritative"] = _both(
+            _hint_not_authoritative(vuln, sufficient),
+            _hint_not_authoritative(patched, sufficient),
+        )
+        checks["controller_effective_attempt_budget_enforced"] = _both(
+            _budget_enforced(vuln, sufficient), _budget_enforced(patched, sufficient)
+        )
+    else:
+        for key in (
+            "worker_executed_controller_sufficient_sequence",
+            "worker_crossed_rate_limit_evaluation_threshold",
+            "worker_observed_vulnerable_no_throttle",
+            "worker_observed_patched_throttle_or_lockout",
+            "model_attempt_hint_not_authoritative",
+            "controller_effective_attempt_budget_enforced",
+        ):
+            checks[key] = NOT_EVALUATED
+
+    # The verifier adjudicated the worker-generated evidence (both arms produced a verifier verdict
+    # over the same controller state), and — because the worker itself executed the sufficient
+    # sequence and crossed the threshold — the verifier's own attempts did NOT substitute for a
+    # missing worker sequence.
+    vuln_status = _verify_status(vuln)
+    patched_status = _verify_status(patched)
+    if vuln_status is not None and patched_status is not None:
+        checks["verifier_adjudicated_worker_evidence"] = (
+            vuln_status in {"CONFIRMED", "PASS"}
+            and patched_status in {"CONFIRMED", "PASS"}
+            and _verify_facts(vuln).get("invalid_never_authenticated") is not False
+            and _verify_facts(patched).get("invalid_never_authenticated") is not False
+        )
+    else:
+        checks["verifier_adjudicated_worker_evidence"] = NOT_EVALUATED
+    if vuln.get("worker") and patched.get("worker"):
+        checks["verifier_did_not_substitute_for_worker_execution"] = _both(
+            _worker_executed_sufficient(vuln, sufficient)
+            and _worker_crossed_threshold(vuln, sufficient),
+            _worker_executed_sufficient(patched, sufficient)
+            and _worker_crossed_threshold(patched, sufficient),
+        )
+    else:
+        checks["verifier_did_not_substitute_for_worker_execution"] = NOT_EVALUATED
+
     # Invalid credentials never authenticated (worker + independent verifier).
     if vuln.get("worker") and patched.get("worker"):
         worker_clean = _both(
@@ -1356,7 +1522,7 @@ def main() -> int:
 
     started = datetime.now(UTC)
     stamp = started.strftime("%Y%m%dT%H%M%SZ")
-    out_dir = Path("artifacts") / f"phase-2.1-live-authentication-testing-{stamp}"
+    out_dir = Path("artifacts") / f"phase-2.1-correction-live-authentication-testing-{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     db_path = str(out_dir / "authentication_jobs.sqlite3")
@@ -1367,9 +1533,11 @@ def main() -> int:
     acceptance: dict[str, Any] = {
         "phase": "2.1",
         "scope": (
-            "single LIVE synthetic Authentication-testing vertical slice for one controller-owned "
-            "vulnerable/patched credential rate-limit/lockout scenario pair (aegis-bank only), "
-            "with a real Lead-to-Authorization-Agent hand-off"
+            "corrected single LIVE synthetic Authentication-testing vertical slice for one "
+            "controller-owned vulnerable/patched credential rate-limit/lockout scenario pair "
+            "(aegis-bank only), with a real Lead-to-Authorization-Agent hand-off and a "
+            "controller-owned probe profile whose sufficient invalid burst the disposable worker "
+            "itself executes (the model's attempt count is a non-authoritative hint only)"
         ),
         "scenario": {
             "target_ref": TARGET_REF,
@@ -1406,7 +1574,8 @@ def main() -> int:
         "elapsed_seconds": round(elapsed_s, 2),
         "verdict": (
             "LIVE GO for one bounded synthetic authentication rate-limit/lockout scenario pair "
-            "with a real Lead-to-Authorization-Agent handoff"
+            "with a real Lead-to-Authorization-Agent handoff and a controller-sufficient worker "
+            "execution"
             if verdict["passed"]
             else "PARTIAL"
         ),

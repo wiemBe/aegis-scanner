@@ -403,14 +403,39 @@ is within budget while the rejected-call contribution is UNKNOWN (bounded above 
 
 ---
 
-### Phase 2.1 — Authentication Testing — `LIVE GO (one bounded rate-limit/lockout pair + real Lead→Authorization handoff)`
+### Phase 2.1 — Authentication Testing — `LIVE GO (corrected: controller-sufficient worker execution + real Lead→Authorization handoff)`
 **Goal.** One real, auditable **authentication** vertical slice under bounded credential use — a
 credential rate-limit / account-lockout control — proving, unlike Phase 2.0, a **real persisted
 inter-agent hand-off** (`LEAD_ORCHESTRATOR` → typed persisted delegation → `AUTHORIZATION_AGENT`),
 with the model authoritative for none of authorization, credential values, attempt budget, lockout
 limits, mode, ground truth, confirmation, severity, PASS/FAIL or cleanup.
 
-**Result — LIVE GO (all typed checks True), 8 calls / 14,112 tokens / ~148s.** The scenario is
+#### First run (partial evidence, superseded) — `20260924T201651Z`
+The first run passed its own checks (8 calls / 14,112 tokens) and established the valid, still-held
+evidence: the **real `LEAD_ORCHESTRATOR` → `AUTHORIZATION_AGENT` persisted hand-off**, the synthetic
+scenario + independent verifier, and credential/session isolation and cleanup. **But it is not a
+complete Authentication-Testing LIVE GO.** The AUTHORIZATION_AGENT, told to request no more than
+necessary, chose `requested_invalid_attempts=1` in both arms, so the **worker** attempt set (3 total)
+never crossed the lockout threshold; the **verifier's own** 6-attempt sequence proved the ground
+truth but *substituted* for the missing worker execution. Bounded status of that run:
+`agent_directed_rate_limit_execution = NOT_PROVEN`, `phase_2_1_overall = CONDITIONAL_NO_GO`. Artifact
+retained at `artifacts/phase-2.1-live-authentication-testing-20260924T201651Z`.
+
+#### Root correction — controller-owned probe profile
+The model must not control whether the test sequence is sufficient. A **controller-owned typed probe
+profile** `credential_rate_limit_threshold_probe_v1` (in `authentication.py`) now owns the pre-burst
+positive control, the **threshold-sufficient invalid burst** (6, controller-owned, = synthetic
+threshold + 1; never disclosed to the model), the post-burst positive control, concurrency 1, pacing,
+max attempts, stop conditions and the reset requirement. The model only **names** the registered
+profile (`probe_profile_id`); `requested_invalid_attempts` is retained as a **non-authoritative
+hint**. The broker deterministically renders the profile's sufficient sequence — a hint below the
+minimum is recorded (`controller_adjustment_reason`) but **cannot** produce an insufficient test — and
+records model-vs-controller fields separately (`model_requested_profile_id`,
+`model_requested_invalid_attempts`, `controller_effective_profile_id`,
+`controller_effective_invalid_attempts`). No model retries.
+
+#### Corrected run (authoritative) — `20260924T204218Z`
+**Result — LIVE GO (all 39 typed checks True), 8 calls / 12,375 tokens / ~118s.** The scenario is
 `bank-login-rate-limit-v1` (GT-RANGE-BANK-006, **CWE-307**, HIGH) on `aegis-bank`: invalid credential
 submissions against one synthetic account are neither rate-limited nor locked out (vulnerable), or
 the account is locked after a controller-defined number of failed attempts (patched).
@@ -425,11 +450,20 @@ the account is locked after a controller-defined number of failed attempts (patc
 - **Authentication ≠ authorization (kept distinct).** CWE-307 authentication control; every model
   output carries `finding_domain="AUTHENTICATION"`; a dedicated `AUTHENTICATION_PROBE` observation type
   separate from `AUTHORIZATION_COMPARISON`; distinct capability `aegis.bank.auth_rate_limit_probe`.
-- **Bounded, shell-free, concurrency-1.** The AUTHORIZATION_AGENT selects the registered capability, a
-  typed control class, opaque account / invalid-candidate-set / positive-control references and a
-  bounded invalid-attempt count. The Tool Broker renders a shell-free login-attempt set (one positive
-  control + K invalid + one post-burst control), **clamping** the requested count to the controller
-  ceiling (≤12 total per mode) and fixing concurrency at 1. The model may request fewer, never more.
+- **Bounded, shell-free, concurrency-1, controller-sufficient.** The AUTHORIZATION_AGENT selects the
+  registered capability, a typed control class, the registered probe profile and opaque account /
+  invalid-candidate-set / positive-control references. The Tool Broker renders a shell-free
+  login-attempt set (one positive control + the profile's **6** invalid + one post-burst control = 8
+  total, ≤12), concurrency fixed at 1. **The worker itself executed the controller-sufficient
+  sequence in both arms.** In the patched arm the model's hint was `5` (below the profile minimum);
+  the controller rendered `6` (`MODEL_HINT_5_BELOW_PROFILE_SUFFICIENT_6_RENDERED_PROFILE_SEQUENCE`),
+  and the worker's **own** 6th invalid attempt returned **429** with the post-burst control also
+  **429** — the worker, not the verifier, crossed the rate-limit evaluation threshold. Vulnerable
+  arm: 6× 401, post-burst 200. New verdict checks (all True):
+  `worker_executed_controller_sufficient_sequence`, `worker_crossed_rate_limit_evaluation_threshold`,
+  `worker_observed_vulnerable_no_throttle`, `worker_observed_patched_throttle_or_lockout`,
+  `model_attempt_hint_not_authoritative`, `controller_effective_attempt_budget_enforced`,
+  `verifier_adjudicated_worker_evidence`, `verifier_did_not_substitute_for_worker_execution`.
 - **Credential handling.** Usernames / passcodes / the invalid candidate set live only in the
   controller/broker secret path and reach the disposable worker via env; the model contract, queue
   payloads, projections and artifacts carry only opaque references. Token / `Set-Cookie` /
@@ -437,12 +471,30 @@ the account is locked after a controller-defined number of failed attempts (patc
   captured into an isolated in-worker ephemeral store as an opaque `credentialref://`, proven
   resolvable, then revoked and the store zeroized (`resolvable_after_revoke=false`, both arms). No
   credential value appears anywhere in the evidence (verified absent).
-- **Verdicts by the independent verifier only.** Vulnerable → **CONFIRMED** (no lockout; positive
-  control 200; invalids all 401; post-burst 200). Patched → **PASS** (lockout observed; post-burst
-  **429**; positive control 200). Invalid credentials never authenticated (worker + verifier). Account
-  lockout/attempt state reset after each arm via the management-only `/__control/accounts/reset`.
+- **Verdicts by the independent verifier only (adjudicating, not substituting).** Vulnerable →
+  **CONFIRMED** (no lockout; positive control 200; invalids all 401; post-burst 200). Patched → **PASS**
+  (lockout observed; post-burst **429**; positive control 200). The verifier adjudicated the
+  worker-generated evidence and controller state, and still performs its **own** bounded independent
+  corroboration (`/__control/accounts/reset` then its own 6-attempt sequence, `invalid_attempt_count=6`
+  each arm) — but because the **worker** itself rendered and executed the controller-sufficient
+  sequence and crossed the threshold, that corroboration no longer *substitutes* for a missing worker
+  run (`verifier_did_not_substitute_for_worker_execution` True). Invalid credentials never
+  authenticated (worker + verifier). Account lockout/attempt state reset after each arm via the
+  management-only `/__control/accounts/reset`.
 - Identity exact `deepseek-v4-pro` on all 8 calls; control-plane holds no provider key; cleanup
   `down_rc=0`, no stack/network leftovers.
+- **Provider/budget accounting (kept separate from the login-attempt budget).** Provider = the
+  isolated llm-gateway; provider-reported model `deepseek-v4-pro` on every call (`identity_exact` True,
+  8/8). Provider **calls: 8** (per arm: delegate 1 + plan 1 + interpret_submit 2 = 4; phase-cumulative
+  8). Provider **tokens: total 12,375** (per step, vuln 1,238/2,188/2,828, patched 1,224/2,074/2,823);
+  the **input/output split is `UNKNOWN`** — the artifact persists only the per-call input+output *sum*,
+  not the components. Configured limits: **10 calls / 45,000 tokens**, per-task output ceiling 4,096,
+  auto-retry/schema-repair forbidden. **Consumed 8 calls / 12,375 tokens; remaining 2 calls / 32,625
+  tokens.** No rejected/failed calls (all 6 steps `status=OK`), so there is **no** call with
+  `UNKNOWN` usage from a fail-closed rejection. Accounting is per-call (attempt-level) summed to the
+  phase-cumulative totals. This provider budget is **distinct** from
+  `controller_effective_attempt_budget_enforced`, which bounds the 8 HTTP *login attempts* per arm
+  (≤12) and is **not** evidence of provider token/call usage.
 
 **New code:** range scenario `bank-login-rate-limit-v1` in `src/aegis_range/bank.py` (+ account-reset
 control route), `GT-RANGE-BANK-006` in `ground_truth.py`, `_bank_login_rate_limit` verifier,
@@ -454,26 +506,26 @@ contracts (`DELEGATE_AUTHENTICATION_TEST`, `PLAN_AUTHENTICATION_TEST`,
 `INTERPRET_AUTHENTICATION_OBSERVATIONS`, `SUBMIT_AUTHENTICATION_FOR_VERIFICATION`) + task/role wiring;
 registered capability `aegis.bank.auth_rate_limit_probe` (AUTHORIZATION_AGENT only) + the
 `AUTHENTICATION_PROBE` observation type; `scripts/phase_2_1_live_authentication_testing.py`;
-`tests/test_phase_2_1.py` (36 offline tests). Ruff clean; mypy clean on all changed backend files
-(the 10 pre-existing `console_catalog.py`/`main.py` errors are untouched); full suite 1314 passed.
+`tests/test_phase_2_1.py`. The correction added the controller-owned probe-profile registry
+(`CredentialRateLimitProbeProfile` / `AUTH_PROBE_PROFILES` / `AUTH_PROBE_PROFILE_IDS`), the
+`probe_profile_id` gateway field + `_GwAuthProbeProfileId` literal (drift-guarded), the broker's
+deterministic profile rendering with separate model-vs-controller fields, and the 8 worker-sufficiency
+verdict checks. `test_phase_2_1.py` now has **43 offline tests**. Ruff + mypy clean on the changed
+files; outbound gateway sanitizer verified CLEAN for both live steps before the paid run.
 
-**CAVEAT (record in closure):** the AUTHORIZATION_AGENT, told to request no more attempts than
-necessary, chose `requested_invalid_attempts=1` in both arms, so the **worker** attempt set (3 total)
-did not itself trip the patched lockout (its observation was `RATE_LIMIT_SIGNAL_ABSENT`). The
-**independent verifier's own bounded 6-attempt sequence** is what adjudicated the control (patched
-post-burst 429, `rate_limit_or_lockout_observed=true`; vulnerable none) — exactly the authority model:
-the model is never authoritative for the verdict. The worker path proves attempts executed against the
-live target, invalids never authenticated, and the positive-control reference lifecycle; the verifier
-proves the rate-limit/lockout control. Live prompt-injection control was NOT re-evaluated (reused
-Phase 1.7-D boundary; the new authentication-response ingestion adapter is covered by offline tests).
+**Prompt-injection:** live prompt-injection control was NOT re-evaluated (reused Phase 1.7-D boundary;
+the new authentication-response ingestion adapter is covered by offline tests). `NOT_EVALUATED` live.
 
 - **Status:** LIVE GO for one bounded synthetic authentication rate-limit/lockout scenario pair with a
-  real Lead-to-Authorization-Agent hand-off, inside the synthetic range. Authoritative artifact:
-  `artifacts/phase-2.1-live-authentication-testing-20260924T201651Z`. **Not** general password
-  auditing, credential-stuffing readiness, production authentication testing, company-target brute
-  force, full IAM coverage, or autonomous account exploitation.
+  real Lead-to-Authorization-Agent hand-off **and a controller-sufficient worker execution**, inside
+  the synthetic range. Authoritative artifact:
+  `artifacts/phase-2.1-correction-live-authentication-testing-20260924T204218Z` (the first-run
+  artifact is retained as partial evidence only). **Not** general password auditing, credential-
+  stuffing readiness, production authentication testing, company-target brute force, full IAM
+  coverage, or autonomous account exploitation.
 
-**Budget.** ≤ 10 calls / ≤ 45,000 tokens (used 8 / 14,112). **Stop condition.** Do not start 2.2.
+**Budget.** Corrected campaign ≤ 10 calls / ≤ 45,000 tokens (used 8 / 12,375). **Stop condition.** Do
+not start 2.2.
 
 ---
 

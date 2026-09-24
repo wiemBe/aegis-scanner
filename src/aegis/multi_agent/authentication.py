@@ -84,6 +84,59 @@ CONCURRENCY = 1
 # One positive control + K invalid attempts + one post-burst control, so K <= ATTEMPT_CEILING - 2.
 _MAX_INVALID_ATTEMPTS = ATTEMPT_CEILING - 2
 
+
+# --------------------------------------------------------------------------- #
+# Controller-owned probe-profile registry (the root correction).
+# --------------------------------------------------------------------------- #
+# The model selects or recommends a registered probe-profile id; the controller resolves it into the
+# bounded effective test sequence. The profile — never the model — owns whether the invalid burst is
+# sufficient to cross the synthetic policy threshold, the pre/post positive controls, concurrency,
+# pacing, the maximum attempts, the stop conditions and the account reset requirement. None of these
+# values (least of all ``sufficient_invalid_attempts``, which is threshold-derived controller state)
+# is ever placed in a model prompt, projection, observation, queue payload or report. A model-
+# requested invalid count below the profile minimum must not silently become an insufficient test:
+# the controller deterministically renders the profile's sufficient sequence and records the
+# adjustment reason. The value is chosen controller-side to exceed the synthetic lockout threshold
+# by one attempt while staying within ``ATTEMPT_CEILING`` (one pre + K invalid + one post <= 12).
+
+
+class CredentialRateLimitProbeProfile(StrictModel):
+    """A controller-owned, typed probe profile. Fully resolved controller-side; model-blind."""
+
+    profile_id: Literal["credential_rate_limit_threshold_probe_v1"]
+    pre_burst_positive_controls: Literal[1] = 1
+    # Controller-owned invalid-burst length, sufficient to cross the synthetic policy threshold. It
+    # is threshold-derived state; it is never disclosed to the model (which only names the profile).
+    sufficient_invalid_attempts: int = Field(ge=1, le=_MAX_INVALID_ATTEMPTS)
+    post_burst_positive_controls: Literal[1] = 1
+    concurrency: Literal[1] = 1
+    pacing_seconds: float = Field(ge=0.0, le=5.0)
+    max_attempts: int = Field(ge=3, le=ATTEMPT_CEILING)
+    stop_conditions: tuple[str, ...] = Field(min_length=1)
+    reset_required: bool = True
+
+
+CRED_RATE_LIMIT_THRESHOLD_PROBE_V1: Literal["credential_rate_limit_threshold_probe_v1"] = (
+    "credential_rate_limit_threshold_probe_v1"
+)
+
+# The single registered profile. ``sufficient_invalid_attempts=6`` crosses the synthetic lockout
+# threshold (controller-owned, threshold+1) and, with the two controls, totals 8 attempts <= 12.
+AUTH_PROBE_PROFILES: dict[str, CredentialRateLimitProbeProfile] = {
+    CRED_RATE_LIMIT_THRESHOLD_PROBE_V1: CredentialRateLimitProbeProfile(
+        profile_id=CRED_RATE_LIMIT_THRESHOLD_PROBE_V1,
+        sufficient_invalid_attempts=6,
+        pacing_seconds=0.0,
+        max_attempts=ATTEMPT_CEILING,
+        stop_conditions=(
+            "INVALID_CREDENTIAL_AUTHENTICATED",
+            "MAX_ATTEMPTS_REACHED",
+        ),
+        reset_required=True,
+    )
+}
+AUTH_PROBE_PROFILE_IDS: frozenset[str] = frozenset(AUTH_PROBE_PROFILES)
+
 # ------------------------- Controller / broker secret path ------------------------- #
 # These concrete synthetic credential values live ONLY here (and in the rendered attempt bodies the
 # broker hands to the disposable worker). They are never placed in a model prompt, projection,
@@ -146,6 +199,17 @@ class BrokeredAuthExecution(StrictModel):
     account_ref: str = Field(min_length=3, max_length=64)
     candidate_set_ref: str = Field(min_length=3, max_length=64)
     attempt_ceiling: int = Field(ge=1, le=ATTEMPT_CEILING)
+    # Model-requested vs controller-effective fields, kept strictly separate (the root correction).
+    # The profile id and hint are what the model asked for; the effective fields are what the
+    # controller deterministically rendered. A hint never lowers the effective sequence below the
+    # profile minimum.
+    model_requested_profile_id: str = Field(min_length=3, max_length=80)
+    model_requested_invalid_attempts: int = Field(ge=1, le=ATTEMPT_CEILING)
+    controller_effective_profile_id: str = Field(min_length=3, max_length=80)
+    controller_effective_invalid_attempts: int = Field(ge=1, le=ATTEMPT_CEILING)
+    controller_adjustment_reason: str = Field(min_length=3, max_length=120)
+    # Retained for backwards-compatible auditing; equal to the model hint / controller-effective
+    # counts respectively.
     requested_invalid_attempts: int = Field(ge=1, le=ATTEMPT_CEILING)
     rendered_invalid_attempts: int = Field(ge=1, le=ATTEMPT_CEILING)
     total_attempts: int = Field(ge=3, le=ATTEMPT_CEILING)
@@ -184,14 +248,37 @@ class AuthenticationBroker:
             and attempt.positive_control_ref not in AUTH_POSITIVE_CONTROL_REFS
         ):
             raise AuthenticationRejection("AUTH_POSITIVE_CONTROL_REF_NOT_REGISTERED")
+        # Resolve the controller-owned probe profile. The model only *names* it; the profile — not
+        # the model — decides whether the invalid burst is sufficient to cross the synthetic policy
+        # threshold. An unregistered profile fails closed.
+        profile = AUTH_PROBE_PROFILES.get(attempt.probe_profile_id)
+        if profile is None:
+            raise AuthenticationRejection("AUTH_PROBE_PROFILE_NOT_REGISTERED")
         candidates = _INVALID_CANDIDATE_SETS.get(attempt.candidate_set_ref)
         if not candidates:
             raise AuthenticationRejection("AUTH_CANDIDATE_SET_UNRESOLVABLE")
-        # Clamp the requested invalid-attempt count to the controller ceiling and the candidate-set
-        # size. The model can only ever *lower* the budget, never raise it above the controller cap.
-        rendered_invalid = max(
-            1, min(attempt.requested_invalid_attempts, _MAX_INVALID_ATTEMPTS, len(candidates))
+        # Deterministic controller rendering: the effective invalid-attempt count is the profile's
+        # sufficient sequence, clamped only by the hard controller ceiling and the candidate-set
+        # size — NEVER lowered by the model's hint. A hint below the profile minimum is recorded but
+        # cannot produce an insufficient test; a hint at or above it changes nothing.
+        model_hint = attempt.requested_invalid_attempts
+        rendered_invalid = min(
+            profile.sufficient_invalid_attempts, _MAX_INVALID_ATTEMPTS, len(candidates)
         )
+        if rendered_invalid < 1:
+            raise AuthenticationRejection("AUTH_PROFILE_SEQUENCE_UNRENDERABLE")
+        if model_hint < rendered_invalid:
+            adjustment_reason = (
+                f"MODEL_HINT_{model_hint}_BELOW_PROFILE_SUFFICIENT_"
+                f"{rendered_invalid}_RENDERED_PROFILE_SEQUENCE"
+            )
+        elif model_hint > rendered_invalid:
+            adjustment_reason = (
+                f"MODEL_HINT_{model_hint}_ABOVE_PROFILE_SUFFICIENT_"
+                f"{rendered_invalid}_RENDERED_PROFILE_SEQUENCE"
+            )
+        else:
+            adjustment_reason = f"MODEL_HINT_MATCHED_PROFILE_SUFFICIENT_{rendered_invalid}"
         attempts: list[BrokeredAuthAttempt] = [
             BrokeredAuthAttempt(
                 label="POSITIVE_CONTROL",
@@ -222,7 +309,7 @@ class AuthenticationBroker:
         if not shell_free:
             raise AuthenticationRejection("AUTH_EXECUTION_NOT_SHELL_FREE")
         total = len(attempts)
-        if total > ATTEMPT_CEILING:
+        if total > ATTEMPT_CEILING or total > profile.max_attempts:
             raise AuthenticationRejection("AUTH_ATTEMPT_CEILING_EXCEEDED")
         return BrokeredAuthExecution(
             capability_id=plan.capability_id,
@@ -231,7 +318,12 @@ class AuthenticationBroker:
             account_ref=attempt.account_ref,
             candidate_set_ref=attempt.candidate_set_ref,
             attempt_ceiling=ATTEMPT_CEILING,
-            requested_invalid_attempts=attempt.requested_invalid_attempts,
+            model_requested_profile_id=attempt.probe_profile_id,
+            model_requested_invalid_attempts=model_hint,
+            controller_effective_profile_id=profile.profile_id,
+            controller_effective_invalid_attempts=rendered_invalid,
+            controller_adjustment_reason=adjustment_reason,
+            requested_invalid_attempts=model_hint,
             rendered_invalid_attempts=rendered_invalid,
             total_attempts=total,
             concurrency=CONCURRENCY,

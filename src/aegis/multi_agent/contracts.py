@@ -685,6 +685,12 @@ _GwAuthControlClass = Literal[
 _GwAuthAccountRef = Literal["PRIMARY_SYNTHETIC_ACCOUNT"]
 _GwAuthCandidateSetRef = Literal["INVALID_CANDIDATE_SET_A"]
 _GwAuthPositiveControlRef = Literal["POSITIVE_CONTROL_CREDENTIAL"]
+# A registered, controller-owned probe profile. The model may only *select* this id; the controller
+# resolves it into the bounded effective test sequence (pre-burst control, a threshold-sufficient
+# invalid burst, post-burst control, pacing, stop conditions). The threshold value, the
+# vulnerable/patched mode and the expected result are never encoded in the id and never reach the
+# model. Kept in lockstep with aegis.multi_agent.authentication.AUTH_PROBE_PROFILE_IDS.
+_GwAuthProbeProfileId = Literal["credential_rate_limit_threshold_probe_v1"]
 _GwAuthObservationKind = Literal[
     "LOGIN_ATTEMPT_RESPONSE",
     "RATE_LIMIT_SIGNAL_PRESENT",
@@ -716,13 +722,17 @@ class AuthenticationDelegationOutput(StrictModel):
 class GatewayAuthAttemptSelection(StrictModel):
     """Typed attempt-budget *selection* only. No username, passcode or candidate value here.
 
-    The model selects the opaque account and invalid-candidate-set references, an optional positive
-    -control reference, and how many invalid attempts to request. ``requested_invalid_attempts`` is
-    schema-bounded and clamped again by the controller/broker, so the model can only ever request
-    *fewer* attempts than the controller ceiling — never more. ``concurrency`` is fixed at 1.
+    The model selects a registered controller-owned probe profile (``probe_profile_id``), the opaque
+    account and invalid-candidate-set references and an optional positive-control reference. The
+    profile — not the model — determines whether the invalid burst is sufficient to cross the
+    synthetic policy threshold: the controller resolves ``probe_profile_id`` into the bounded
+    effective sequence. ``requested_invalid_attempts`` is a NON-AUTHORITATIVE hint only; the
+    controller records it but never lets a hint below the profile minimum become an insufficient
+    test. ``concurrency`` is fixed at 1.
     """
 
     method: Literal["POST"] = "POST"
+    probe_profile_id: _GwAuthProbeProfileId = "credential_rate_limit_threshold_probe_v1"
     account_ref: _GwAuthAccountRef = "PRIMARY_SYNTHETIC_ACCOUNT"
     candidate_set_ref: _GwAuthCandidateSetRef = "INVALID_CANDIDATE_SET_A"
     positive_control_ref: _GwAuthPositiveControlRef | None = None
