@@ -403,16 +403,77 @@ is within budget while the rejected-call contribution is UNKNOWN (bounded above 
 
 ---
 
-### Phase 2.1 — Authentication Testing — `PLANNED`
-**Goal.** Authentication/session testing under bounded credential use.
+### Phase 2.1 — Authentication Testing — `LIVE GO (one bounded rate-limit/lockout pair + real Lead→Authorization handoff)`
+**Goal.** One real, auditable **authentication** vertical slice under bounded credential use — a
+credential rate-limit / account-lockout control — proving, unlike Phase 2.0, a **real persisted
+inter-agent hand-off** (`LEAD_ORCHESTRATOR` → typed persisted delegation → `AUTHORIZATION_AGENT`),
+with the model authoritative for none of authorization, credential values, attempt budget, lockout
+limits, mode, ground truth, confirmation, severity, PASS/FAIL or cleanup.
 
-**Acceptance checks:**
-- Bounded credential usage (controller-owned values, gateway-only).
-- Lockout / rate-limit behavior observed and respected.
-- Credential isolation proven; no credential leakage into projections/logs.
-- Belongs to a distinct **Authentication Testing** capability (not folded into recon).
+**Result — LIVE GO (all typed checks True), 8 calls / 14,112 tokens / ~148s.** The scenario is
+`bank-login-rate-limit-v1` (GT-RANGE-BANK-006, **CWE-307**, HIGH) on `aegis-bank`: invalid credential
+submissions against one synthetic account are neither rate-limited nor locked out (vulnerable), or
+the account is locked after a controller-defined number of failed attempts (patched).
+- **Real inter-agent hand-off (the 2.0 NOT_EVALUATED item, now proven for one pair).** Per arm: a real
+  addressable `agentjob://LEAD_ORCHESTRATOR/<id>` job is queued+claimed, one live
+  `DELEGATE_AUTHENTICATION_TEST` produces a typed delegation persisted at
+  `agentqueue://AUTHORIZATION_AGENT/<id>`, and a **separate** real
+  `agentjob://AUTHORIZATION_AGENT/<id>` job (carrying that delegation id + the producer job id) is
+  queued+claimed; both jobs reach `CLOSED` (QUEUED→CLAIMED→CLOSED). The delegation row links producer
+  job → consumer job → task type → source-evidence SHA-256; `handoff_linked` verified True. Role
+  labels alone are never accepted as proof — the two jobs are distinct persisted addressable records.
+- **Authentication ≠ authorization (kept distinct).** CWE-307 authentication control; every model
+  output carries `finding_domain="AUTHENTICATION"`; a dedicated `AUTHENTICATION_PROBE` observation type
+  separate from `AUTHORIZATION_COMPARISON`; distinct capability `aegis.bank.auth_rate_limit_probe`.
+- **Bounded, shell-free, concurrency-1.** The AUTHORIZATION_AGENT selects the registered capability, a
+  typed control class, opaque account / invalid-candidate-set / positive-control references and a
+  bounded invalid-attempt count. The Tool Broker renders a shell-free login-attempt set (one positive
+  control + K invalid + one post-burst control), **clamping** the requested count to the controller
+  ceiling (≤12 total per mode) and fixing concurrency at 1. The model may request fewer, never more.
+- **Credential handling.** Usernames / passcodes / the invalid candidate set live only in the
+  controller/broker secret path and reach the disposable worker via env; the model contract, queue
+  payloads, projections and artifacts carry only opaque references. Token / `Set-Cookie` /
+  `Authorization` values are redacted at the ingestion boundary; the positive-control session token is
+  captured into an isolated in-worker ephemeral store as an opaque `credentialref://`, proven
+  resolvable, then revoked and the store zeroized (`resolvable_after_revoke=false`, both arms). No
+  credential value appears anywhere in the evidence (verified absent).
+- **Verdicts by the independent verifier only.** Vulnerable → **CONFIRMED** (no lockout; positive
+  control 200; invalids all 401; post-burst 200). Patched → **PASS** (lockout observed; post-burst
+  **429**; positive control 200). Invalid credentials never authenticated (worker + verifier). Account
+  lockout/attempt state reset after each arm via the management-only `/__control/accounts/reset`.
+- Identity exact `deepseek-v4-pro` on all 8 calls; control-plane holds no provider key; cleanup
+  `down_rc=0`, no stack/network leftovers.
 
-**Budget.** ≤ 12 calls / ≤ 50,000 tokens. **Stop condition.** Do not start 2.2.
+**New code:** range scenario `bank-login-rate-limit-v1` in `src/aegis_range/bank.py` (+ account-reset
+control route), `GT-RANGE-BANK-006` in `ground_truth.py`, `_bank_login_rate_limit` verifier,
+`RangeController.reset_account_state`; `src/aegis/multi_agent/authentication.py` (broker, value-free
+login-response sanitizer, offline-testable disposable worker `run_bounded_login_attempts` with the
+positive-control ephemeral-reference lifecycle, typed observation normalizer, real addressable
+`AuthTaskQueue` for LEAD + AUTHORIZATION jobs and the persisted delegation); four strict gateway
+contracts (`DELEGATE_AUTHENTICATION_TEST`, `PLAN_AUTHENTICATION_TEST`,
+`INTERPRET_AUTHENTICATION_OBSERVATIONS`, `SUBMIT_AUTHENTICATION_FOR_VERIFICATION`) + task/role wiring;
+registered capability `aegis.bank.auth_rate_limit_probe` (AUTHORIZATION_AGENT only) + the
+`AUTHENTICATION_PROBE` observation type; `scripts/phase_2_1_live_authentication_testing.py`;
+`tests/test_phase_2_1.py` (36 offline tests). Ruff clean; mypy clean on all changed backend files
+(the 10 pre-existing `console_catalog.py`/`main.py` errors are untouched); full suite 1314 passed.
+
+**CAVEAT (record in closure):** the AUTHORIZATION_AGENT, told to request no more attempts than
+necessary, chose `requested_invalid_attempts=1` in both arms, so the **worker** attempt set (3 total)
+did not itself trip the patched lockout (its observation was `RATE_LIMIT_SIGNAL_ABSENT`). The
+**independent verifier's own bounded 6-attempt sequence** is what adjudicated the control (patched
+post-burst 429, `rate_limit_or_lockout_observed=true`; vulnerable none) — exactly the authority model:
+the model is never authoritative for the verdict. The worker path proves attempts executed against the
+live target, invalids never authenticated, and the positive-control reference lifecycle; the verifier
+proves the rate-limit/lockout control. Live prompt-injection control was NOT re-evaluated (reused
+Phase 1.7-D boundary; the new authentication-response ingestion adapter is covered by offline tests).
+
+- **Status:** LIVE GO for one bounded synthetic authentication rate-limit/lockout scenario pair with a
+  real Lead-to-Authorization-Agent hand-off, inside the synthetic range. Authoritative artifact:
+  `artifacts/phase-2.1-live-authentication-testing-20260924T201651Z`. **Not** general password
+  auditing, credential-stuffing readiness, production authentication testing, company-target brute
+  force, full IAM coverage, or autonomous account exploitation.
+
+**Budget.** ≤ 10 calls / ≤ 45,000 tokens (used 8 / 14,112). **Stop condition.** Do not start 2.2.
 
 ---
 

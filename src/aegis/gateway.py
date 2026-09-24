@@ -37,6 +37,10 @@ from aegis.multi_agent.contracts import (
     AgentGatewayResponse,
     AgentRole,
     AttackChainPlanOutput,
+    AuthenticationDelegationOutput,
+    AuthenticationInterpretationOutput,
+    AuthenticationPlanOutput,
+    AuthenticationSubmissionOutput,
     AuthorizationAgentOutput,
     ChainExplanationOutput,
     ChainNextStepOutput,
@@ -102,6 +106,12 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "INTERPRET_CHAIN_STAGE": ChainStageInterpretationOutput,
     "SELECT_NEXT_CHAIN_STEP": ChainNextStepOutput,
     "EXPLAIN_VERIFIED_CHAIN": ChainExplanationOutput,
+    # Phase 2.1 controlled authentication-testing task types. Same reference-only guarantee: no raw
+    # username, passcode, credential value, request body or verdict is representable in any shape.
+    "DELEGATE_AUTHENTICATION_TEST": AuthenticationDelegationOutput,
+    "PLAN_AUTHENTICATION_TEST": AuthenticationPlanOutput,
+    "INTERPRET_AUTHENTICATION_OBSERVATIONS": AuthenticationInterpretationOutput,
+    "SUBMIT_AUTHENTICATION_FOR_VERIFICATION": AuthenticationSubmissionOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -121,6 +131,13 @@ _AGENT_TASK_ROLES = {
     "INTERPRET_CHAIN_STAGE": AgentRole.CHAIN_AGENT,
     "SELECT_NEXT_CHAIN_STEP": AgentRole.AUTHORIZATION_AGENT,
     "EXPLAIN_VERIFIED_CHAIN": AgentRole.CHAIN_AGENT,
+    # Phase 2.1: the Lead Orchestrator delegates the authentication test; the Authorization Agent
+    # plans, interprets and submits it. (This phase tests an authentication control, not an
+    # authorization one, but the bounded credential-facing worker is the Authorization Agent role.)
+    "DELEGATE_AUTHENTICATION_TEST": AgentRole.LEAD_ORCHESTRATOR,
+    "PLAN_AUTHENTICATION_TEST": AgentRole.AUTHORIZATION_AGENT,
+    "INTERPRET_AUTHENTICATION_OBSERVATIONS": AgentRole.AUTHORIZATION_AGENT,
+    "SUBMIT_AUTHENTICATION_FOR_VERIFICATION": AgentRole.AUTHORIZATION_AGENT,
 }
 
 

@@ -85,6 +85,23 @@ GROUND_TRUTH: tuple[ScenarioTruth, ...] = (
         ),
     ),
     ScenarioTruth(
+        "GT-RANGE-BANK-006",
+        "aegis-bank",
+        "bank-login-rate-limit-v1",
+        "CWE-307",
+        "Excessive authentication attempt restriction",
+        "HIGH",
+        (
+            "Invalid credential submissions against a synthetic account are neither rate-limited "
+            "nor locked out, permitting an unbounded credential-guessing sequence."
+        ),
+        (
+            "positive-control login usable",
+            "bounded invalid-attempt sequence executed",
+            "rate-limit/lockout signal present (patched) or absent (vulnerable)",
+        ),
+    ),
+    ScenarioTruth(
         "GT-RANGE-SHOP-001",
         "aegis-shop",
         "shop-catalog-query-v1",

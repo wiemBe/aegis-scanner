@@ -153,6 +153,22 @@ class RangeController:
             reset_generation=generation,
         )
 
+    async def reset_account_state(self, application_id: str) -> dict[str, object]:
+        """Clear an application's authentication lockout/attempt counters without changing modes.
+
+        This is the Phase 2.1 account-state reset (management-plane only). It is used by the cleanup
+        path to prove the synthetic account's lockout/cooldown/attempt state was returned to zero.
+        """
+
+        target = self._target(application_id)
+        async with self._client(target) as client:
+            response = await client.post("/__control/accounts/reset")
+        body: object = response.json() if response.status_code == 200 else {}
+        result: dict[str, object] = {"status_code": response.status_code}
+        if isinstance(body, dict):
+            result.update(body)
+        return result
+
     async def reset_all(self) -> list[HealthResult]:
         results: list[HealthResult] = []
         for application_id in sorted(RANGE_TARGETS):

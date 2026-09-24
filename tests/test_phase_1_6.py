@@ -270,8 +270,8 @@ def test_modes_are_strict_and_resets_default_to_patched() -> None:
 
 
 def test_ground_truth_is_controller_owned_and_not_imported_by_apps() -> None:
-    assert len(GROUND_TRUTH) == 19
-    assert len({item.ground_truth_id for item in GROUND_TRUTH}) == 19
+    assert len(GROUND_TRUTH) == 20
+    assert len({item.ground_truth_id for item in GROUND_TRUTH}) == 20
     assert len(CHAIN_GROUND_TRUTH) == 3
     for item in GROUND_TRUTH:
         assert item.evidence_requirements and item.severity_rationale and item.verifier_id

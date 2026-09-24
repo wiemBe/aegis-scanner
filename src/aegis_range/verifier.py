@@ -97,6 +97,8 @@ class RangeVerifier:
             return await self._bank_profile(target, scenario_id)
         if scenario_id == "bank-recovery-response-v1":
             return await self._bank_recovery(target, scenario_id)
+        if scenario_id == "bank-login-rate-limit-v1":
+            return await self._bank_login_rate_limit(target, scenario_id)
         if scenario_id == "shop-catalog-query-v1":
             return await self._shop_query(target, scenario_id)
         if scenario_id == "shop-promotion-preview-v1":
@@ -292,6 +294,62 @@ class RangeVerifier:
             patched,
             known.content + unknown.content + fourth.content,
             {"responses_differ": different, "fourth_status": fourth.status_code},
+        )
+
+    async def _bank_login_rate_limit(
+        self, target: RangeTarget, scenario_id: str
+    ) -> VerificationResult:
+        account = "alex@example.test"
+        valid = {"username": account, "passcode": "synthetic-alex-pass"}
+        invalid_burst = 6
+        async with self._client(target) as client:
+            # Reset only the account lockout/attempt counters (not the scenario mode), so the
+            # control is adjudicated independently of any earlier worker attempt sequence.
+            await client.post("/__control/accounts/reset")
+            control = await client.post("/api/sessions", json=valid)
+            invalid_statuses: list[int] = []
+            invalid_content = b""
+            for index in range(invalid_burst):
+                probe = await client.post(
+                    "/api/sessions",
+                    json={"username": account, "passcode": f"invalid-verifier-{index}"},
+                )
+                invalid_statuses.append(probe.status_code)
+                invalid_content += probe.content
+                # Safety: stop immediately if an invalid credential ever authenticates.
+                if probe.status_code == 200:
+                    break
+            post = await client.post("/api/sessions", json=valid)
+        lockout_observed = 429 in invalid_statuses
+        invalid_authenticated = any(status == 200 for status in invalid_statuses)
+        control_usable = control.status_code == 200
+        confirmed = (
+            control_usable
+            and not invalid_authenticated
+            and not lockout_observed
+            and all(status == 401 for status in invalid_statuses)
+            and post.status_code == 200
+        )
+        patched = (
+            control_usable
+            and not invalid_authenticated
+            and lockout_observed
+            and post.status_code == 429
+        )
+        evidence = control.content + b"\n" + invalid_content + b"\n" + post.content
+        return self._binary(
+            target,
+            scenario_id,
+            confirmed,
+            patched,
+            evidence,
+            {
+                "positive_control_status": control.status_code,
+                "invalid_attempt_count": len(invalid_statuses),
+                "rate_limit_or_lockout_observed": lockout_observed,
+                "invalid_never_authenticated": not invalid_authenticated,
+                "post_burst_status": post.status_code,
+            },
         )
 
     def _binary(

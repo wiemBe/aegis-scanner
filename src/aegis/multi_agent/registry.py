@@ -43,16 +43,24 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
     AgentRole.AUTHORIZATION_AGENT: RolePolicy(
         AgentRole.AUTHORIZATION_AGENT,
         "Propose owner comparisons using only supplied aliases and resource references.",
-        frozenset({ObservationType.SURFACE, ObservationType.AUTHORIZATION_COMPARISON}),
+        frozenset(
+            {
+                ObservationType.SURFACE,
+                ObservationType.AUTHORIZATION_COMPARISON,
+                ObservationType.AUTHENTICATION_PROBE,
+            }
+        ),
         # Surface observation is also granted to the equivalent single-agent baseline so both
         # paths receive the same envelope and spend the same target-request budget. Phase 2.0 adds
         # the bounded credential-backed internal-service access as the Stage-B authorization
-        # primitive of the verified multi-primitive chain.
+        # primitive of the verified multi-primitive chain. Phase 2.1 adds the bounded authentication
+        # rate-limit/lockout probe (an authentication control, distinct from the BOLA/BFLA ones).
         frozenset(
             {
                 "aegis.surface.openapi",
                 "aegis.authorization.compare",
                 "aegis.cloud.internal_service_access",
+                "aegis.bank.auth_rate_limit_probe",
             }
         ),
         "AuthorizationAgentOutput",
@@ -196,6 +204,20 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
         "aegis.cloud.internal_service_access",
         frozenset({AgentRole.AUTHORIZATION_AGENT, AgentRole.CHAIN_AGENT}),
         2,
+        False,
+    ),
+    # Phase 2.1 controlled authentication-testing capability. It issues one benign positive-control
+    # login and a controller-clamped, bounded sequence of invalid credential attempts (plus one post
+    # -burst control) against the synthetic aegis-bank login surface — a typed HTTP attempt set the
+    # broker renders shell-free at concurrency 1, never a model-authored username, passcode or body.
+    # It is not read-only (it mutates the account lockout/attempt state) and it never confirms,
+    # PASSes or sets severity — only the independent deterministic range verifier does, from
+    # controller-owned ground truth. ``target_requests`` bounds the total attempt budget the
+    # capability may ever render.
+    "aegis.bank.auth_rate_limit_probe": CapabilityPolicy(
+        "aegis.bank.auth_rate_limit_probe",
+        frozenset({AgentRole.AUTHORIZATION_AGENT}),
+        12,
         False,
     ),
 }

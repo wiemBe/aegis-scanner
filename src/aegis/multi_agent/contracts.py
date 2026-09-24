@@ -49,6 +49,9 @@ class AgentTaskState(StrEnum):
 class ObservationType(StrEnum):
     SURFACE = "SURFACE"
     AUTHORIZATION_COMPARISON = "AUTHORIZATION_COMPARISON"
+    # Phase 2.1: authentication-control observations (rate-limit/lockout responses), kept distinct
+    # from AUTHORIZATION_COMPARISON so authentication and authorization findings never conflate.
+    AUTHENTICATION_PROBE = "AUTHENTICATION_PROBE"
     VERIFIER_SUMMARY = "VERIFIER_SUMMARY"
     RECON_INVENTORY = "RECON_INVENTORY"
     INJECTION_PROBE = "INJECTION_PROBE"
@@ -658,6 +661,131 @@ class ChainExplanationOutput(StrictModel):
         return self
 
 
+# --- Phase 2.1 controlled Authentication-testing gateway output contracts (server-selected) ------
+#
+# The strict schemas the gateway derives for the LEAD_ORCHESTRATOR delegation and the AUTHORIZATION
+# _AGENT authentication-testing task types. As with the recon/cloud/chain contracts these are
+# reference-only: the model may select only a registered authentication capability id, a registered
+# target reference, a typed *authentication control class*, opaque account / invalid-candidate-set /
+# positive-control references, and a bounded invalid-attempt count. There is NO field through which
+# it can emit a username, passcode, credential value, raw request body, verdict, PASS/CONFIRMED,
+# severity or lockout threshold. ``finding_domain`` is fixed ``AUTHENTICATION`` so an authentication
+# finding stays semantically distinct from an authorization (BOLA/BFLA) finding, and every
+# ``unconfirmed`` flag is fixed True so only the independent verifier may confirm. The literal alias
+# values are kept in lockstep with aegis.multi_agent.authentication by a drift-guard test; they are
+# duplicated here, not imported, so the isolated gateway process never imports the range inventory.
+AuthCapabilityId = Literal["aegis.bank.auth_rate_limit_probe"]
+_GwAuthControlClass = Literal[
+    "CREDENTIAL_RATE_LIMIT",
+    "ACCOUNT_LOCKOUT",
+    "LOGIN_COOLDOWN",
+]
+# Opaque, symbolic references. None is a username, passcode or candidate value: the broker resolves
+# each to a controller-owned synthetic value controller-side, and never to the model.
+_GwAuthAccountRef = Literal["PRIMARY_SYNTHETIC_ACCOUNT"]
+_GwAuthCandidateSetRef = Literal["INVALID_CANDIDATE_SET_A"]
+_GwAuthPositiveControlRef = Literal["POSITIVE_CONTROL_CREDENTIAL"]
+_GwAuthObservationKind = Literal[
+    "LOGIN_ATTEMPT_RESPONSE",
+    "RATE_LIMIT_SIGNAL_PRESENT",
+    "RATE_LIMIT_SIGNAL_ABSENT",
+    "POSITIVE_CONTROL_USABLE",
+    "NO_FINDING",
+    "INCOMPLETE_TOOL_ERROR",
+]
+_GwAuthDomain = Literal["AUTHENTICATION"]
+
+
+class AuthenticationDelegationOutput(StrictModel):
+    """DELEGATE_AUTHENTICATION_TEST (LEAD_ORCHESTRATOR): a typed hand-off to the auth agent.
+
+    The lead references only the downstream agent, the finding domain, a registered authentication
+    capability, a target reference and a typed authentication control class. It cannot express a
+    URL, a username, a credential value, a verdict or severity. ``unconfirmed`` is fixed True.
+    """
+
+    to_agent: Literal["AUTHORIZATION_AGENT"] = "AUTHORIZATION_AGENT"
+    finding_domain: _GwAuthDomain = "AUTHENTICATION"
+    capability_id: AuthCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    control_class: _GwAuthControlClass
+    rationale: str = Field(min_length=3, max_length=300)
+    unconfirmed: Literal[True] = True
+
+
+class GatewayAuthAttemptSelection(StrictModel):
+    """Typed attempt-budget *selection* only. No username, passcode or candidate value here.
+
+    The model selects the opaque account and invalid-candidate-set references, an optional positive
+    -control reference, and how many invalid attempts to request. ``requested_invalid_attempts`` is
+    schema-bounded and clamped again by the controller/broker, so the model can only ever request
+    *fewer* attempts than the controller ceiling — never more. ``concurrency`` is fixed at 1.
+    """
+
+    method: Literal["POST"] = "POST"
+    account_ref: _GwAuthAccountRef = "PRIMARY_SYNTHETIC_ACCOUNT"
+    candidate_set_ref: _GwAuthCandidateSetRef = "INVALID_CANDIDATE_SET_A"
+    positive_control_ref: _GwAuthPositiveControlRef | None = None
+    requested_invalid_attempts: int = Field(ge=1, le=12)
+    concurrency: Literal[1] = 1
+
+
+class AuthenticationPlanOutput(StrictModel):
+    """PLAN_AUTHENTICATION_TEST: select the registered auth capability and a bounded attempt set.
+
+    The plan references only a registered authentication capability, an inventory target reference,
+    a typed authentication control class and the typed attempt selection (opaque references + a
+    bounded invalid-attempt count). It cannot express a URL, username, passcode, credential value,
+    raw body, verdict or severity. ``unconfirmed`` is fixed True — only the verifier confirms.
+    """
+
+    finding_domain: _GwAuthDomain = "AUTHENTICATION"
+    capability_id: AuthCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    control_class: _GwAuthControlClass
+    attempt: GatewayAuthAttemptSelection
+    rationale: str = Field(min_length=3, max_length=300)
+    unconfirmed: Literal[True] = True
+
+
+class AuthenticationInterpretationOutput(StrictModel):
+    """INTERPRET_AUTHENTICATION_OBSERVATIONS: a bounded, reference-only reading of observations.
+
+    It has no verdict, PASS, CONFIRMED or severity field: the agent cannot confirm an authentication
+    control gap. ``unconfirmed`` is fixed True so the schema itself restates that only the
+    independent verifier may confirm.
+    """
+
+    summary: str = Field(min_length=3, max_length=400)
+    finding_domain: _GwAuthDomain = "AUTHENTICATION"
+    salient_observation_kinds: list[_GwAuthObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    control_hypothesis: _GwAuthControlClass
+    unconfirmed: Literal[True] = True
+
+
+class AuthenticationSubmissionOutput(StrictModel):
+    """SUBMIT_AUTHENTICATION_FOR_VERIFICATION: recommend independent verification, never confirm.
+
+    The submission carries only references: the deterministic verifier authority, the finding
+    domain, a registered capability id, a target reference and the typed authentication control
+    class. There is deliberately no verdict field of any kind — the agent structurally cannot
+    self-confirm, and ``unconfirmed`` (fixed True) restates that. (A ``confirmed`` field is
+    intentionally absent: it would re-introduce a self-confirmation surface and, as a schema
+    property name, trip the gateway's verdict-token sanitizer that keeps every outbound projection
+    free of the confirmed/pass tokens.)
+    """
+
+    to_verifier: Literal["DETERMINISTIC_RANGE_VERIFIER"]
+    finding_domain: _GwAuthDomain = "AUTHENTICATION"
+    capability_id: AuthCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    control_class: _GwAuthControlClass
+    unconfirmed: Literal[True] = True
+    rationale: str = Field(min_length=3, max_length=300)
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -694,6 +822,11 @@ class AgentGatewayRequest(StrictModel):
         "INTERPRET_CHAIN_STAGE",
         "SELECT_NEXT_CHAIN_STEP",
         "EXPLAIN_VERIFIED_CHAIN",
+        # Phase 2.1 controlled authentication-testing task types.
+        "DELEGATE_AUTHENTICATION_TEST",
+        "PLAN_AUTHENTICATION_TEST",
+        "INTERPRET_AUTHENTICATION_OBSERVATIONS",
+        "SUBMIT_AUTHENTICATION_FOR_VERIFICATION",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)
