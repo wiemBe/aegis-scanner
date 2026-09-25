@@ -28,6 +28,7 @@ authorized invocation of ``scripts/phase_2_9_consolidated_acceptance.py --execut
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -141,6 +142,63 @@ def assert_phase29_projection_clean(context: Mapping[str, Any]) -> dict[str, Any
     # validated (no non-serializable objects, no hidden attributes).
     sanitized: dict[str, Any] = json.loads(json.dumps(context, sort_keys=True))
     return sanitized
+
+
+# The exact allowlisted top-level projection shapes for the five planned campaign calls. A task's
+# dispatched context must match one of its registered key sets EXACTLY — an unexpected (extra),
+# missing or unknown-task shape fails closed BEFORE any dispatch. This complements the
+# forbidden-category scan: the scan rejects known-bad content, this rejects anything not explicitly
+# expected for the specific call.
+_ALLOWED_PROJECTION_SHAPES: dict[str, tuple[frozenset[str], ...]] = {
+    "DELEGATE_ADVERSARY_SIMULATION": (frozenset({"target_ref", "capability_catalog"}),),
+    # PLAN is issued twice with distinct, individually-allowlisted shapes (initial / retest).
+    "PLAN_ADVERSARY_SIMULATION": (
+        frozenset({"target_ref", "capability_id"}),
+        frozenset({"target_ref", "finding_ref"}),
+    ),
+    "RECOMMEND_ADVERSARY_REMEDIATION": (frozenset({"finding_ref", "salient"}),),
+    "GENERATE_ASSESSMENT_REPORT": (frozenset({"finding_id", "campaign_id"}),),
+}
+
+
+class Phase29ProjectionShapeError(ValueError):
+    """A model projection had an unexpected shape for its task; fail closed before any dispatch."""
+
+    code = "PHASE_2_9_PROJECTION_SHAPE_UNEXPECTED"
+
+    def __init__(self, task_type: str, keys: list[str]) -> None:
+        self.task_type = task_type
+        self.keys = keys
+        super().__init__(f"{self.code}:{task_type}:{','.join(sorted(keys))}")
+
+
+def assert_phase29_projection_shape(task_type: str, sanitized: Mapping[str, Any]) -> None:
+    """Fail closed unless the sanitized projection matches an allowlisted shape for the task."""
+
+    allowed = _ALLOWED_PROJECTION_SHAPES.get(task_type)
+    keys = set(sanitized)
+    if allowed is None or keys not in allowed:
+        raise Phase29ProjectionShapeError(task_type, sorted(keys))
+
+
+def gateway_projection_corresponds(
+    projection: Mapping[str, Any], sanitized: Mapping[str, Any]
+) -> bool:
+    """True iff the gateway-retained request projection corresponds to the sanitized dispatched ctx.
+
+    The retained projection must record a CLEAN redaction with no forbidden categories, and — when
+    it carries the context field names the gateway retained — those names must be exactly the
+    sanitized context's keys (no field crossed that was not in the sanitized projection).
+    """
+
+    if projection.get("redaction_status") != "CLEAN":
+        return False
+    if list(projection.get("forbidden_categories_present") or []):
+        return False
+    field_names = projection.get("context_field_names")
+    if field_names is not None and set(field_names) != set(sanitized):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -319,7 +377,9 @@ class Phase29GatewayStack:
         """Unconditionally stop the stack (-v --remove-orphans) and prove zero leftovers."""
 
         down = self._dc("down", "-v", "--remove-orphans", timeout=timeout)
-        # Any container still labelled with this compose project is a leftover.
+        # Any container/network/volume still labelled with this compose project is a leftover. Each
+        # listing probe's return code is recorded: a non-zero probe means the leftover state could
+        # NOT be established, so cleanup is treated as unproven (fail closed) rather than clean.
         left = self.runner(
             [DOCKER, "ps", "-a", "--filter", f"label=com.docker.compose.project={self.project}",
              "--format", "{{.Names}}"],
@@ -341,12 +401,21 @@ class Phase29GatewayStack:
         container_leftovers = [n for n in left.stdout.splitlines() if n.strip()]
         network_leftovers = [n for n in nets.stdout.splitlines() if n.strip()]
         volume_leftovers = [n for n in vols.stdout.splitlines() if n.strip()]
-        return {
+        probe_rcs = {
             "down_rc": down.returncode,
+            "container_probe_rc": left.returncode,
+            "network_probe_rc": nets.returncode,
+            "volume_probe_rc": vols.returncode,
+        }
+        all_probes_ok = all(rc == 0 for rc in probe_rcs.values())
+        return {
+            **probe_rcs,
             "container_leftovers": container_leftovers,
             "network_leftovers": network_leftovers,
             "volume_leftovers": volume_leftovers,
-            "no_leftovers": down.returncode == 0
+            # no_leftovers is True ONLY when every probe returned rc 0 AND every leftover list is
+            # empty. A failed down or any failed listing probe makes cleanup unproven -> False.
+            "no_leftovers": all_probes_ok
             and not container_leftovers
             and not network_leftovers
             and not volume_leftovers,
@@ -379,11 +448,18 @@ class Phase29LiveModelError(RuntimeError):
 
 
 def _split_usage(usage: Any) -> tuple[int | None, int | None]:
+    """Strictly validate a provider usage record.
+
+    Both ``input_tokens`` and ``output_tokens`` must be present, strict (non-bool) integers and
+    non-negative. Any absent, partial, boolean, negative, malformed or non-integer field makes the
+    usage UNKNOWN (``None, None``) — it is NEVER coerced to zero as a substitute.
+    """
+
     if not isinstance(usage, dict):
         return None, None
     inp, out = usage.get("input_tokens"), usage.get("output_tokens")
-    ok = isinstance(inp, int) and not isinstance(inp, bool)
-    ok = ok and isinstance(out, int) and not isinstance(out, bool)
+    ok = isinstance(inp, int) and not isinstance(inp, bool) and inp >= 0
+    ok = ok and isinstance(out, int) and not isinstance(out, bool) and out >= 0
     return (inp, out) if ok else (None, None)
 
 
@@ -403,9 +479,35 @@ class Phase29LiveGatewayModel:
         self._stack = stack
         self.reported_models: list[str] = []
         self.attempts: list[dict[str, Any]] = []
+        # Every DISPATCHED attempt (success, rejection, mismatch, unknown-usage, exec failure) with
+        # its known or UNKNOWN usage, so an aborted run still persists the full attempt history.
+        self.dispatched_attempts: list[dict[str, Any]] = []
         self.failure_diagnostics: list[dict[str, Any]] = []
         self.sanitized_projections: list[dict[str, Any]] = []
         self.gateway_request_projections: list[dict[str, Any]] = []
+        self.projection_correspondence: list[bool] = []
+
+    def _record_dispatch(
+        self,
+        role: AgentRole,
+        task_type: str,
+        status: str,
+        reported_model: str | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> None:
+        self.dispatched_attempts.append(
+            {
+                "role": role.value,
+                "task_type": task_type,
+                "status": status,
+                "reported_model": reported_model,
+                "provenance": self.name,
+                "input_tokens": input_tokens if input_tokens is not None else UNKNOWN,
+                "output_tokens": output_tokens if output_tokens is not None else UNKNOWN,
+                "usage_known": input_tokens is not None and output_tokens is not None,
+            }
+        )
 
     def generate(
         self,
@@ -416,6 +518,8 @@ class Phase29LiveGatewayModel:
         max_output_tokens: int | None = None,
     ) -> ModelResult:
         sanitized = assert_phase29_projection_clean(context)
+        # Fail closed before dispatch on any unexpected projection shape for this specific task.
+        assert_phase29_projection_shape(task_type, sanitized)
         self.sanitized_projections.append(
             {"role": role.value, "task_type": task_type, "projection": sanitized}
         )
@@ -440,33 +544,63 @@ class Phase29LiveGatewayModel:
                     "exec_stderr_tail": step.get("exec_stderr_tail"),
                 }
             )
+            self._record_dispatch(role, task_type, "GATEWAY_EXEC_FAILED", None, None, None)
             raise Phase29LiveModelError("GATEWAY_EXEC_FAILED")
 
         for model_id in result.get("provider_reported_models") or []:
             if isinstance(model_id, str):
                 self.reported_models.append(model_id)
+        identity = self.reported_models[-1] if self.reported_models else None
 
         if result.get("status") != "OK":
             diagnostic = result.get("diagnostic") or {}
             diagnostic.setdefault("code", result.get("code"))
             diagnostic["task_type"] = task_type
             self.failure_diagnostics.append(diagnostic)
+            # Preserve the provider-reported usage the gateway supplied for the rejected call.
             inp, out = _split_usage(result.get("provider_usage"))
+            self._record_dispatch(role, task_type, "REJECTED", identity, inp, out)
             raise Phase29LiveModelError(str(result.get("code") or "GATEWAY_REJECTED"), inp, out)
 
-        identity = self.reported_models[-1] if self.reported_models else None
+        # A success response. Parse and preserve the reported usage FIRST so a later identity- or
+        # host-validation rejection still settles the budget with the usage the response supplied.
+        input_tokens, output_tokens = _split_usage(result.get("usage"))
+
         if identity != CANONICAL_MODEL:
             self.failure_diagnostics.append(
                 {"code": "PROVIDER_MODEL_MISMATCH", "task_type": task_type, "identity": identity}
             )
-            raise Phase29LiveModelError("PROVIDER_MODEL_MISMATCH")
+            self._record_dispatch(
+                role, task_type, "MODEL_MISMATCH", identity, input_tokens, output_tokens
+            )
+            raise Phase29LiveModelError("PROVIDER_MODEL_MISMATCH", input_tokens, output_tokens)
 
-        usage = result.get("usage") or {}
-        input_tokens = int(usage.get("input_tokens", 0))
-        output_tokens = int(usage.get("output_tokens", 0))
+        # Strict usage: a success with absent/partial/boolean/negative/non-integer usage is UNKNOWN,
+        # never zero. Settle the reserved attempt with UNKNOWN so the budget stops before the next
+        # call rather than assuming zero tokens were spent.
+        if input_tokens is None or output_tokens is None:
+            self.failure_diagnostics.append(
+                {"code": "PROVIDER_USAGE_UNKNOWN", "task_type": task_type, "identity": identity}
+            )
+            self._record_dispatch(role, task_type, "USAGE_UNKNOWN", identity, None, None)
+            raise Phase29LiveModelError("PROVIDER_USAGE_UNKNOWN", None, None)
+
         projection = result.get("request_projection")
         if isinstance(projection, dict):
             self.gateway_request_projections.append(projection)
+            corresponds = gateway_projection_corresponds(projection, sanitized)
+            self.projection_correspondence.append(corresponds)
+            if not corresponds:
+                self.failure_diagnostics.append(
+                    {"code": "GATEWAY_PROJECTION_MISMATCH", "task_type": task_type}
+                )
+                self._record_dispatch(
+                    role, task_type, "PROJECTION_MISMATCH", identity, input_tokens, output_tokens
+                )
+                raise Phase29LiveModelError(
+                    "GATEWAY_PROJECTION_MISMATCH", input_tokens, output_tokens
+                )
+
         self.attempts.append(
             {
                 "role": role.value,
@@ -478,6 +612,7 @@ class Phase29LiveGatewayModel:
                 "total_tokens": input_tokens + output_tokens,
             }
         )
+        self._record_dispatch(role, task_type, "OK", identity, input_tokens, output_tokens)
         return ModelResult(
             payload_json=result["payload_json"],
             usage=ModelUsage(input_tokens=input_tokens, output_tokens=output_tokens),
@@ -497,7 +632,9 @@ class Phase29LiveGatewayModel:
 
 
 StackFactory = Callable[[str], Phase29GatewayStack]
-CampaignFactory = Callable[[Path, Phase29LiveGatewayModel], ConsolidatedOpsCampaign]
+# (base_dir, model, authorization_reference) -> campaign. The authorization reference is threaded
+# into the controller-owned AssessmentSpec so the live binding can be proven for exact equality.
+CampaignFactory = Callable[[Path, Phase29LiveGatewayModel, str], ConsolidatedOpsCampaign]
 
 
 class LiveCampaignError(RuntimeError):
@@ -513,11 +650,17 @@ def _default_stack_factory(campaign_id: str) -> Phase29GatewayStack:
 
 
 def _default_campaign_factory(
-    base_dir: Path, model: Phase29LiveGatewayModel
+    base_dir: Path, model: Phase29LiveGatewayModel, authorization_reference: str
 ) -> ConsolidatedOpsCampaign:
     # A real live run stands up the real synthetic range container; the model boundary is the live
-    # isolated gateway adapter (never the deterministic double).
-    return ConsolidatedOpsCampaign(base_dir=base_dir, containerized=True, model=model)
+    # isolated gateway adapter (never the deterministic double). The validated non-secret operator
+    # authorization reference is threaded into the controller-owned AssessmentSpec.
+    return ConsolidatedOpsCampaign(
+        base_dir=base_dir,
+        containerized=True,
+        model=model,
+        authorization_reference=authorization_reference,
+    )
 
 
 def run_live_campaign(
@@ -538,29 +681,49 @@ def run_live_campaign(
     """
 
     started = datetime.now(UTC)
-    art_dir = out_root / "evidence"
 
     # Build the campaign first so its canonical campaign_id names the gateway project too. A never-
-    # called placeholder model is passed in, then replaced with the stack-bound live model.
-    campaign = campaign_factory(out_root / "work", _PlaceholderModel())  # type: ignore[arg-type]
+    # called placeholder model is passed in, then replaced with the stack-bound live model. The
+    # validated non-secret authorization reference is threaded into the controller-owned spec here.
+    campaign = campaign_factory(
+        out_root / "work",
+        _PlaceholderModel(),  # type: ignore[arg-type]
+        authorization_ref,
+    )
     stack = stack_factory(campaign.campaign_id)
     live_model = Phase29LiveGatewayModel(stack)
     campaign.model = live_model
+    # Collision-resistant, per-run evidence directory (refuses an existing path — never exist_ok).
+    art_dir = out_root / f"evidence-{campaign.campaign_id}"
+    controller_authorization_reference = campaign.asm.spec.authorization_reference
 
     stack_teardown: dict[str, Any] = {"down_rc": None, "no_leftovers": None}
     preflight: dict[str, Any] = {
+        "gateway_build_rc": None,
         "gateway_up": False,
         "gateway_healthy": False,
-        "control_plane_has_no_key": False,
+        "control_plane_has_no_key": None,
         "gateway_reported_model": None,
         "model_identity_preflight_ok": False,
+        "authorization_binding_ok": False,
     }
     abort_code: str | None = None
     record: dict[str, Any] | None = None
 
     try:
+        # Authorization binding: the controller-recorded spec reference MUST equal the armed
+        # operator reference. A mismatch/missing binding aborts BEFORE any stack starts or dispatch.
+        preflight["authorization_binding_ok"] = (
+            controller_authorization_reference == authorization_ref
+        )
+        if not preflight["authorization_binding_ok"]:
+            raise LiveCampaignError("AUTHORIZATION_BINDING_MISMATCH")
         if build:
-            stack.build()
+            built = stack.build()
+            preflight["gateway_build_rc"] = built.returncode
+            # A non-zero build must abort before `up` or any provider dispatch.
+            if built.returncode != 0:
+                raise LiveCampaignError("GATEWAY_BUILD_FAILED")
         up = stack.up()
         preflight["gateway_up"] = up.returncode == 0
         if up.returncode != 0:
@@ -578,7 +741,12 @@ def run_live_campaign(
             raise LiveCampaignError("MODEL_IDENTITY_PREFLIGHT_MISMATCH")
 
         record = campaign.run()
-    except (LiveCampaignError, Phase29LiveModelError, Phase29ProjectionError) as exc:
+    except (
+        LiveCampaignError,
+        Phase29LiveModelError,
+        Phase29ProjectionError,
+        Phase29ProjectionShapeError,
+    ) as exc:
         abort_code = getattr(exc, "code", type(exc).__name__)
     except Exception as exc:  # noqa: BLE001 - fail closed on ANY error; stacks torn down in finally
         abort_code = f"UNEXPECTED:{type(exc).__name__}"
@@ -587,15 +755,16 @@ def run_live_campaign(
 
     acceptance = _assemble_live_acceptance(
         started=started,
-        campaign_id=stack.campaign_id,
+        campaign_id=campaign.campaign_id,
         authorization_ref=authorization_ref,
+        controller_authorization_reference=controller_authorization_reference,
         preflight=preflight,
         record=record,
         live_model=live_model,
         stack_teardown=stack_teardown,
         abort_code=abort_code,
         art_dir=art_dir,
-        campaign=campaign if abort_code is None else None,
+        campaign=campaign,
     )
     return acceptance
 
@@ -611,52 +780,165 @@ class _PlaceholderModel:
         raise RuntimeError("PLACEHOLDER_MODEL_MUST_BE_REPLACED_BEFORE_USE")
 
 
+def _secret_isolation_evidence(
+    preflight: dict[str, Any], transported_evidence: Any
+) -> dict[str, Any]:
+    """Report ONLY runtime-established secret-isolation facts; unproven ones are NOT_EVALUATED.
+
+    * ``control_plane_key_free`` — the value-free boolean probe result (the control-plane process
+      env does not carry the provider credential), or NOT_EVALUATED when the probe never ran.
+    * ``provider_key_only_in_gateway`` — NOT_EVALUATED: the single control-plane probe cannot, on
+      its own, establish the credential lives ONLY in the gateway (that needs a per-service probe).
+    * ``recorded_evidence_credential_free`` — evidence-derived: no credential-shaped value (an
+      ``sk-*`` key, a bearer token, an ``api_key=`` marker) appears in the recorded evidence.
+    """
+
+    cp = preflight.get("control_plane_has_no_key")
+    control_plane_key_free: bool | str = bool(cp) if isinstance(cp, bool) else NOT_EVALUATED
+    blob = json.dumps(transported_evidence, sort_keys=True, default=str)
+    return {
+        "control_plane_key_free": control_plane_key_free,
+        "provider_key_only_in_gateway": NOT_EVALUATED,
+        "recorded_evidence_credential_free": not bool(_SECRETISH_VALUE.search(blob)),
+    }
+
+
+def _budget_evidence(campaign: ConsolidatedOpsCampaign) -> dict[str, Any]:
+    """Budget reservations + snapshot with known/UNKNOWN usage (available even on an abort)."""
+
+    return {
+        "snapshot": campaign.budget.snapshot(),
+        "reservations": campaign.budget.attempts_export(),
+    }
+
+
+def _persist_live_evidence(
+    art_dir: Path,
+    *,
+    acceptance: dict[str, Any],
+    extra_files: dict[str, Any],
+) -> bool:
+    """Write the outer verdict + extra evidence and an integrity manifest over everything present.
+
+    The caller has already created ``art_dir`` fresh (``exist_ok=False``) and, on a completed run,
+    written the campaign evidence bundle into it. Here the decisive outer live acceptance verdict
+    and every extra evidence file (gateway/range cleanup, dispatched attempts, budget) are written
+    and the integrity manifest is computed over ALL files — including ``live_acceptance.json`` —
+    then re-verified. Returns the verification result.
+    """
+
+    for name, payload in extra_files.items():
+        (art_dir / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    # The decisive outer live acceptance verdict is written as a normal evidence file so it is
+    # covered by the integrity manifest — never left only on stdout.
+    (art_dir / "live_acceptance.json").write_text(
+        json.dumps(acceptance, indent=2, sort_keys=True) + "\n"
+    )
+    manifest_names = sorted(
+        str(p.relative_to(art_dir))
+        for p in art_dir.rglob("*")
+        if p.is_file() and p.name != "LIVE_SHA256SUMS"
+    )
+    lines = [
+        f"{hashlib.sha256((art_dir / n).read_bytes()).hexdigest()}  {n}" for n in manifest_names
+    ]
+    (art_dir / "LIVE_SHA256SUMS").write_text("\n".join(lines) + "\n")
+    # Re-read and verify every manifested file.
+    verified = True
+    for line in (art_dir / "LIVE_SHA256SUMS").read_text().splitlines():
+        if not line.strip():
+            continue
+        digest, name = line.split("  ", 1)
+        if hashlib.sha256((art_dir / name).read_bytes()).hexdigest() != digest:
+            verified = False
+    return verified
+
+
 def _assemble_live_acceptance(
     *,
     started: datetime,
     campaign_id: str,
     authorization_ref: str,
+    controller_authorization_reference: str,
     preflight: dict[str, Any],
     record: dict[str, Any] | None,
     live_model: Phase29LiveGatewayModel | None,
     stack_teardown: dict[str, Any],
     abort_code: str | None,
     art_dir: Path,
-    campaign: ConsolidatedOpsCampaign | None,
+    campaign: ConsolidatedOpsCampaign,
 ) -> dict[str, Any]:
-    """Build (and, on a completed run, persist) the fail-closed live acceptance record.
+    """Build and ALWAYS persist the fail-closed live acceptance record (aborts included).
 
     The live-provider *status* is never LIVE GO here: this build observes and records the evidence
-    but leaves the GO/NO-GO adjudication to an explicitly authorized human review.
+    but leaves the GO/NO-GO adjudication to an explicitly authorized human review. Every armed
+    attempt — success or fail-closed abort — produces a fresh, non-overwriting artifact whose
+    integrity manifest covers the live acceptance verdict and the post-run cleanup evidence.
     """
 
-    secret_isolation = {
-        "provider_key_only_in_gateway": bool(preflight["control_plane_has_no_key"]),
-        "host_output_key_free": True,  # this process never reads .env.gateway; compose mounts it
-        "control_plane_key_free": bool(preflight["control_plane_has_no_key"]),
-    }
     reported = sorted(set(live_model.reported_models)) if live_model else []
+    dispatched = list(live_model.dispatched_attempts) if live_model else []
+    diagnostics = list(live_model.failure_diagnostics) if live_model else []
+    sanitized_projections = list(live_model.sanitized_projections) if live_model else []
+    budget_evidence = _budget_evidence(campaign)
+    secret_isolation = _secret_isolation_evidence(
+        preflight,
+        {
+            "sanitized_projections": sanitized_projections,
+            "dispatched_attempts": dispatched,
+            "failure_diagnostics": diagnostics,
+        },
+    )
+    lineage = {
+        "campaign_id": campaign_id,
+        "assessment_id": campaign.asm.assessment_id,
+        "run_epoch": campaign.run_epoch,
+        "loop_id": campaign.asm.loop_id,
+        "finding_id": campaign.asm.finding_id,
+    }
 
     if abort_code is not None or record is None:
-        diagnostics = list(live_model.failure_diagnostics) if live_model else []
-        return {
+        # Fresh directory only: refuse an existing path so a live abort never overwrites evidence.
+        art_dir.mkdir(parents=True, exist_ok=False)
+        acceptance: dict[str, Any] = {
             "phase": "2.9",
             "mode": "LIVE",
             "status": "LIVE_ABORTED_FAIL_CLOSED",
             "abort_code": abort_code or "NO_RECORD",
             "campaign_id": campaign_id,
-            "authorization_ref": authorization_ref,
+            "armed_authorization_reference": authorization_ref,
+            "controller_authorization_reference": controller_authorization_reference,
+            "campaign_lineage": lineage,
             "preflight": preflight,
             "secret_isolation": secret_isolation,
             "provider_reported_models": reported,
+            "dispatched_attempts": dispatched,
+            "budget": budget_evidence,
+            "sanitized_projections": sanitized_projections,
             "failure_diagnostics": diagnostics,
             "phase_2_9_live_provider_status": NOT_EVALUATED,
             "cleanup": stack_teardown,
             "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
         }
+        integrity = _persist_live_evidence(
+            art_dir,
+            acceptance=acceptance,
+            extra_files={
+                "gateway_cleanup.json": stack_teardown,
+                "dispatched_attempts.json": dispatched,
+                "budget_reservations_and_usage.json": budget_evidence,
+                "failure_diagnostics.json": diagnostics,
+            },
+        )
+        acceptance["evidence_dir"] = str(art_dir)
+        acceptance["integrity_manifest_verified"] = integrity
+        return acceptance
 
-    assert campaign is not None
     accounting = build_evidence_accounting(record, live=True)
+    # The campaign bundle is written into the fresh artifact dir by _persist_live_evidence below,
+    # but its manifest verification is needed for the checks — so write it here into the (not-yet-
+    # existing) dir first, then _persist_live_evidence adds the outer verdict + manifest over all.
+    art_dir.mkdir(parents=True, exist_ok=False)
     artifact_result = write_campaign_artifacts(art_dir, campaign, record)
     checks = build_phase_2_9_checks(
         record,
@@ -669,17 +951,45 @@ def _assemble_live_acceptance(
     true_checks = sorted(k for k, v in checks.items() if v is True)
     ne_checks = sorted(k for k, v in checks.items() if v == NOT_EVALUATED)
     false_checks = sorted(k for k, v in checks.items() if v is False)
-    return {
+
+    # Cleanup CONTROLS the verdict. Observed-success is permitted ONLY when every controller, range,
+    # gateway, artifact, budget and typed check required for observation is strictly true.
+    usage_complete = record["lifecycle"]["usage_complete"] is True
+    gateway_cleanup_clean = stack_teardown.get("no_leftovers") is True
+    range_cleanup_clean = (
+        record["cleanup"]["cleanup_ok"] is True
+        and record["cleanup"]["no_leftovers"] in (True, None)
+    )
+    gates = {
+        "typed_verdict_satisfied": verdicts["phase_2_9"]["satisfied"] is True,
+        "no_false_checks": not false_checks,
+        "artifact_manifest_verified": bool(artifact_result["manifest_verified"]),
+        "budget_usage_complete": usage_complete,
+        "gateway_cleanup_no_leftovers": gateway_cleanup_clean,
+        "range_cleanup_complete": range_cleanup_clean,
+    }
+    observed_ok = all(gates.values())
+    status = (
+        "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+        if observed_ok
+        else "LIVE_OBSERVED_FAILED_CLOSED"
+    )
+
+    acceptance = {
         "phase": "2.9",
         "mode": "LIVE",
-        "status": "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION",
+        "status": status,
         "campaign_id": campaign_id,
-        "authorization_ref": authorization_ref,
+        "armed_authorization_reference": authorization_ref,
+        "controller_authorization_reference": controller_authorization_reference,
+        "campaign_lineage": lineage,
         "preflight": preflight,
         "secret_isolation": secret_isolation,
         "evidence_accounting": accounting,
         "provider_reported_models": reported,
-        "sanitized_projections": live_model.sanitized_projections if live_model else [],
+        "dispatched_attempts": dispatched,
+        "budget": budget_evidence,
+        "sanitized_projections": sanitized_projections,
         "checks": checks,
         "check_counts": {
             "true": len(true_checks),
@@ -690,6 +1000,7 @@ def _assemble_live_acceptance(
         "not_evaluated_checks": ne_checks,
         "false_checks": false_checks,
         "typed_verdicts": verdicts,
+        "live_acceptance_gates": gates,
         "canonical_job_addresses": {
             "lead": record["jobs"]["lead_job_address"],
             "initial_recon": record["jobs"]["recon_job_address"],
@@ -699,9 +1010,20 @@ def _assemble_live_acceptance(
         # This task never claims LIVE GO; the top-line provider status stays NOT_EVALUATED.
         "phase_2_9_live_provider_status": NOT_EVALUATED,
         "cleanup": stack_teardown,
-        "evidence_dir": str(art_dir),
         "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
     }
+    integrity = _persist_live_evidence(
+        art_dir,
+        acceptance=acceptance,
+        extra_files={
+            "gateway_cleanup.json": stack_teardown,
+            "dispatched_attempts.json": dispatched,
+            "live_budget_reservations.json": budget_evidence,
+        },
+    )
+    acceptance["evidence_dir"] = str(art_dir)
+    acceptance["integrity_manifest_verified"] = integrity
+    return acceptance
 
 
 def guard_is_armed_for_live(request: LiveExecutionRequest) -> bool:

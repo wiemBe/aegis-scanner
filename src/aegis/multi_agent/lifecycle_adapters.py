@@ -216,6 +216,10 @@ class OpsDetectionControlLifecycle:
     base_dir: Path
     run_epoch: int = 7
     campaign_id: str = CAMPAIGN_ID
+    # Controller-owned authorization reference recorded on the AssessmentSpec. The default preserves
+    # the historical integration value for every existing caller and the provider-free dry run; an
+    # armed live campaign threads the validated non-secret operator reference here instead.
+    authorization_reference: str = "authz-range-ops-integration"
     lifecycle: AssessmentLifecycleController = field(init=False)
     remediation: RemediationController = field(init=False)
     remediation_ledger: RemediationLedger = field(init=False)
@@ -284,7 +288,7 @@ class OpsDetectionControlLifecycle:
             cumulative_tokens=200_000,
             per_stage_provider_calls=20,
             per_stage_tokens=100_000,
-            authorization_reference="authz-range-ops-integration",
+            authorization_reference=self.authorization_reference,
             lease_ref="lease-range-ops-integration",
             lease_expires_at=now + timedelta(hours=2),
             activation_required_capabilities=("aegis.ops.detection_control_probe",),

@@ -534,6 +534,9 @@ class ConsolidatedOpsCampaign:
     containerized: bool = False
     campaign_id: str = field(default_factory=fresh_campaign_id)
     run_epoch: int = RUN_EPOCH
+    # Controller-owned authorization reference for the assessment spec. Default preserves the
+    # dry-run / existing-caller behaviour; a live campaign passes the validated non-secret ref.
+    authorization_reference: str = "authz-range-ops-integration"
     model: ModelBoundary = field(default_factory=Phase29ModelDouble)
     budget: CampaignProviderBudget = field(init=False)
     asm: OpsDetectionControlLifecycle = field(init=False)
@@ -550,6 +553,7 @@ class ConsolidatedOpsCampaign:
             base_dir=self.base_dir / "ledgers",
             run_epoch=self.run_epoch,
             campaign_id=self.campaign_id,
+            authorization_reference=self.authorization_reference,
         )
 
     # ------------------------- provider-call gate -------------------------- #
@@ -1216,6 +1220,24 @@ def build_phase_2_9_checks(
     call_enforced, token_enforced = _ceiling_probes()
     reset_complete, cleanup_complete = _cleanup_reset_complete(record)
 
+    # Evidence semantics: an affirmative ``simulated_*`` claim describes the DETERMINISTIC double
+    # and must never be emitted over live-provider evidence. In live mode these become NOT_EVALUATED
+    # and the live-provider budget/identity checks (``exact_model_identity`` /
+    # ``live_provider_budget_enforced``) carry the observed facts instead.
+    simulated_identity_reported: bool | str = (
+        NOT_EVALUATED if live else (record["model"]["reported_models"] == [CANONICAL_MODEL])
+    )
+    simulated_call_ceiling: bool | str = (
+        NOT_EVALUATED
+        if live
+        else (call_enforced and snap["calls_recorded"] <= MAX_PROVIDER_CALLS)
+    )
+    simulated_token_ceiling: bool | str = (
+        NOT_EVALUATED
+        if live
+        else (token_enforced and snap["tokens_recorded"] <= MAX_TOTAL_TOKENS)
+    )
+
     def _transitions_closed(trans: list[dict[str, str]]) -> bool:
         seq = [t["to"] for t in trans]
         return "CLAIMED" in seq and "CLOSED" in seq
@@ -1229,9 +1251,7 @@ def build_phase_2_9_checks(
         # The deterministic double *reported* the canonical model id; this is a simulated fact, NOT
         # evidence that a live provider served that model. The provider-identity claim stays
         # NOT_EVALUATED until an authorized paid campaign runs.
-        "simulated_model_identity_reported": (
-            record["model"]["reported_models"] == [CANONICAL_MODEL]
-        ),
+        "simulated_model_identity_reported": simulated_identity_reported,
         "exact_model_identity": live_identity_ok,
         "fresh_assessment_created": (
             record["assessment_id"].startswith("asmt-")
@@ -1304,12 +1324,8 @@ def build_phase_2_9_checks(
             and budget["snapshot"]["within_ceilings"] is True
             and len(budget["attempts"]) == MAX_PROVIDER_CALLS
         ),
-        "simulated_call_ceiling_enforced": (
-            call_enforced and budget["snapshot"]["calls_recorded"] <= MAX_PROVIDER_CALLS
-        ),
-        "simulated_token_ceiling_enforced": (
-            token_enforced and budget["snapshot"]["tokens_recorded"] <= MAX_TOTAL_TOKENS
-        ),
+        "simulated_call_ceiling_enforced": simulated_call_ceiling,
+        "simulated_token_ceiling_enforced": simulated_token_ceiling,
         "live_provider_budget_enforced": live_budget_ok,
         "no_public_egress": (
             (
@@ -1340,6 +1356,16 @@ def build_typed_verdicts(
 
     def _all(*keys: str) -> bool:
         return all(checks.get(k) is True for k in keys)
+
+    # Mode discriminator: in live mode the provider-only checks are observed booleans; in the dry
+    # run they are NOT_EVALUATED. The cumulative budget verdict must use the mode-correct check so a
+    # live verdict is never derived from an affirmative simulated_* claim (NOT_EVALUATED when live).
+    live = isinstance(checks.get("exact_model_identity"), bool)
+    budget_keys: tuple[str, ...] = (
+        ("live_provider_budget_enforced",)
+        if live
+        else ("simulated_call_ceiling_enforced", "simulated_token_ceiling_enforced")
+    )
 
     phase_2_3 = {
         "initial_finding_verifier_confirmed": checks["initial_verifier_confirmed"],
@@ -1374,15 +1400,12 @@ def build_typed_verdicts(
         "actual_lifecycle_adapters_executed": checks["lifecycle_lineage_complete"],
         "stages_and_lineage_persisted": checks["lifecycle_lineage_complete"],
         "idempotency_resume_preserved": checks["external_effect_replay_blocked"],
-        "cumulative_budget_enforced": _all(
-            "simulated_call_ceiling_enforced", "simulated_token_ceiling_enforced"
-        ),
+        "cumulative_budget_enforced": _all(*budget_keys),
         "final_verdict_controller_owned": record["lifecycle"]["final_state"] == "COMPLETED",
         "satisfied": _all(
             "lifecycle_lineage_complete",
             "external_effect_replay_blocked",
-            "simulated_call_ceiling_enforced",
-            "simulated_token_ceiling_enforced",
+            *budget_keys,
         ),
         "live_status": NOT_EVALUATED,
     }

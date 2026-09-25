@@ -260,7 +260,12 @@ def _run_live(args: argparse.Namespace) -> int:
         out_root=out_root,
     )
     _print(acceptance)
-    return 0 if acceptance.get("status") == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION" else 5
+    # Non-zero unless observation strictly succeeded AND the evidence artifact verified. A cleanup
+    # failure, false/UNKNOWN required check, artifact/integrity failure or incomplete evidence all
+    # leave the status other than the observed-pending value, so this returns non-zero for them.
+    observed = acceptance.get("status") == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    integrity_ok = acceptance.get("integrity_manifest_verified") is True
+    return 0 if (observed and integrity_ok) else 5
 
 
 def main(argv: list[str] | None = None) -> int:

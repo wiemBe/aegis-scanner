@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+import aegis.multi_agent.phase_2_9_live_gateway as live_gateway
 from aegis.multi_agent.consolidated_campaign import (
     CANONICAL_MODEL,
     ConsolidatedOpsCampaign,
@@ -30,7 +31,9 @@ from aegis.multi_agent.phase_2_9_live_gateway import (
     Phase29LiveGatewayModel,
     Phase29LiveModelError,
     Phase29ProjectionError,
+    Phase29ProjectionShapeError,
     assert_phase29_projection_clean,
+    assert_phase29_projection_shape,
     guard_is_armed_for_live,
     run_live_campaign,
     scan_projection_categories,
@@ -72,6 +75,10 @@ class FakeCompose:
         invalid_payload_at: int | None = None,
         output_tokens_at: dict[int, int] | None = None,
         leftovers: bool = False,
+        fail_build: bool = False,
+        probe_fail: str | None = None,
+        bad_usage_at: dict[int, Any] | None = None,
+        projection_mismatch_at: int | None = None,
     ) -> None:
         self.health_model = health_model
         self.control_plane_has_key = control_plane_has_key
@@ -83,6 +90,14 @@ class FakeCompose:
         self.invalid_payload_at = invalid_payload_at
         self.output_tokens_at = output_tokens_at or {}
         self.leftovers = leftovers
+        self.fail_build = fail_build
+        # Which teardown listing probe reports rc!=0: "ps" | "network" | "volume".
+        self.probe_fail = probe_fail
+        # Per-call replacement usage dict (or None) for a success response (missing/negative/etc.).
+        self.bad_usage_at = bad_usage_at or {}
+        # Emit a non-corresponding gateway request projection on this call index.
+        self.projection_mismatch_at = projection_mismatch_at
+        self.build_calls = 0
         self.argv_log: list[list[str]] = []
         self.step_stdins: list[str] = []
         self.step_calls: list[tuple[str, str]] = []
@@ -93,16 +108,20 @@ class FakeCompose:
         self.argv_log.append(argv)
         last = argv[-1]
         if "build" in argv:
-            return ComposeResult(0)
+            self.build_calls += 1
+            return ComposeResult(1 if self.fail_build else 0)
         if "up" in argv:
             return ComposeResult(1 if self.fail_up else 0)
         if "down" in argv:
             self.down_calls += 1
             return ComposeResult(0)
-        if argv[:2] == ["/usr/local/bin/docker", "ps"] or (len(argv) > 1 and argv[1] == "ps"):
-            return ComposeResult(0, stdout="leftover-container\n" if self.leftovers else "")
-        if len(argv) > 1 and argv[1] in ("network", "volume"):
-            return ComposeResult(0, stdout="")
+        if len(argv) > 1 and argv[1] == "ps":
+            rc = 1 if self.probe_fail == "ps" else 0
+            return ComposeResult(rc, stdout="leftover-container\n" if self.leftovers else "")
+        if len(argv) > 1 and argv[1] == "network":
+            return ComposeResult(1 if self.probe_fail == "network" else 0, stdout="")
+        if len(argv) > 1 and argv[1] == "volume":
+            return ComposeResult(1 if self.probe_fail == "volume" else 0, stdout="")
         # exec-based commands: dispatch on the executed code string.
         if last == _STEP_PY:
             return self._step(stdin)
@@ -147,25 +166,52 @@ class FakeCompose:
             payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
         out_tokens = self.output_tokens_at.get(idx, 60)
+        usage: Any = {"input_tokens": 40, "output_tokens": out_tokens}
+        if idx in self.bad_usage_at:
+            usage = self.bad_usage_at[idx]  # missing/partial/negative/boolean/non-int
+        projection: dict[str, Any] = {
+            "redaction_status": "CLEAN",
+            "forbidden_categories_present": [],
+            "context_field_names": sorted(ctx.keys()),
+        }
+        if self.projection_mismatch_at == idx:
+            # A retained projection whose recorded context fields do NOT match what was dispatched.
+            projection["context_field_names"] = ["unexpected_leaked_field"]
         body = {
             "status": "OK",
             "payload_json": payload_json,
-            "usage": {"input_tokens": 40, "output_tokens": out_tokens},
+            "usage": usage,
             "provider_reported_models": [reported],
-            "request_projection": {"redaction_status": "CLEAN", "forbidden_categories_present": []},
+            "request_projection": projection,
         }
         return ComposeResult(0, stdout=json.dumps(body))
 
 
-def _run(tmp_path: Path, fake: FakeCompose, **kwargs: Any) -> dict[str, Any]:
+ARMED_AUTHORIZATION_REF = "ops-2-9-approval-001"
+
+
+def _run(
+    tmp_path: Path,
+    fake: FakeCompose,
+    *,
+    authorization_ref: str = ARMED_AUTHORIZATION_REF,
+    **kwargs: Any,
+) -> dict[str, Any]:
     def stack_factory(campaign_id: str) -> Phase29GatewayStack:
         return Phase29GatewayStack(campaign_id=campaign_id, runner=fake)
 
-    def campaign_factory(base_dir: Path, live_model: Any) -> ConsolidatedOpsCampaign:
-        return ConsolidatedOpsCampaign(base_dir=base_dir, containerized=False, model=live_model)
+    def campaign_factory(
+        base_dir: Path, live_model: Any, authorization_reference: str
+    ) -> ConsolidatedOpsCampaign:
+        return ConsolidatedOpsCampaign(
+            base_dir=base_dir,
+            containerized=False,
+            model=live_model,
+            authorization_reference=authorization_reference,
+        )
 
     return run_live_campaign(
-        authorization_ref="ops-2-9-approval-001",
+        authorization_ref=authorization_ref,
         out_root=tmp_path / "out",
         stack_factory=stack_factory,
         campaign_factory=campaign_factory,
@@ -326,7 +372,11 @@ def test_rejected_call_preserves_provider_usage_when_known(tmp_path: Path) -> No
     stack = Phase29GatewayStack(campaign_id="c1", runner=fake)
     model = Phase29LiveGatewayModel(stack)
     with pytest.raises(Phase29LiveModelError) as ei:
-        model.generate(AgentRole.LEAD_ORCHESTRATOR, "DELEGATE_ADVERSARY_SIMULATION", {"a": "b"})
+        model.generate(
+            AgentRole.LEAD_ORCHESTRATOR,
+            "DELEGATE_ADVERSARY_SIMULATION",
+            {"target_ref": "range-ops", "capability_catalog": ["x"]},
+        )
     assert ei.value.provider_input == 30
     assert ei.value.provider_output == 20
     assert ei.value.usage_known is True
@@ -406,13 +456,18 @@ def test_secret_isolation_requires_key_free_control_plane(tmp_path: Path) -> Non
     assert fake.down_calls == 1
 
 
-def test_secret_isolation_reported_on_success(tmp_path: Path) -> None:
+def test_secret_isolation_is_evidence_derived_or_not_evaluated(tmp_path: Path) -> None:
     fake = FakeCompose()
     acceptance = _run(tmp_path, fake)
     iso = acceptance["secret_isolation"]
-    assert iso["provider_key_only_in_gateway"] is True
+    # control-plane probe genuinely ran and proved the process env is key-free.
     assert iso["control_plane_key_free"] is True
-    assert iso["host_output_key_free"] is True
+    # "only in gateway" cannot be established from the single control-plane probe -> NOT_EVALUATED.
+    assert iso["provider_key_only_in_gateway"] == NOT_EVALUATED
+    # There is NO hard-coded host_output_key_free=True claim anymore.
+    assert "host_output_key_free" not in iso
+    # The credential-free claim is evidence-derived from a scan of the transported evidence.
+    assert iso["recorded_evidence_credential_free"] is True
 
 
 def test_cleanup_runs_on_gateway_up_failure(tmp_path: Path) -> None:
@@ -436,6 +491,9 @@ def test_cleanup_detects_leftovers(tmp_path: Path) -> None:
     acceptance = _run(tmp_path, fake)
     assert acceptance["cleanup"]["no_leftovers"] is False
     assert acceptance["cleanup"]["container_leftovers"] == ["leftover-container"]
+    # A gateway leftover controls the verdict: it can no longer be observed-success.
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["gateway_cleanup_no_leftovers"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -497,3 +555,293 @@ def test_stack_uses_unique_project_name_and_compose_files() -> None:
     argv = fake.argv_log[-1]
     assert "-p" in argv and stack.project in argv
     assert "docker-compose.yml" in argv and "docker-compose.deepseek.yml" in argv
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: authorization binding threaded into the controller-owned spec.
+# --------------------------------------------------------------------------- #
+
+
+def test_armed_authorization_ref_equals_controller_recorded_ref(tmp_path: Path) -> None:
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["armed_authorization_reference"] == ARMED_AUTHORIZATION_REF
+    assert acceptance["controller_authorization_reference"] == ARMED_AUTHORIZATION_REF
+    assert acceptance["preflight"]["authorization_binding_ok"] is True
+
+
+def test_authorization_binding_mismatch_aborts_before_dispatch(tmp_path: Path) -> None:
+    fake = FakeCompose()
+
+    def stack_factory(campaign_id: str) -> Phase29GatewayStack:
+        return Phase29GatewayStack(campaign_id=campaign_id, runner=fake)
+
+    def bad_factory(
+        base_dir: Path, model: Any, authorization_reference: str
+    ) -> ConsolidatedOpsCampaign:
+        # The controller records a DIFFERENT reference than the armed operator reference.
+        return ConsolidatedOpsCampaign(
+            base_dir=base_dir,
+            containerized=False,
+            model=model,
+            authorization_reference="authz-range-ops-integration",
+        )
+
+    acceptance = run_live_campaign(
+        authorization_ref="ops-2-9-approval-001",
+        out_root=tmp_path / "out",
+        stack_factory=stack_factory,
+        campaign_factory=bad_factory,
+    )
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "AUTHORIZATION_BINDING_MISMATCH"
+    assert fake.build_calls == 0  # aborted before build/up/dispatch
+    assert fake.step_index == 0
+    assert fake.down_calls == 1
+    assert acceptance["integrity_manifest_verified"] is True
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: cleanup controls the verdict (build / probe rc / leftovers).
+# --------------------------------------------------------------------------- #
+
+
+def test_build_failure_stops_before_up(tmp_path: Path) -> None:
+    fake = FakeCompose(fail_build=True)
+    acceptance = _run(tmp_path, fake, build=True)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "GATEWAY_BUILD_FAILED"
+    assert fake.build_calls == 1
+    assert not any("up" in a for a in fake.argv_log)  # never reached `up`
+    assert fake.step_index == 0
+    assert fake.down_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("probe", "rc_key"),
+    [
+        ("ps", "container_probe_rc"),
+        ("network", "network_probe_rc"),
+        ("volume", "volume_probe_rc"),
+    ],
+)
+def test_failed_cleanup_probe_cannot_prove_cleanup(
+    tmp_path: Path, probe: str, rc_key: str
+) -> None:
+    fake = FakeCompose(probe_fail=probe)
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["cleanup"][rc_key] == 1
+    assert acceptance["cleanup"]["no_leftovers"] is False
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["gateway_cleanup_no_leftovers"] is False
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: usage never defaults to zero.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "bad_usage",
+    [
+        {"input_tokens": 40},  # missing output
+        {"output_tokens": 60},  # missing input
+        {"input_tokens": 40, "output_tokens": -5},  # negative
+        {"input_tokens": True, "output_tokens": 60},  # boolean
+        {"input_tokens": "40", "output_tokens": 60},  # non-integer
+        "not-a-dict",  # malformed
+        {},  # absent
+    ],
+)
+def test_success_bad_usage_becomes_unknown_and_stops(tmp_path: Path, bad_usage: Any) -> None:
+    fake = FakeCompose(bad_usage_at={2: bad_usage})
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "PROVIDER_USAGE_UNKNOWN"
+    # Stopped at call 2; calls 3+ were never dispatched (no zero substituted, no next call).
+    assert fake.step_index == 2
+    assert fake.down_calls == 1
+    last = acceptance["dispatched_attempts"][-1]
+    assert last["status"] == "USAGE_UNKNOWN"
+    assert last["input_tokens"] == "UNKNOWN"
+    assert last["output_tokens"] == "UNKNOWN"
+    assert last["usage_known"] is False
+
+
+def test_model_mismatch_preserves_known_usage(tmp_path: Path) -> None:
+    fake = FakeCompose(mismatch_at=1)
+    stack = Phase29GatewayStack(campaign_id="c1", runner=fake)
+    model = Phase29LiveGatewayModel(stack)
+    with pytest.raises(Phase29LiveModelError) as ei:
+        model.generate(
+            AgentRole.LEAD_ORCHESTRATOR,
+            "DELEGATE_ADVERSARY_SIMULATION",
+            {"target_ref": "range-ops", "capability_catalog": ["x"]},
+        )
+    assert ei.value.code == "PROVIDER_MODEL_MISMATCH"
+    # The usage the OK response supplied is parsed and preserved on the identity-mismatch error.
+    assert ei.value.provider_input == 40
+    assert ei.value.provider_output == 60
+    assert ei.value.usage_known is True
+    assert model.dispatched_attempts[-1]["status"] == "MODEL_MISMATCH"
+    assert model.dispatched_attempts[-1]["input_tokens"] == 40
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: projection shape allowlist + gateway-projection correspondence.
+# --------------------------------------------------------------------------- #
+
+
+def test_projection_shape_allowlist_rejects_unexpected_keys() -> None:
+    # A benign-looking but unexpected extra key for the task fails the shape allowlist.
+    with pytest.raises(Phase29ProjectionShapeError):
+        assert_phase29_projection_shape(
+            "DELEGATE_ADVERSARY_SIMULATION",
+            {"target_ref": "range-ops", "capability_catalog": ["x"], "extra": "nope"},
+        )
+    # An unknown task type has no allowlisted shape.
+    with pytest.raises(Phase29ProjectionShapeError):
+        assert_phase29_projection_shape("UNKNOWN_TASK", {"a": "b"})
+    # Each of the two PLAN shapes is accepted.
+    assert_phase29_projection_shape(
+        "PLAN_ADVERSARY_SIMULATION", {"target_ref": "range-ops", "capability_id": "c"}
+    )
+    assert_phase29_projection_shape(
+        "PLAN_ADVERSARY_SIMULATION", {"target_ref": "range-ops", "finding_ref": "f"}
+    )
+
+
+def test_adapter_rejects_unexpected_projection_shape_before_dispatch() -> None:
+    fake = FakeCompose()
+    stack = Phase29GatewayStack(campaign_id="c1", runner=fake)
+    model = Phase29LiveGatewayModel(stack)
+    with pytest.raises(Phase29ProjectionShapeError):
+        model.generate(
+            AgentRole.RECON_AGENT,
+            "PLAN_ADVERSARY_SIMULATION",
+            {"target_ref": "range-ops", "unexpected_key": "x"},
+        )
+    assert fake.step_index == 0  # nothing dispatched
+
+
+def test_gateway_projection_mismatch_is_hard_failure(tmp_path: Path) -> None:
+    fake = FakeCompose(projection_mismatch_at=1)
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "GATEWAY_PROJECTION_MISMATCH"
+    assert fake.step_index == 1
+    assert fake.down_calls == 1
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: abort + success artifacts are persisted, manifested, non-overwriting.
+# --------------------------------------------------------------------------- #
+
+
+def test_abort_produces_manifested_artifact(tmp_path: Path) -> None:
+    fake = FakeCompose(mismatch_at=2)
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    ev = Path(acceptance["evidence_dir"])
+    assert (ev / "live_acceptance.json").exists()
+    assert (ev / "LIVE_SHA256SUMS").exists()
+    assert (ev / "gateway_cleanup.json").exists()
+    assert (ev / "dispatched_attempts.json").exists()
+    assert acceptance["integrity_manifest_verified"] is True
+    sums = (ev / "LIVE_SHA256SUMS").read_text()
+    # The decisive live acceptance verdict is INSIDE the integrity manifest.
+    assert "live_acceptance.json" in sums
+    persisted = json.loads((ev / "live_acceptance.json").read_text())
+    assert persisted["abort_code"] == "PROVIDER_MODEL_MISMATCH"
+    assert persisted["controller_authorization_reference"] == ARMED_AUTHORIZATION_REF
+
+
+def test_success_artifact_contains_verdict_and_cleanups(tmp_path: Path) -> None:
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    ev = Path(acceptance["evidence_dir"])
+    la = json.loads((ev / "live_acceptance.json").read_text())
+    assert la["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    assert la["cleanup"]["no_leftovers"] is True  # gateway cleanup evidence inside the verdict
+    names = {p.name for p in ev.iterdir()}
+    assert "gateway_cleanup.json" in names
+    assert "cleanup_ledger.json" in names  # range cleanup bundle
+    sums = (ev / "LIVE_SHA256SUMS").read_text()
+    assert "live_acceptance.json" in sums and "gateway_cleanup.json" in sums
+    assert acceptance["integrity_manifest_verified"] is True
+
+
+def test_artifact_collision_is_refused_without_overwriting(tmp_path: Path) -> None:
+    out_root = tmp_path / "out"
+
+    def stack_factory(campaign_id: str) -> Phase29GatewayStack:
+        return Phase29GatewayStack(campaign_id=campaign_id, runner=FakeCompose())
+
+    def fixed_factory(
+        base_dir: Path, model: Any, authorization_reference: str
+    ) -> ConsolidatedOpsCampaign:
+        return ConsolidatedOpsCampaign(
+            base_dir=base_dir,
+            containerized=False,
+            model=model,
+            authorization_reference=authorization_reference,
+            campaign_id="phase-2.9-consolidated-fixedid01",
+        )
+
+    first = run_live_campaign(
+        authorization_ref="ops-2-9-approval-001",
+        out_root=out_root,
+        stack_factory=stack_factory,
+        campaign_factory=fixed_factory,
+    )
+    ev = Path(first["evidence_dir"])
+    assert ev.exists()
+    sentinel = (ev / "live_acceptance.json").read_bytes()
+    # A second run into the SAME collision-resistant path is refused (never overwritten).
+    with pytest.raises(FileExistsError):
+        run_live_campaign(
+            authorization_ref="ops-2-9-approval-001",
+            out_root=out_root,
+            stack_factory=stack_factory,
+            campaign_factory=fixed_factory,
+        )
+    assert (ev / "live_acceptance.json").read_bytes() == sentinel  # unchanged
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION: false checks / evidence semantics gate the observed-success status.
+# --------------------------------------------------------------------------- #
+
+
+def test_false_required_check_prevents_observed_success(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    real = getattr(live_gateway, "build_phase_2_9_checks")  # noqa: B009 - patched attr, avoid re-export typing
+
+    def patched(record: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        checks: dict[str, Any] = real(record, **kw)
+        checks["retest_verifier_passed"] = False  # force a required check False
+        return checks
+
+    monkeypatch.setattr(live_gateway, "build_phase_2_9_checks", patched)
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["no_false_checks"] is False
+    assert "retest_verifier_passed" in acceptance["false_checks"]
+
+
+def test_live_checks_have_no_affirmative_simulated_semantics(tmp_path: Path) -> None:
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake)
+    checks = acceptance["checks"]
+    for key, value in checks.items():
+        if key.startswith("simulated_"):
+            assert value == NOT_EVALUATED, (key, value)
+    # The live-provider identity/budget checks carry the observed facts instead.
+    assert checks["exact_model_identity"] is True
+    assert checks["live_provider_budget_enforced"] is True
+    acct = acceptance["evidence_accounting"]
+    assert acct["gateway_mode"] == "ISOLATED_LIVE_GATEWAY"
+    assert acct["simulated_model_identity_reported"] == NOT_EVALUATED
