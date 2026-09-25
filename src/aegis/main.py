@@ -17,24 +17,25 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from aegis import scm_verifier, zap_verifier
 from aegis.beast.contracts import BeastRunRequest, LeaseRequest
+from aegis.beast.controller import BeastController, BeastRejected
+from aegis.beast.store import BeastStore
 from aegis.console_catalog import (
     ProfileAvailability,
     profile_directory,
     target_directory,
 )
-from aegis.target_inventory import (
-    TargetCreate,
-    TargetInventoryStore,
-    TargetValidationError,
-    scope_preview,
-)
-from aegis.beast.controller import BeastController, BeastRejected
-from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
 from aegis.multi_agent.benchmark import BenchmarkResultStore
 from aegis.multi_agent.runtime import console_projection as multi_agent_projection
+from aegis.multi_agent.staging import (
+    EnvironmentTier,
+    StagingLedger,
+    deployment_disabled,
+    staging_capability_state,
+    tier_is_executable,
+)
 from aegis.multi_agent.store import MultiAgentStore
 from aegis.operator import (
     ActorType,
@@ -57,6 +58,12 @@ from aegis.screenshots import ScreenshotStore
 from aegis.service import ScanService
 from aegis.settings import get_settings
 from aegis.storage import ScanStore
+from aegis.target_inventory import (
+    TargetCreate,
+    TargetInventoryStore,
+    TargetValidationError,
+    scope_preview,
+)
 from aegis.verifier import DeterministicVerifier
 from aegis.zap_active_controller import ZapActiveActivation, ZapActiveController
 from aegis.zap_active_lease import LeaseError
@@ -83,6 +90,8 @@ beast_store = BeastStore(settings.database_path)
 multi_agent_store = MultiAgentStore(settings.database_path)
 # Phase 2.4 controller-owned single-agent vs multi-agent benchmark result store (read-only surface).
 benchmark_store = BenchmarkResultStore(settings.database_path)
+# Phase 2.5 controller-owned authenticated staging-progression ledger (read-only surface).
+staging_ledger = StagingLedger(settings.database_path)
 # Controller-owned operator target inventory (Phase 1.9.5). Persists onboarded company targets;
 # the browser never holds authority over scope.
 target_store = TargetInventoryStore(settings.database_path)
@@ -129,6 +138,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     beast_store.initialize()
     multi_agent_store.initialize()
     benchmark_store.initialize()
+    staging_ledger.initialize()
     target_store.initialize()
     yield
 
@@ -343,6 +353,39 @@ async def console_benchmark(pair_id: str) -> dict[str, object]:
             bool(comparison.superiority_claim_supported) if comparison else False
         ),
     }
+
+
+@app.get("/api/console/staging/tiers")
+async def console_staging_tiers() -> dict[str, object]:
+    """Read-only projection of the controller-owned environment tier ladder and its honest state.
+
+    No gate is assumed satisfied here (this is a public summary), so every tier reports its
+    fail-closed default: real AUTHORIZED_STAGING is DEPLOYMENT_DISABLED this sprint and the live
+    authenticated-staging status is NOT_EVALUATED. The browser never holds authority over the tier.
+    """
+
+    tiers = [
+        {
+            "tier": tier.value,
+            "executable": tier_is_executable(tier),
+            "deployment_disabled": deployment_disabled(tier),
+            "activation_state": staging_capability_state(tier, gates_satisfied=False).value,
+        }
+        for tier in EnvironmentTier
+    ]
+    return {
+        "tiers": tiers,
+        "live_authenticated_staging_status": "NOT_EVALUATED",
+        "authenticated_progression_framework_status": "OFFLINE_PASS",
+    }
+
+
+@app.get("/api/console/staging/{campaign_id}/events")
+async def console_staging_events(campaign_id: str) -> dict[str, object]:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{3,120}", campaign_id):
+        raise HTTPException(status_code=404, detail="Staging campaign not found")
+    events = staging_ledger.events(campaign_id)
+    return {"items": [event.model_dump(mode="json") for event in events]}
 
 
 class EmergencyStopRequest(BaseModel):

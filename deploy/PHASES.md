@@ -896,16 +896,65 @@ enforce a combined per-run ceiling equal on both sides before running.
 
 ---
 
-### Phase 2.5 — Authenticated Staging Progression — `PLANNED`
-**Goal.** Controlled move from synthetic range to staging.
+### Phase 2.5 — Authenticated Staging Progression — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** The controlled progression path from synthetic authenticated testing toward *explicitly
+authorized* staging — WITHOUT connecting to any real staging target this sprint.
 
-**Acceptance checks:**
-- Inventory + authorization resolved for staging targets (controller-owned).
-- Secrets handled via gateway; no secret values in model context.
-- Rate limits respected.
-- **Rollback** and **cleanup** proven.
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/staging.py`:
+- **Environment tiers** `SYNTHETIC_RANGE` / `ISOLATED_STAGING` / `AUTHORIZED_STAGING` /
+  `PRODUCTION_PROHIBITED` (the single fail-closed sink). `classify_environment` maps anything
+  unknown, `None` or `PRODUCTION` to `PRODUCTION_PROHIBITED`; the model can never set/raise the tier.
+- **Controller-owned progression gates** (`evaluate_progression` + typed `ProgressionRejection`):
+  target inventory, environment classification, authorization reference, operator lease (validity),
+  approved assessment profile (per-tier registry), credential reference, session policy, tool/
+  capability allowlist, call/tool budgets, cleanup/reset plan — plus one-step-only tier progression,
+  `MODEL_ATTEMPTED_TIER_CHANGE`, and `ONBOARDING_ONLY_NOT_EXECUTION_READY`. Real
+  `AUTHORIZED_STAGING` is rejected `STAGING_DEPLOYMENT_DISABLED`.
+- **Opaque references**: target- and scenario-bound `CredentialReference` (`credentialref://…`) and
+  environment-bound `SessionReference` (`sessionref://…`), both single-scope + time-bounded; the
+  concrete value lives only in an isolated `OpaqueSecretStore` (revoke zeroizes; a resolve afterward
+  fails closed). No value is representable in any reference, projection, ledger row or audit event.
+- **Deterministic `SessionWorker`** against an in-process `SyntheticStagingApp`: authenticated
+  **positive control**, unauthorized **negative control**, **origin binding** (cross-origin use
+  fails closed), **redirect-escape** blocking (off-origin redirect not followed), cookie/header/token
+  isolation, expiry + revocation + **account reset**. Session material never crosses back to callers.
+- **Metadata-only model projection** (`build_staging_projection` + `assert_staging_projection_clean`):
+  states that an authorized reference *exists*, never a value; a forbidden-token guard fails closed.
+- **Staging capability activation state** (`StagingActivationState`): real staging is
+  `DEPLOYMENT_DISABLED`; synthetic/isolated tiers activate only when gates are satisfied.
+- **Audit events + durable `StagingLedger`** (progressions, opaque references, value-free events).
+- **API / service access:** read-only `GET /api/console/staging/tiers` (honest fail-closed state;
+  `NOT_EVALUATED` live) and `GET /api/console/staging/{campaign_id}/events`.
+- Offline harness `scripts/phase_2_5_authenticated_staging.py` demonstrates the full mechanism
+  (SYNTHETIC_RANGE → ISOLATED_STAGING acquire/use/revoke/reset; AUTHORIZED_STAGING disabled) and
+  emits the typed verdict.
 
-**Budget.** Declared per run; fail-closed. **Stop condition.** Do not start 3.0.
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable this sprint; the
+mechanics are proven in-process).
+
+**Live-provider / real-staging status — `NOT_EVALUATED`.** No real staging target was contacted; the
+`AUTHORIZED_STAGING` tier is `DEPLOYMENT_DISABLED`.
+
+**Tests (`tests/test_phase_2_5.py`, 28 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Fail-closed classification; target/origin binding; expired/revoked references; cross-target misuse;
+secret redaction; redirect escape; missing authorization; expired lease; deployment-disabled staging;
+cleanup/reset; account-state restoration; model-cannot-change-tier; onboarding≠execution; UNKNOWN/
+NOT_EVALUATED behaviour. `ruff` + `mypy` clean on the changed files (the one pre-existing `main.py`
+E501/S608 finding is unrelated; a pre-existing import-sort finding in `main.py` was incidentally
+corrected while adding the staging imports).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for controller-governed authenticated environment
+progression and opaque session handling."*
+
+**Exclusions.** Does **not** claim real staging or production readiness, nor any live/containerized
+authenticated run; the `AUTHORIZED_STAGING` connection is deployment-disabled.
+
+**Remaining live acceptance requirements.** An explicitly authorized isolated/authorized staging
+target with a real credential/session vault, real origin/redirect enforcement over the network, and
+proven rollback/cleanup — behind the controller-owned tier activation and a real operator lease.
+
+**Budget.** Framework work is offline (zero provider calls). A future live run declares its budget
+per run, fail-closed. **Stop condition.** Do not start 2.6 in the same commit.
 
 ---
 
