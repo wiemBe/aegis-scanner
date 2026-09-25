@@ -41,6 +41,7 @@ from typing import Any
 
 from aegis.multi_agent.consolidated_campaign import (
     CANONICAL_MODEL,
+    MAX_PROVIDER_CALLS,
     PER_CALL_OUTPUT_CEILING,
     ConsolidatedOpsCampaign,
     build_evidence_accounting,
@@ -585,21 +586,30 @@ class Phase29LiveGatewayModel:
             self._record_dispatch(role, task_type, "USAGE_UNKNOWN", identity, None, None)
             raise Phase29LiveModelError("PROVIDER_USAGE_UNKNOWN", None, None)
 
+        # A valid retained request projection is REQUIRED for every successful provider response: it
+        # is the proof the gateway retained exactly the sanitized dispatched context. A missing or
+        # malformed projection fails closed (usage preserved, attempt settled, no next call).
         projection = result.get("request_projection")
-        if isinstance(projection, dict):
-            self.gateway_request_projections.append(projection)
-            corresponds = gateway_projection_corresponds(projection, sanitized)
-            self.projection_correspondence.append(corresponds)
-            if not corresponds:
-                self.failure_diagnostics.append(
-                    {"code": "GATEWAY_PROJECTION_MISMATCH", "task_type": task_type}
-                )
-                self._record_dispatch(
-                    role, task_type, "PROJECTION_MISMATCH", identity, input_tokens, output_tokens
-                )
-                raise Phase29LiveModelError(
-                    "GATEWAY_PROJECTION_MISMATCH", input_tokens, output_tokens
-                )
+        if not isinstance(projection, dict):
+            self.failure_diagnostics.append(
+                {"code": "GATEWAY_PROJECTION_MISSING", "task_type": task_type}
+            )
+            self._record_dispatch(
+                role, task_type, "PROJECTION_MISSING", identity, input_tokens, output_tokens
+            )
+            raise Phase29LiveModelError("GATEWAY_PROJECTION_MISSING", input_tokens, output_tokens)
+        self.gateway_request_projections.append(projection)
+        corresponds = gateway_projection_corresponds(projection, sanitized)
+        if not corresponds:
+            self.failure_diagnostics.append(
+                {"code": "GATEWAY_PROJECTION_MISMATCH", "task_type": task_type}
+            )
+            self._record_dispatch(
+                role, task_type, "PROJECTION_MISMATCH", identity, input_tokens, output_tokens
+            )
+            raise Phase29LiveModelError("GATEWAY_PROJECTION_MISMATCH", input_tokens, output_tokens)
+        # Only a corresponding projection records a successful correspondence result.
+        self.projection_correspondence.append(True)
 
         self.attempts.append(
             {
@@ -896,6 +906,9 @@ def _assemble_live_acceptance(
         "loop_id": campaign.asm.loop_id,
         "finding_id": campaign.asm.finding_id,
     }
+    # Durable range-cleanup snapshot (captured in run()'s finally; survives an abort). Its default
+    # is NOT_STARTED when range creation never began.
+    range_cleanup = dict(campaign.range_cleanup)
 
     if abort_code is not None or record is None:
         # Fresh directory only: refuse an existing path so a live abort never overwrites evidence.
@@ -918,6 +931,7 @@ def _assemble_live_acceptance(
             "failure_diagnostics": diagnostics,
             "phase_2_9_live_provider_status": NOT_EVALUATED,
             "cleanup": stack_teardown,
+            "range_cleanup": range_cleanup,
             "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
         }
         integrity = _persist_live_evidence(
@@ -925,6 +939,7 @@ def _assemble_live_acceptance(
             acceptance=acceptance,
             extra_files={
                 "gateway_cleanup.json": stack_teardown,
+                "range_cleanup.json": range_cleanup,
                 "dispatched_attempts.json": dispatched,
                 "budget_reservations_and_usage.json": budget_evidence,
                 "failure_diagnostics.json": diagnostics,
@@ -956,9 +971,21 @@ def _assemble_live_acceptance(
     # gateway, artifact, budget and typed check required for observation is strictly true.
     usage_complete = record["lifecycle"]["usage_complete"] is True
     gateway_cleanup_clean = stack_teardown.get("no_leftovers") is True
-    range_cleanup_clean = (
+    # Range cleanup is MANDATORY for a live campaign: the controller ledger succeeded (incl. reset),
+    # teardown ran, the leftover query itself succeeded, and zero range resources remain. A None /
+    # missing / UNKNOWN / failed-query / non-PASS snapshot is NOT clean.
+    range_cleanup_complete = (
         record["cleanup"]["cleanup_ok"] is True
-        and record["cleanup"]["no_leftovers"] in (True, None)
+        and range_cleanup.get("status") == "PASS"
+        and range_cleanup.get("teardown_ran") is True
+        and range_cleanup.get("leftover_query_ok") is True
+        and range_cleanup.get("no_leftovers") is True
+    )
+    # Every successful provider call must have exactly one True correspondence record (five for a
+    # complete campaign): the gateway retained precisely the sanitized dispatched context each time.
+    correspondence = list(live_model.projection_correspondence) if live_model else []
+    projection_correspondence_complete = (
+        len(correspondence) == MAX_PROVIDER_CALLS and all(correspondence)
     )
     gates = {
         "typed_verdict_satisfied": verdicts["phase_2_9"]["satisfied"] is True,
@@ -966,7 +993,8 @@ def _assemble_live_acceptance(
         "artifact_manifest_verified": bool(artifact_result["manifest_verified"]),
         "budget_usage_complete": usage_complete,
         "gateway_cleanup_no_leftovers": gateway_cleanup_clean,
-        "range_cleanup_complete": range_cleanup_clean,
+        "range_cleanup_complete": range_cleanup_complete,
+        "projection_correspondence_complete": projection_correspondence_complete,
     }
     observed_ok = all(gates.values())
     status = (
@@ -1001,6 +1029,7 @@ def _assemble_live_acceptance(
         "false_checks": false_checks,
         "typed_verdicts": verdicts,
         "live_acceptance_gates": gates,
+        "projection_correspondence": correspondence,
         "canonical_job_addresses": {
             "lead": record["jobs"]["lead_job_address"],
             "initial_recon": record["jobs"]["recon_job_address"],
@@ -1010,6 +1039,7 @@ def _assemble_live_acceptance(
         # This task never claims LIVE GO; the top-line provider status stays NOT_EVALUATED.
         "phase_2_9_live_provider_status": NOT_EVALUATED,
         "cleanup": stack_teardown,
+        "range_cleanup": range_cleanup,
         "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
     }
     integrity = _persist_live_evidence(
@@ -1017,6 +1047,7 @@ def _assemble_live_acceptance(
         acceptance=acceptance,
         extra_files={
             "gateway_cleanup.json": stack_teardown,
+            "range_cleanup.json": range_cleanup,
             "dispatched_attempts.json": dispatched,
             "live_budget_reservations.json": budget_evidence,
         },

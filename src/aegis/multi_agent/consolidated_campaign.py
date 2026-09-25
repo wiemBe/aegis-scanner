@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -538,9 +539,17 @@ class ConsolidatedOpsCampaign:
     # dry-run / existing-caller behaviour; a live campaign passes the validated non-secret ref.
     authorization_reference: str = "authz-range-ops-integration"
     model: ModelBoundary = field(default_factory=Phase29ModelDouble)
+    # Injectable real-container factory (tests supply a double); production builds a container.
+    container_factory: Callable[[], ContainerOpsRange] | None = None
+    # An explicit range-cleanup boundary result. Tests inject a successful proof so the mock happy
+    # path earns success through a genuine PASS snapshot, not the in-process ``no_leftovers=None``.
+    range_cleanup_override: dict[str, Any] | None = None
     budget: CampaignProviderBudget = field(init=False)
     asm: OpsDetectionControlLifecycle = field(init=False)
     container: ContainerOpsRange | None = None
+    # Durable fail-closed range-cleanup snapshot; captured in run()'s finally so it survives aborts.
+    range_cleanup: dict[str, Any] = field(default_factory=lambda: {"status": "NOT_STARTED"})
+    _range_cleanup_proof: CleanupProof | None = field(default=None, init=False, repr=False)
     record: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -665,8 +674,12 @@ class ConsolidatedOpsCampaign:
         image_content_id = NOT_EVALUATED
 
         if self.containerized:
-            image_content_id = ensure_range_image(build_missing=True)
-            container = ContainerOpsRange(image_ref=RANGE_IMAGE_TAG)
+            if self.container_factory is not None:
+                container = self.container_factory()
+                image_content_id = NOT_EVALUATED
+            else:
+                image_content_id = ensure_range_image(build_missing=True)
+                container = ContainerOpsRange(image_ref=RANGE_IMAGE_TAG)
             self.container = container  # set BEFORE create() so a failed create still tears down
             container.create()
             network_internal = container.network_is_internal()
@@ -817,16 +830,13 @@ class ConsolidatedOpsCampaign:
             verdict = controller.finalize(spec.assessment_id)
             _timeline("FINALIZED")
         finally:
-            # Container teardown always runs (success, failure, exception).
-            if self.container is not None:
-                self.container.teardown()
-
-        cleanup_proof: CleanupProof | None = None
-        if self.container is not None:
-            cleanup_proof = self.container.leftover_proof(
-                was_internal=bool(network_internal), egress_proof=egress_proof
+            # Range teardown + a durable, fail-closed cleanup snapshot ALWAYS run (success, failure,
+            # exception) so the range cleanup proof survives an aborted campaign for the artifact.
+            self.range_cleanup = self._finalize_range_cleanup(
+                network_internal=network_internal, egress_proof=egress_proof
             )
 
+        cleanup_proof = self._range_cleanup_proof
         self.record = self._build_record(
             backend=backend,
             delegation=delegation,
@@ -863,6 +873,76 @@ class ConsolidatedOpsCampaign:
         if obligation == "REVOKE_REFERENCES":
             return True
         return True
+
+    def _finalize_range_cleanup(
+        self, *, network_internal: bool | None, egress_proof: str
+    ) -> dict[str, Any]:
+        """Tear the range down and capture a durable, fail-closed cleanup snapshot.
+
+        Runs in run()'s ``finally`` so the snapshot exists on success AND on any abort. An injected
+        ``range_cleanup_override`` is used verbatim (the explicit boundary result tests provide).
+        With no containerized range this run, the snapshot is ``NOT_STARTED`` (never a success). A
+        failed teardown or a failed/raising leftover query yields ``CLEANUP_FAILED`` /
+        ``COLLECT_FAILED`` with ``no_leftovers`` never asserted True.
+        """
+
+        if self.range_cleanup_override is not None:
+            self._range_cleanup_proof = None
+            return dict(self.range_cleanup_override)
+        if self.container is None:
+            self._range_cleanup_proof = None
+            return {
+                "status": "NOT_STARTED",
+                "backend": "CONTAINERIZED_SYNTHETIC" if self.containerized else "IN_PROCESS_DOUBLE",
+                "teardown_ran": False,
+                "leftover_query_ok": False,
+                "no_leftovers": None,
+                "leftover_proof": None,
+                "network_was_internal": network_internal,
+                "egress_blocked_proof": egress_proof,
+            }
+
+        teardown_error: str | None = None
+        teardown_ran = False
+        try:
+            self.container.teardown()
+            teardown_ran = True
+        except Exception as exc:  # noqa: BLE001 - fail closed; teardown failure must be visible
+            teardown_error = f"{type(exc).__name__}:{str(exc)[:120]}"
+
+        no_leftovers: bool | None
+        try:
+            proof = self.container.leftover_proof(
+                was_internal=bool(network_internal), egress_proof=egress_proof
+            )
+            self._range_cleanup_proof = proof
+            leftover_query_ok = True
+            no_leftovers = bool(proof.clean)
+            proof_dump: dict[str, Any] | None = proof.model_dump(mode="json")
+        except Exception as exc:  # noqa: BLE001 - a failed/raising leftover query cannot prove clean
+            self._range_cleanup_proof = None
+            leftover_query_ok = False
+            no_leftovers = None
+            proof_dump = None
+            teardown_error = teardown_error or f"{type(exc).__name__}:{str(exc)[:120]}"
+
+        if teardown_ran and leftover_query_ok and no_leftovers:
+            status = "PASS"
+        elif not leftover_query_ok:
+            status = "COLLECT_FAILED"
+        else:
+            status = "CLEANUP_FAILED"
+        return {
+            "status": status,
+            "backend": "CONTAINERIZED_SYNTHETIC",
+            "teardown_ran": teardown_ran,
+            "teardown_error": teardown_error,
+            "leftover_query_ok": leftover_query_ok,
+            "no_leftovers": no_leftovers,
+            "leftover_proof": proof_dump,
+            "network_was_internal": network_internal,
+            "egress_blocked_proof": egress_proof,
+        }
 
     # ------------------------------ record --------------------------------- #
 

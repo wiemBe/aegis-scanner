@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 import aegis.multi_agent.phase_2_9_live_gateway as live_gateway
+from aegis.container_acceptance.contracts import CleanupProof
 from aegis.multi_agent.consolidated_campaign import (
     CANONICAL_MODEL,
     ConsolidatedOpsCampaign,
@@ -79,6 +80,8 @@ class FakeCompose:
         probe_fail: str | None = None,
         bad_usage_at: dict[int, Any] | None = None,
         projection_mismatch_at: int | None = None,
+        projection_missing_at: int | None = None,
+        projection_missing_malformed: bool = False,
     ) -> None:
         self.health_model = health_model
         self.control_plane_has_key = control_plane_has_key
@@ -97,6 +100,9 @@ class FakeCompose:
         self.bad_usage_at = bad_usage_at or {}
         # Emit a non-corresponding gateway request projection on this call index.
         self.projection_mismatch_at = projection_mismatch_at
+        # Omit (or malform) the retained request projection on this call index.
+        self.projection_missing_at = projection_missing_at
+        self.projection_missing_malformed = projection_missing_malformed
         self.build_calls = 0
         self.argv_log: list[list[str]] = []
         self.step_stdins: list[str] = []
@@ -184,10 +190,37 @@ class FakeCompose:
             "provider_reported_models": [reported],
             "request_projection": projection,
         }
+        if self.projection_missing_at == idx:
+            # A successful response with NO retained request projection at all.
+            if self.projection_missing_malformed:
+                body["request_projection"] = "not-an-object"
+            else:
+                body.pop("request_projection")
         return ComposeResult(0, stdout=json.dumps(body))
 
 
 ARMED_AUTHORIZATION_REF = "ops-2-9-approval-001"
+
+# An explicit SUCCESSFUL range-cleanup boundary result the mock happy path injects. Observed success
+# must be earned through a genuine PASS snapshot — never merely because the in-process campaign
+# returns no_leftovers=None.
+SUCCESSFUL_RANGE_CLEANUP: dict[str, Any] = {
+    "status": "PASS",
+    "backend": "CONTAINERIZED_SYNTHETIC",
+    "teardown_ran": True,
+    "teardown_error": None,
+    "leftover_query_ok": True,
+    "no_leftovers": True,
+    "leftover_proof": {
+        "stack_containers_remaining": 0,
+        "volumes_remaining": 0,
+        "networks_remaining": 0,
+        "network_was_internal": True,
+        "egress_blocked_proof": "EGRESS_BLOCKED:TimeoutError",
+    },
+    "network_was_internal": True,
+    "egress_blocked_proof": "EGRESS_BLOCKED:TimeoutError",
+}
 
 
 def _run(
@@ -195,6 +228,7 @@ def _run(
     fake: FakeCompose,
     *,
     authorization_ref: str = ARMED_AUTHORIZATION_REF,
+    range_cleanup_override: dict[str, Any] | None = SUCCESSFUL_RANGE_CLEANUP,
     **kwargs: Any,
 ) -> dict[str, Any]:
     def stack_factory(campaign_id: str) -> Phase29GatewayStack:
@@ -208,6 +242,7 @@ def _run(
             containerized=False,
             model=live_model,
             authorization_reference=authorization_reference,
+            range_cleanup_override=range_cleanup_override,
         )
 
     return run_live_campaign(
@@ -845,3 +880,176 @@ def test_live_checks_have_no_affirmative_simulated_semantics(tmp_path: Path) -> 
     acct = acceptance["evidence_accounting"]
     assert acct["gateway_mode"] == "ISOLATED_LIVE_GATEWAY"
     assert acct["simulated_model_identity_reported"] == NOT_EVALUATED
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION 2: range cleanup proof is MANDATORY for a live campaign.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRange:
+    """A minimal range double: enough to create + tear down before an early abort."""
+
+    def __init__(self, *, clean: bool = True) -> None:
+        self._clean = clean
+        self.mode = "vulnerable"
+        self.generation = 0
+        self.sentinel_digest = ""
+        self.probe_requests = 0
+        self.created = False
+        self.torn_down = False
+
+    def create(self) -> None:
+        self.created = True
+
+    def network_is_internal(self) -> bool:
+        return True
+
+    def egress_blocked_proof(self) -> str:
+        return "EGRESS_BLOCKED:TimeoutError"
+
+    def teardown(self) -> None:
+        self.torn_down = True
+
+    def leftover_proof(self, *, was_internal: bool, egress_proof: str) -> CleanupProof:
+        remaining = 0 if self._clean else 1
+        return CleanupProof(
+            stack_containers_remaining=remaining,
+            volumes_remaining=0,
+            networks_remaining=0,
+            network_was_internal=was_internal,
+            egress_blocked_proof=egress_proof,
+        )
+
+
+def test_range_cleanup_none_prevents_observed_success(tmp_path: Path) -> None:
+    none_snapshot = dict(SUCCESSFUL_RANGE_CLEANUP)
+    none_snapshot["no_leftovers"] = None
+    none_snapshot["status"] = "NOT_STARTED"
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake, range_cleanup_override=none_snapshot)
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["range_cleanup_complete"] is False
+
+
+def test_range_leftover_query_failure_prevents_observed_success(tmp_path: Path) -> None:
+    bad = dict(SUCCESSFUL_RANGE_CLEANUP)
+    bad["leftover_query_ok"] = False
+    bad["status"] = "COLLECT_FAILED"
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake, range_cleanup_override=bad)
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["range_cleanup_complete"] is False
+
+
+def test_range_cleanup_failure_visible_even_when_gateway_clean(tmp_path: Path) -> None:
+    failed = dict(SUCCESSFUL_RANGE_CLEANUP)
+    failed["status"] = "CLEANUP_FAILED"
+    failed["no_leftovers"] = False
+    fake = FakeCompose()  # gateway teardown is clean (no leftovers)
+    acceptance = _run(tmp_path, fake, range_cleanup_override=failed)
+    assert acceptance["cleanup"]["no_leftovers"] is True  # gateway cleanup succeeded
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"  # range failure still fails closed
+    assert acceptance["live_acceptance_gates"]["gateway_cleanup_no_leftovers"] is True
+    assert acceptance["live_acceptance_gates"]["range_cleanup_complete"] is False
+    assert acceptance["range_cleanup"]["status"] == "CLEANUP_FAILED"
+
+
+def test_happy_path_requires_explicit_successful_range_cleanup(tmp_path: Path) -> None:
+    # With NO injected range-cleanup proof the in-process campaign returns NOT_STARTED /
+    # no_leftovers None — which must NOT earn observed success.
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake, range_cleanup_override=None)
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["range_cleanup"]["status"] == "NOT_STARTED"
+    assert acceptance["range_cleanup"]["no_leftovers"] is None
+    # The explicit successful proof is what earns success.
+    ok = _run(tmp_path, FakeCompose())
+    assert ok["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    assert ok["range_cleanup"]["status"] == "PASS"
+    assert ok["range_cleanup"]["no_leftovers"] is True
+
+
+def test_exception_after_range_creation_persists_range_cleanup(tmp_path: Path) -> None:
+    fake = FakeCompose(mismatch_at=1)  # aborts at provider call 1, after range creation
+    ranges: list[_FakeRange] = []
+
+    def stack_factory(campaign_id: str) -> Phase29GatewayStack:
+        return Phase29GatewayStack(campaign_id=campaign_id, runner=fake)
+
+    def factory(
+        base_dir: Path, model: Any, authorization_reference: str
+    ) -> ConsolidatedOpsCampaign:
+        rng = _FakeRange(clean=True)
+        ranges.append(rng)
+        return ConsolidatedOpsCampaign(
+            base_dir=base_dir,
+            containerized=True,
+            model=model,
+            authorization_reference=authorization_reference,
+            container_factory=lambda: rng,  # type: ignore[arg-type,return-value]
+        )
+
+    acceptance = run_live_campaign(
+        authorization_ref=ARMED_AUTHORIZATION_REF,
+        out_root=tmp_path / "out",
+        stack_factory=stack_factory,
+        campaign_factory=factory,
+        build=False,
+    )
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "PROVIDER_MODEL_MISMATCH"
+    # The range was created then torn down in the finally despite the exception.
+    assert ranges[0].created is True and ranges[0].torn_down is True
+    # The abort artifact contains a persisted range_cleanup.json captured from the finally.
+    ev = Path(acceptance["evidence_dir"])
+    assert (ev / "range_cleanup.json").exists()
+    rc = json.loads((ev / "range_cleanup.json").read_text())
+    assert rc["status"] == "PASS" and rc["teardown_ran"] is True
+    assert acceptance["range_cleanup"]["status"] == "PASS"
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION 2: a valid retained gateway projection is REQUIRED for every success.
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_projection_fails_closed_and_stops(tmp_path: Path) -> None:
+    fake = FakeCompose(projection_missing_at=2)
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "GATEWAY_PROJECTION_MISSING"
+    assert fake.step_index == 2  # calls 3+ never dispatched
+    assert fake.down_calls == 1
+
+
+def test_malformed_projection_fails_closed(tmp_path: Path) -> None:
+    fake = FakeCompose(projection_missing_at=1, projection_missing_malformed=True)
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == "GATEWAY_PROJECTION_MISSING"
+    assert fake.step_index == 1
+
+
+def test_projection_rejection_preserves_known_usage(tmp_path: Path) -> None:
+    fake = FakeCompose(projection_missing_at=1)
+    stack = Phase29GatewayStack(campaign_id="c1", runner=fake)
+    model = Phase29LiveGatewayModel(stack)
+    with pytest.raises(Phase29LiveModelError) as ei:
+        model.generate(
+            AgentRole.LEAD_ORCHESTRATOR,
+            "DELEGATE_ADVERSARY_SIMULATION",
+            {"target_ref": "range-ops", "capability_catalog": ["x"]},
+        )
+    assert ei.value.code == "GATEWAY_PROJECTION_MISSING"
+    assert ei.value.provider_input == 40  # usage the OK response supplied is preserved
+    assert ei.value.provider_output == 60
+    assert model.dispatched_attempts[-1]["status"] == "PROJECTION_MISSING"
+
+
+def test_five_true_correspondence_records_on_success(tmp_path: Path) -> None:
+    fake = FakeCompose()
+    acceptance = _run(tmp_path, fake)
+    assert acceptance["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    assert acceptance["projection_correspondence"] == [True, True, True, True, True]
+    assert acceptance["live_acceptance_gates"]["projection_correspondence_complete"] is True

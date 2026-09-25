@@ -1591,26 +1591,34 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
   provider-reported usage when available, else records `UNKNOWN`, and **stops** the campaign (never
   assumes zero, never starts another call). Identity is established from a **zero-cost** gateway
   `/health` preflight plus the five calls; any model ≠ `deepseek-v4-pro` is a **hard NO-GO**.
-- Cleanup **controls the verdict**. Teardown of **both** stacks runs unconditionally (success,
-  gateway/build failure, invalid output, budget stop, model mismatch, projection mismatch,
-  verifier/target failure, exception, cancellation). Each teardown probe records its return code
-  (`down`, `docker ps`, `network ls`, `volume ls`); `no_leftovers=True` requires **every probe rc 0
-  and every leftover list empty**. Any leftover, failed probe, failed range reset, false/UNKNOWN
-  required check, artifact/integrity failure, or a non-zero `build` (which aborts before `up`) yields
-  a fail-closed status (`LIVE_OBSERVED_FAILED_CLOSED` / `LIVE_ABORTED_FAIL_CLOSED`) and a **non-zero
-  CLI exit** — `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION` (rc 0) is emitted only when every
-  controller/range/gateway/artifact/budget/typed gate is strictly true.
+- Cleanup **controls the verdict** for **both** the gateway stack and the synthetic range. Gateway
+  teardown records each probe's rc (`down`, `docker ps`, `network ls`, `volume ls`); its
+  `no_leftovers=True` needs **every probe rc 0 and every leftover list empty**. **Range cleanup is
+  MANDATORY** (not optional): observed success requires the controller cleanup ledger (incl. target
+  reset) succeeded, range teardown ran, the range **leftover query itself succeeded**, zero range
+  containers/networks/volumes remain, and the complete proof is persisted. A `None`/missing/UNKNOWN/
+  failed-query/non-`PASS` range snapshot is `CLEANUP_FAILED`, never clean. The range cleanup snapshot
+  is captured in the campaign's `finally`, so it survives an abort (provider rejection, UNKNOWN usage,
+  identity/projection failure, worker/verifier/report failure, or unexpected exception); when range
+  creation never began it is explicitly `NOT_STARTED` (never a successful proof). Any leftover, failed
+  probe, failed range cleanup, false/UNKNOWN required check, artifact/integrity failure, or a non-zero
+  `build` (which aborts before `up`) yields a fail-closed status (`LIVE_OBSERVED_FAILED_CLOSED` /
+  `LIVE_ABORTED_FAIL_CLOSED`) and a **non-zero CLI exit**; `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION`
+  (rc 0) is emitted only when every controller/range/gateway/artifact/budget/typed gate is strictly
+  true.
 - Secret isolation is reported **only from what is runtime-established**: `control_plane_key_free`
   (value-free probe), `provider_key_only_in_gateway = NOT_EVALUATED`, and an evidence-derived
   `recorded_evidence_credential_free` scan. The prior hard-coded `host_output_key_free=True` claim is
   removed. Sanitized projections exclude credentials, keys, sentinels, raw headers/payloads/response
   bodies, ground-truth predicates and authoritative verdict/severity, and each of the five calls must
-  match a **task-specific allowlisted projection shape** (unexpected keys fail before dispatch); the
-  gateway-retained request projection must correspond to the sanitized dispatched context. No raw
-  provider output enters campaign state (gateway-validated output re-validated against the host
-  contract).
+  match a **task-specific allowlisted projection shape** (unexpected keys fail before dispatch). A
+  **valid retained gateway request projection is REQUIRED** for every successful provider response
+  (missing/malformed → `GATEWAY_PROJECTION_MISSING`; non-corresponding → `GATEWAY_PROJECTION_MISMATCH`,
+  both preserving known usage and stopping before the next call); observed success requires exactly one
+  `True` correspondence record per successful call (five for a complete campaign). No raw provider
+  output enters campaign state (gateway-validated output re-validated against the host contract).
 
-**Corrections applied this pass (still no paid campaign):**
+**Corrections applied (still no paid campaign):**
 - **Authorization binding.** The validated non-secret `--authorization-ref` is threaded into the
   controller-owned `AssessmentSpec.authorization_reference` (dry-run/default keep
   `authz-range-ops-integration`). The controller-recorded reference is persisted/exported; a mismatch
@@ -1622,7 +1630,8 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
 - **Abort + success evidence persisted.** Every armed attempt writes a fresh, collision-resistant,
   **non-overwriting** artifact (`evidence-<campaign_id>`, refused if it exists) whose integrity
   manifest (`LIVE_SHA256SUMS`) covers the decisive `live_acceptance.json` verdict and the post-run
-  gateway/range cleanup evidence — not left only on stdout.
+  gateway (`gateway_cleanup.json`) **and range (`range_cleanup.json`)** cleanup evidence — not left
+  only on stdout.
 - **Evidence semantics.** In live mode the affirmative `simulated_*` checks are `NOT_EVALUATED`; the
   live-provider identity/budget checks carry the observed facts, and the typed budget verdict uses the
   mode-correct check. A false live-provider check cannot yield the observed-success status.
@@ -1630,9 +1639,15 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
 **This task did not execute a paid campaign.** `phase_2_9_live_provider_status` and every phase's
 `live_status` remain `NOT_EVALUATED`; **no LIVE GO is claimed.** The exact five-call / 15,000-token
 ceiling and explicit `--execute-live` + non-secret `--authorization-ref` arming are unchanged.
-Verified with 48 focused mocked tests (`tests/test_phase_2_9_live_adapter.py`, no real
-docker/gateway/provider), plus the Phase 2.9 and Phase 2.7-integration suites; `ruff` + `mypy` clean
-on the changed files.
+Verified with 57 focused mocked tests (`tests/test_phase_2_9_live_adapter.py`, no real
+docker/gateway/provider), plus the Phase 2.9 and Phase 2.7-integration suites (89 passed, 0 skipped);
+`ruff` + `mypy` clean on the changed files.
+
+**Readiness.** With the mandatory range-cleanup proof and required gateway-retained projection now in
+place and mock-verified, the implementation is **`LIVE_READY` for exactly one separately authorized,
+bounded Phase 2.9 paid campaign**. This is **not** a LIVE GO: until that single campaign executes and
+its evidence is independently adjudicated, `phase_2_9_live_provider_status = NOT_EVALUATED` remains
+unchanged and no live claim is derived.
 
 **Stop condition.** Do not execute the paid campaign without separate explicit authorization; do not
 start Phase 3.0.
