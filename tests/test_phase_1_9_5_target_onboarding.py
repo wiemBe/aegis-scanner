@@ -193,6 +193,34 @@ def test_excluded_path_prefix_fails_closed(tmp_path: Path) -> None:
     assert exc.value.code == "PATH_EXCLUDED_FROM_SCOPE"
 
 
+def test_excluded_path_not_bypassed_by_scheme_omission(tmp_path: Path) -> None:
+    # Regression: the path check must use the same normalized parse as the origin check. A
+    # scheme-less input must not slip past an excluded-path rule that the scheme-qualified form is
+    # rejected by (urlsplit("host/admin").path is "host/admin", not "/admin").
+    store = _store(tmp_path)
+    record = store.create(
+        _website(origins=["https://example.company.com"], excluded_path_prefixes=["/admin"])
+    )
+    with pytest.raises(ScopeViolation) as exc:
+        authorize_url_against_target(record, "example.company.com/admin/users")
+    assert exc.value.code == "PATH_EXCLUDED_FROM_SCOPE"
+
+
+def test_allowed_prefix_enforced_for_scheme_less_input(tmp_path: Path) -> None:
+    # A scheme-less in-scope host with an out-of-prefix path fails closed the same way as the
+    # scheme-qualified form (the path is parsed as "/private", not "host/private").
+    store = _store(tmp_path)
+    record = store.create(
+        _website(origins=["https://example.company.com"], allowed_path_prefixes=["/api"])
+    )
+    assert authorize_url_against_target(record, "example.company.com/api/v1") == (
+        "https://example.company.com"
+    )
+    with pytest.raises(ScopeViolation) as exc:
+        authorize_url_against_target(record, "example.company.com/private")
+    assert exc.value.code == "PATH_OUTSIDE_ALLOWED_PREFIXES"
+
+
 # --- persistence ----------------------------------------------------------------------------------
 
 

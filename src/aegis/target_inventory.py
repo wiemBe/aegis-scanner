@@ -350,7 +350,11 @@ def authorize_url_against_target(record: TargetRecord, url: str) -> str:
         in_scope = _host_in_addresses(host, record.addresses)
     if not in_scope:
         raise ScopeViolation("TARGET_ESCAPE_OUTSIDE_AUTHORIZED_SCOPE")
-    path = urlsplit(url).path or "/"
+    # Enforce the path from the SAME normalized/scheme-prefixed parse used for the origin above.
+    # Re-splitting the raw ``url`` would misparse a scheme-less input (e.g. "host/admin" yields the
+    # path "host/admin", not "/admin"), letting a scheme-less URL slip past an excluded-path rule
+    # that the scheme-qualified form is correctly rejected by.
+    path = parts.path or "/"
     if any(path.startswith(prefix) for prefix in record.excluded_path_prefixes):
         raise ScopeViolation("PATH_EXCLUDED_FROM_SCOPE")
     if record.allowed_path_prefixes and not any(
