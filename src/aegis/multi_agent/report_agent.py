@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -540,9 +541,26 @@ def report_json(report: AssessmentReport) -> str:
     return report.model_dump_json(indent=2) + "\n"
 
 
+# Defensive render-sink ceiling. Some report fields (executive_summary, methodology, campaign_id,
+# target_ref) are not individually length-bounded on the model, so a hostile or oversized value is
+# truncated at the export sink with a visible, deterministic marker. This bounds worst-case export
+# size and never changes report identity (content_sha256 comes from the model, not the render).
+MAX_RENDERED_CHARS = 4000
+
+
+def _bounded(value: object) -> str:
+    """Truncate an over-long rendered value deterministically, with a visible marker."""
+
+    text = str(value)
+    if len(text) <= MAX_RENDERED_CHARS:
+        return text
+    dropped = len(text) - MAX_RENDERED_CHARS
+    return f"{text[:MAX_RENDERED_CHARS]}…[truncated {dropped} chars]"
+
+
 def render_report_markdown(report: AssessmentReport) -> str:
     lines = [
-        f"# Assessment Report — {report.campaign_id}",
+        f"# Assessment Report — {_bounded(report.campaign_id)}",
         "",
         f"- Report: `{report.report_uri}`",
         f"- Status: `{report.status}`  ·  Live report-agent status: "
@@ -554,14 +572,16 @@ def render_report_markdown(report: AssessmentReport) -> str:
         "",
         "## Executive summary",
         "",
-        report.executive_summary,
+        _bounded(report.executive_summary),
         "",
         "## Authorized scope",
         "",
     ]
     for scope in report.authorized_scope:
         lines.append(f"- `{scope}`")
-    lines.extend(["", "## Methodology and limitations", "", report.methodology_and_limitations, ""])
+    lines.extend(
+        ["", "## Methodology and limitations", "", _bounded(report.methodology_and_limitations), ""]
+    )
 
     lines.extend(["## Verified findings", ""])
     if not report.verified_findings:
@@ -625,7 +645,8 @@ def render_report_html(report: AssessmentReport) -> str:
     """A deterministic, escaped HTML rendering. Evidence text is HTML-escaped (injection inert)."""
 
     def esc(value: object) -> str:
-        return html.escape(str(value))
+        # Bound first (defensive truncation), then HTML-escape so injection-shaped text is inert.
+        return html.escape(_bounded(value))
 
     parts = [
         "<!doctype html>",
@@ -972,3 +993,59 @@ def write_report_bundle(output_dir: Path, report: AssessmentReport) -> None:
         for name in sorted(payloads)
     ]
     (output_dir / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+
+
+_EXPORT_MEDIA_TYPES = {
+    "json": "application/json",
+    "md": "text/markdown",
+    "html": "text/html",
+}
+_SAFE_FILENAME_CHARS = re.compile(r"[^a-z0-9._-]+")
+
+
+def safe_report_filename(report: AssessmentReport, extension: str) -> str:
+    """A download filename that cannot traverse paths or inject headers.
+
+    The campaign id and report id are lowercased and reduced to ``[a-z0-9._-]``; any other character
+    (path separators, quotes, CRLF, spaces) collapses to a single ``-``. Leading dots are removed so
+    the name can never be ``..`` or a dotfile, and the whole name is length-bounded.
+    """
+
+    ext = extension.lower().lstrip(".")
+    if ext not in _EXPORT_MEDIA_TYPES:
+        raise ReportProjectionError(f"unsupported report export extension: {extension!r}")
+    campaign = _SAFE_FILENAME_CHARS.sub("-", report.campaign_id.lower()).strip("-.")[:64]
+    stem = f"assessment-{campaign or 'report'}-{report.report_id}-v{report.version}"
+    stem = _SAFE_FILENAME_CHARS.sub("-", stem.lower()).strip("-.")[:180]
+    return f"{stem}.{ext}"
+
+
+def content_disposition(report: AssessmentReport, extension: str) -> str:
+    """A safe ``Content-Disposition`` header value (attachment) for a report export."""
+
+    return f'attachment; filename="{safe_report_filename(report, extension)}"'
+
+
+def export_media_type(extension: str) -> str:
+    ext = extension.lower().lstrip(".")
+    if ext not in _EXPORT_MEDIA_TYPES:
+        raise ReportProjectionError(f"unsupported report export extension: {extension!r}")
+    return _EXPORT_MEDIA_TYPES[ext]
+
+
+def verify_report_bundle(output_dir: Path) -> bool:
+    """Recompute every SHA256SUMS entry and confirm the bundle is byte-intact (fail-closed)."""
+
+    manifest = output_dir / "SHA256SUMS"
+    if not manifest.is_file():
+        raise ReportProjectionError("report bundle is missing its SHA256SUMS manifest")
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        expected, _, name = line.partition("  ")
+        target = output_dir / name
+        if not target.is_file():
+            raise ReportProjectionError(f"report bundle is missing {name}")
+        if hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+            raise ReportProjectionError(f"report bundle checksum mismatch for {name}")
+    return True
