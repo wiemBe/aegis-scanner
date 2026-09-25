@@ -1568,6 +1568,42 @@ Budget: ≤ 5 provider calls, ≤ 15,000 campaign-cumulative tokens, exact `deep
 1, no auto-retry / schema repair / second campaign; worst-case reserved before each call (`BUDGET_STOP`
 on breach; UNKNOWN usage fails closed).
 
+**Live-provider execution path — `IMPLEMENTED (offline/mock-verified); live NOT_EVALUATED`.**
+The isolated live model-gateway adapter is now implemented (`src/aegis/multi_agent/\
+phase_2_9_live_gateway.py`); `--execute-live` no longer stops at `LIVE_RUN_REQUIRES_SEPARATE_\
+AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
+- `Phase29LiveGatewayModel` is a drop-in for `Phase29ModelDouble` behind one logical interface; the
+  campaign selects the **double for `--dry-run`** and the **live adapter only for an armed
+  `--execute-live`**. The dry-run path is unchanged.
+- The DeepSeek credential lives ONLY in the `llm-gateway` service (`.env.gateway`, never read by the
+  host, control plane or range). The five typed calls
+  (`LEAD_ORCHESTRATOR/DELEGATE_ADVERSARY_SIMULATION`, `RECON_AGENT/PLAN_ADVERSARY_SIMULATION`,
+  `RECON_AGENT/RECOMMEND_ADVERSARY_REMEDIATION`, `RECON_AGENT/PLAN_ADVERSARY_SIMULATION` retest,
+  `REPORT_AGENT/GENERATE_ASSESSMENT_REPORT`) execute from the control-plane side of the internal
+  `planner-rpc` network via bounded **stdin JSON** — never argv, shell interpolation or env vars
+  (`shell=False`). One gateway stack (unique project `aegis-p29-live-ds-<campaign_id>`) serves all
+  five calls; the synthetic range stays on its internal no-egress network.
+- Budget is the single `CampaignProviderBudget`: **≤ 5 calls, ≤ 15,000 cumulative tokens, ≤ 2,048
+  output tokens/call, concurrency 1**, worst-case reserved before each call; **no auto-retry, no
+  schema-repair call, no fallback provider, no second campaign**. A rejected/failed call preserves
+  provider-reported usage when available, else records `UNKNOWN`, and **stops** the campaign (never
+  assumes zero, never starts another call). Identity is established from a **zero-cost** gateway
+  `/health` preflight plus the five calls; any model ≠ `deepseek-v4-pro` is a **hard NO-GO**.
+- Cleanup tears down **both** stacks unconditionally (success, gateway failure, invalid output,
+  budget stop, model mismatch, verifier/target failure, exception, cancellation) and proves zero
+  campaign leftovers (containers/networks/volumes/orphans, `down -v --remove-orphans`).
+- Secret isolation proven: control-plane env holds no key; sanitized projections exclude
+  credentials, keys, sentinels, raw headers/payloads/response bodies, ground-truth predicates and
+  authoritative verdict/severity; no raw provider output enters campaign state (gateway-validated
+  output re-validated against the strict host contract).
+
+**This task did not execute a paid campaign.** `phase_2_9_live_provider_status` and every phase's
+`live_status` remain `NOT_EVALUATED`; **no LIVE GO is claimed.** The exact five-call / 15,000-token
+ceiling and explicit `--execute-live` + non-secret `--authorization-ref` arming are unchanged.
+Verified with 26 focused mocked tests (`tests/test_phase_2_9_live_adapter.py`, no real
+docker/gateway/provider), plus the Phase 2.9 guard/regression suite and the Phase 2.3 gateway tests;
+`ruff` + `mypy` clean on the changed files.
+
 **Stop condition.** Do not execute the paid campaign without separate explicit authorization; do not
 start Phase 3.0.
 
