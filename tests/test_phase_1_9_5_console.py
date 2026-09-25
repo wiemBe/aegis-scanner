@@ -10,6 +10,7 @@ import pytest
 
 from aegis import main as main_module
 from aegis.console_catalog import (
+    _project_capability,
     profile_directory,
     profile_display_name,
     target_directory,
@@ -97,6 +98,18 @@ def test_profile_directory_defaults_unmapped_to_unavailable() -> None:
 def test_profile_display_name_falls_back_to_id() -> None:
     assert profile_display_name("aegis-native-bola-synthetic") == "Web & API Authorization"
     assert profile_display_name("does-not-exist") == "does-not-exist"
+
+
+def test_project_capability_unknown_id_falls_back_to_safe_defaults() -> None:
+    # An unknown capability id must never crash projection or fabricate a severity/budget; it
+    # projects as UNKNOWN activity/severity with a zero request budget and no approvals.
+    projected = _project_capability("capability-that-does-not-exist")
+    assert projected["capability_id"] == "capability-that-does-not-exist"
+    assert projected["title"] == "capability-that-does-not-exist"
+    assert projected["activity"] == "UNKNOWN"
+    assert projected["verified_severity"] == "UNKNOWN"
+    assert projected["request_budget"] == 0
+    assert projected["required_approvals"] == []
 
 
 async def test_targets_endpoint_returns_authorized_inventory(

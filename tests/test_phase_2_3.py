@@ -295,9 +295,9 @@ def test_authorize_rejects_target_and_scenario_mismatch(tmp_path: Path) -> None:
 
 
 def test_confirm_rejects_unconfirmed_finding() -> None:
-    # verified_status is a Literal["CONFIRMED"]; an INCOMPLETE finding cannot even be validated, so a
-    # finding that was not independently confirmed is structurally unable to enter the remediation
-    # ledger in the first place.
+    # verified_status is a Literal["CONFIRMED"]; an INCOMPLETE finding cannot even be validated, so
+    # a finding that was not independently confirmed is structurally unable to enter the
+    # remediation ledger in the first place.
     payload = _finding("rloop-" + "d" * 16).model_dump(mode="json")
     payload["verified_status"] = "INCOMPLETE"
     with pytest.raises(ValidationError):
@@ -783,7 +783,8 @@ def test_verdict_not_evaluated_without_a_live_run() -> None:
     module = _load_orchestrator()
     verdict = module._verdict({})
     # Every REQUIRED typed acceptance check is NOT_EVALUATED (never conveniently True/False) when
-    # nothing ran. (`no_marker_leak` is a supplementary global scan, not one of the required checks.)
+    # nothing ran. (`no_marker_leak` is a supplementary global scan, not one of the required
+    # checks.)
     assert verdict["passed"] is False
     required = {
         "fresh_initial_lead_job_persisted",

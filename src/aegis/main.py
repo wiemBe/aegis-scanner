@@ -1214,7 +1214,8 @@ async def console_create_assessment(
         raise HTTPException(status_code=404, detail="TARGET_NOT_FOUND")
     if not target.get("enabled", False) or target.get("status") == "DISABLED":
         raise HTTPException(status_code=409, detail="TARGET_DISABLED")
-    if request.profile_id not in target.get("supported_profile_ids", []):
+    supported_profiles = target.get("supported_profile_ids", [])
+    if not isinstance(supported_profiles, list) or request.profile_id not in supported_profiles:
         raise HTTPException(status_code=409, detail="PROFILE_INCOMPATIBLE_WITH_TARGET")
     availability = await _profile_availability()
     state = availability.get(request.profile_id, {"available": False, "reason": "UNKNOWN_PROFILE"})
@@ -1223,7 +1224,10 @@ async def console_create_assessment(
         # target's engine profiles are unavailable, so no real company scan is ever started here.
         raise HTTPException(status_code=409, detail="PROFILE_UNAVAILABLE_FOR_DEPLOYMENT")
 
-    if request.target_id == "synthetic-bank-api" and request.profile_id == "aegis-native-bola-synthetic":
+    if (
+        request.target_id == "synthetic-bank-api"
+        and request.profile_id == "aegis-native-bola-synthetic"
+    ):
         result = service.create(ScanCreate())
         background_tasks.add_task(service.run, result.id)
         return {

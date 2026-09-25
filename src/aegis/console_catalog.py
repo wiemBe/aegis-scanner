@@ -174,19 +174,7 @@ def profile_directory(
             {"available": False, "reason": "Not available in this deployment."},
         )
         capabilities = [
-            {
-                "capability_id": capability_id,
-                "title": cap.title if (cap := get_engine_capability(capability_id)) else capability_id,
-                "activity": cap.activity.value if cap else "UNKNOWN",
-                "request_budget": cap.request_budget if cap else 0,
-                "concurrency_budget": cap.concurrency_budget if cap else 1,
-                "time_budget_ms": cap.time_budget_ms if cap else 0,
-                "requires_authentication": cap.requires_authentication if cap else False,
-                "state_changing_possible": cap.state_changing_possible if cap else False,
-                "verified_severity": cap.verified_severity if cap else "UNKNOWN",
-                "required_approvals": list(cap.required_approvals) if cap else [],
-            }
-            for capability_id in profile.capability_ids
+            _project_capability(capability_id) for capability_id in profile.capability_ids
         ]
         projected.append(
             {
@@ -203,8 +191,46 @@ def profile_directory(
                 "isolation_boundary": profile.isolation_boundary,
             }
         )
-    projected.sort(key=lambda item: _PROFILE_COPY[str(item["profile_id"])]["order"])  # type: ignore[index]
+    projected.sort(key=_profile_sort_order)
     return projected
+
+
+def _project_capability(capability_id: str) -> dict[str, object]:
+    """Project one engine capability into the console-facing dict, tolerating an unknown id."""
+
+    cap = get_engine_capability(capability_id)
+    if cap is None:
+        return {
+            "capability_id": capability_id,
+            "title": capability_id,
+            "activity": "UNKNOWN",
+            "request_budget": 0,
+            "concurrency_budget": 1,
+            "time_budget_ms": 0,
+            "requires_authentication": False,
+            "state_changing_possible": False,
+            "verified_severity": "UNKNOWN",
+            "required_approvals": [],
+        }
+    return {
+        "capability_id": capability_id,
+        "title": cap.title,
+        "activity": cap.activity.value,
+        "request_budget": cap.request_budget,
+        "concurrency_budget": cap.concurrency_budget,
+        "time_budget_ms": cap.time_budget_ms,
+        "requires_authentication": cap.requires_authentication,
+        "state_changing_possible": cap.state_changing_possible,
+        "verified_severity": cap.verified_severity,
+        "required_approvals": list(cap.required_approvals),
+    }
+
+
+def _profile_sort_order(item: dict[str, object]) -> int:
+    """Stable display order for a projected profile; unmapped profiles sort last."""
+
+    order = _PROFILE_COPY[str(item["profile_id"])]["order"]
+    return order if isinstance(order, int) else 0
 
 
 def profile_display_name(profile_id: str) -> str:

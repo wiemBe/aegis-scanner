@@ -18,11 +18,27 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class NormalizedScope(TypedDict):
+    """The exact, typed shape returned by :func:`validate_and_normalize`.
+
+    Making the shape explicit (rather than ``dict[str, object]``) lets the controller assign the
+    normalized fields onto a :class:`TargetRecord` without ``# type: ignore`` escape hatches.
+    """
+
+    origins: list[str]
+    addresses: list[str]
+    wildcard_subdomains: list[str]
+    allowed_path_prefixes: list[str]
+    excluded_path_prefixes: list[str]
+    openapi_url: str | None
+
 
 TargetType = Literal["WEBSITE", "API", "IP_CIDR", "SYNTHETIC"]
 Environment = Literal["PRODUCTION", "STAGING", "DEVELOPMENT", "INTERNAL", "SYNTHETIC"]
@@ -150,9 +166,9 @@ _TYPE_LABEL: dict[TargetType, str] = {
     "SYNTHETIC": "Synthetic range",
 }
 
-# Which catalog profiles each target type could be assessed by. Whether a profile is *executable* in
-# a given deployment is still decided separately by the profile availability logic, so an unavailable
-# adapter shows the profile disabled with a reason rather than running anything.
+# Which catalog profiles each target type could be assessed by. Whether a profile is *executable*
+# in a given deployment is still decided separately by the profile availability logic, so an
+# unavailable adapter shows the profile disabled with a reason rather than running anything.
 _SUPPORTED_PROFILES: dict[TargetType, list[str]] = {
     "SYNTHETIC": ["aegis-native-bola-synthetic"],
     "WEBSITE": ["ZAP_LAB_PASSIVE_OPENAPI_V1", "NUCLEI_LAB_SAFE_HTTP_V1"],
@@ -258,7 +274,7 @@ def _dedupe(values: list[str]) -> list[str]:
     return seen
 
 
-def validate_and_normalize(request: TargetCreate) -> dict[str, object]:
+def validate_and_normalize(request: TargetCreate) -> NormalizedScope:
     """Validate a create request and return the normalized, controller-owned scope fields. Raises
     :class:`TargetValidationError` with a bounded code on any violation."""
 
@@ -283,7 +299,7 @@ def validate_and_normalize(request: TargetCreate) -> dict[str, object]:
         if not request.addresses:
             raise TargetValidationError("AT_LEAST_ONE_ADDRESS_REQUIRED")
         normalized = [normalize_address(a) for a in request.addresses]
-        for original, norm in zip(request.addresses, normalized, strict=True):
+        for original, _norm in zip(request.addresses, normalized, strict=True):
             if "/" in original and not request.cidr_authorized:
                 raise TargetValidationError("CIDR_REQUIRES_EXPLICIT_AUTHORIZATION")
         addresses = _dedupe(normalized)
@@ -317,9 +333,9 @@ def authorize_url_against_target(record: TargetRecord, url: str) -> str:
     URL is inside the stored authorized scope; raises :class:`ScopeViolation` otherwise. This is how
     a redirect or discovered host that escapes the approved scope is rejected."""
 
-    # A real execution/redirect URL carries a path (and possibly a query); the origin check must run
-    # against the scheme+host+port only, or every path would be rejected as "not an origin". The path
-    # is enforced separately below against the allowed/excluded prefixes.
+    # A real execution/redirect URL carries a path (and possibly a query); the origin check must
+    # run against the scheme+host+port only, or every path would be rejected as "not an origin".
+    # The path is enforced separately below against the allowed/excluded prefixes.
     parts = urlsplit(url if "://" in url else f"https://{url}")
     try:
         origin = normalize_origin(f"{parts.scheme}://{parts.netloc}")
@@ -403,12 +419,12 @@ class TargetInventoryStore:
             authorization_reference=request.authorization_reference.strip(),
             attested_by=operator_id,
             description=(request.description or None),
-            origins=normalized["origins"],  # type: ignore[arg-type]
-            addresses=normalized["addresses"],  # type: ignore[arg-type]
-            wildcard_subdomains=normalized["wildcard_subdomains"],  # type: ignore[arg-type]
-            allowed_path_prefixes=normalized["allowed_path_prefixes"],  # type: ignore[arg-type]
-            excluded_path_prefixes=normalized["excluded_path_prefixes"],  # type: ignore[arg-type]
-            openapi_url=normalized["openapi_url"],  # type: ignore[arg-type]
+            origins=normalized["origins"],
+            addresses=normalized["addresses"],
+            wildcard_subdomains=normalized["wildcard_subdomains"],
+            allowed_path_prefixes=normalized["allowed_path_prefixes"],
+            excluded_path_prefixes=normalized["excluded_path_prefixes"],
+            openapi_url=normalized["openapi_url"],
             credential_reference=(request.credential_reference or None),
             status="AVAILABLE_FOR_ASSESSMENT",
             enabled=True,
@@ -418,7 +434,8 @@ class TargetInventoryStore:
         self._reject_duplicate_scope(record)
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO operator_targets (id, created_at, updated_at, payload) VALUES (?,?,?,?)",
+                "INSERT INTO operator_targets (id, created_at, updated_at, payload) "
+                "VALUES (?,?,?,?)",
                 (record.id, now, now, record.model_dump_json()),
             )
         return record
@@ -467,12 +484,12 @@ class TargetInventoryStore:
         if record is None:
             return None
         normalized = validate_and_normalize(request)
-        record.origins = normalized["origins"]  # type: ignore[assignment]
-        record.addresses = normalized["addresses"]  # type: ignore[assignment]
-        record.wildcard_subdomains = normalized["wildcard_subdomains"]  # type: ignore[assignment]
-        record.allowed_path_prefixes = normalized["allowed_path_prefixes"]  # type: ignore[assignment]
-        record.excluded_path_prefixes = normalized["excluded_path_prefixes"]  # type: ignore[assignment]
-        record.openapi_url = normalized["openapi_url"]  # type: ignore[assignment]
+        record.origins = normalized["origins"]
+        record.addresses = normalized["addresses"]
+        record.wildcard_subdomains = normalized["wildcard_subdomains"]
+        record.allowed_path_prefixes = normalized["allowed_path_prefixes"]
+        record.excluded_path_prefixes = normalized["excluded_path_prefixes"]
+        record.openapi_url = normalized["openapi_url"]
         record.display_name = request.display_name.strip()
         record.environment = request.environment
         record.authorization_reference = request.authorization_reference.strip()
@@ -490,8 +507,8 @@ def scope_preview(request: TargetCreate) -> dict[str, object]:
 
     normalized = validate_and_normalize(request)
     scope = (
-        list(normalized["origins"])  # type: ignore[arg-type]
-        + list(normalized["addresses"])  # type: ignore[arg-type]
-        + [f"*.{d}" for d in normalized["wildcard_subdomains"]]  # type: ignore[arg-type]
+        list(normalized["origins"])
+        + list(normalized["addresses"])
+        + [f"*.{d}" for d in normalized["wildcard_subdomains"]]
     )
     return {"authorized_scope": scope, **normalized}
