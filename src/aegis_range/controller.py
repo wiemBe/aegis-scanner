@@ -185,6 +185,66 @@ class RangeController:
             result.update(body)
         return result
 
+    async def _ops_synthetic_state(
+        self, application_id: str, scenario_id: str
+    ) -> tuple[str, int, str]:
+        """Read the controller-owned synthetic state: (scenario mode, generation, sentinel digest).
+
+        Management-plane only; the model never reaches this path. Used to compute the pre/post state
+        digests that prove a Phase 2.3 patch actually changed the controller state.
+        """
+
+        target = self._target(application_id)
+        async with self._client(target) as client:
+            health = await client.get("/__control/health")
+            detection = await client.get("/__control/detection/state")
+        if health.status_code != 200 or detection.status_code != 200:
+            raise RuntimeError("RANGE_STATE_UNAVAILABLE")
+        health_body = health.json()
+        mode = str(health_body.get("scenarios", {}).get(scenario_id, ""))
+        generation = health_body.get("generation")
+        sentinel_digest = str(detection.json().get("sentinel_digest", ""))
+        return mode, int(generation) if isinstance(generation, int) else 0, sentinel_digest
+
+    async def apply_detection_control_remediation(
+        self, application_id: str, scenario_id: str
+    ) -> dict[str, object]:
+        """Perform the Phase 2.3 controller-owned synthetic remediation and report the state change.
+
+        This is the non-AI controller's patch operation: it switches the single registered scenario
+        from the vulnerable to the patched synthetic mode and rotates the detection sentinel, then
+        reports the previous/resulting modes, the pre/post controller-state digests and the old/new
+        sentinel epochs+digests (safe hashes). The immutable patch receipt is minted from this
+        result by :class:`aegis.multi_agent.remediation.RemediationController`; this method authors
+        no shell, source patch, container command or raw control request beyond management routes.
+        """
+
+        from aegis.multi_agent.remediation import controller_state_digest
+
+        truth = GROUND_TRUTH_BY_SCENARIO.get(scenario_id)
+        if truth is None or truth.application_id != application_id:
+            raise ValueError("SCENARIO_NOT_IN_APPLICATION")
+
+        pre_mode, pre_generation, pre_sentinel = await self._ops_synthetic_state(
+            application_id, scenario_id
+        )
+        await self.select_mode(application_id, scenario_id, Mode.PATCHED)
+        rotation = await self.reset_detection_sentinel(application_id)
+        post_mode, post_generation, post_sentinel = await self._ops_synthetic_state(
+            application_id, scenario_id
+        )
+        return {
+            "previous_mode": pre_mode,
+            "resulting_mode": post_mode,
+            "pre_state_digest": controller_state_digest(pre_mode, pre_generation, pre_sentinel),
+            "post_state_digest": controller_state_digest(post_mode, post_generation, post_sentinel),
+            "old_sentinel_epoch": pre_generation,
+            "old_sentinel_digest": pre_sentinel,
+            "new_sentinel_epoch": post_generation,
+            "new_sentinel_digest": post_sentinel,
+            "sentinel_rotation_reported_previous": rotation.get("previous_sentinel_digest"),
+        }
+
     async def adjudicate_detection_control_bypass(
         self, application_id: str, worker_evidence: dict[str, object]
     ) -> VerificationResult:

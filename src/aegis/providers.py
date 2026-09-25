@@ -163,6 +163,12 @@ _AGENT_TASK_DIRECTIVE: dict[str, str] = {
         "explain the verified two-primitive chain and its remediation; never confirm, "
         "PASS or set severity or impact yourself"
     ),
+    "RECOMMEND_ADVERSARY_REMEDIATION": (
+        "interpret the sanitized verified-finding projection and recommend one registered "
+        "remediation-profile id; the recommendation is non-authoritative and the controller "
+        "decides. Never author a shell command, source patch, container command or control "
+        "request, and never confirm, PASS, set severity or change the target, mode or scope"
+    ),
 }
 
 

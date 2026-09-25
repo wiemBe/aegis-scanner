@@ -32,6 +32,7 @@ from aegis.models import (
     GatewaySelectResponse,
 )
 from aegis.multi_agent.contracts import (
+    AdversaryRemediationRecommendationOutput,
     AdversarySimulationDelegationOutput,
     AdversarySimulationInterpretationOutput,
     AdversarySimulationPlanOutput,
@@ -123,6 +124,10 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_ADVERSARY_SIMULATION": AdversarySimulationPlanOutput,
     "INTERPRET_ADVERSARY_OBSERVATIONS": AdversarySimulationInterpretationOutput,
     "SUBMIT_ADVERSARY_FOR_VERIFICATION": AdversarySimulationSubmissionOutput,
+    # Phase 2.3 controlled adaptive-retest remediation recommendation. Reference-only: the model
+    # recommends only a registered remediation-profile id (non-authoritative); no raw shell, source
+    # patch, container command, control-endpoint request, state or verdict is representable.
+    "RECOMMEND_ADVERSARY_REMEDIATION": AdversaryRemediationRecommendationOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -155,6 +160,9 @@ _AGENT_TASK_ROLES = {
     "PLAN_ADVERSARY_SIMULATION": AgentRole.RECON_AGENT,
     "INTERPRET_ADVERSARY_OBSERVATIONS": AgentRole.RECON_AGENT,
     "SUBMIT_ADVERSARY_FOR_VERIFICATION": AgentRole.RECON_AGENT,
+    # Phase 2.3: the Recon Agent interprets the verified finding and recommends a registered
+    # remediation (no new AI role); the non-AI controller authorizes and applies it.
+    "RECOMMEND_ADVERSARY_REMEDIATION": AgentRole.RECON_AGENT,
 }
 
 

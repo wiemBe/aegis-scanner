@@ -920,6 +920,48 @@ class AdversarySimulationSubmissionOutput(StrictModel):
     rationale: str = Field(min_length=3, max_length=300)
 
 
+# --- Phase 2.3 controlled Adaptive-Retest / Remediation recommendation contract (server-selected) -
+#
+# The strict schema the gateway derives for the RECON_AGENT remediation-recommendation task type. It
+# is reference-only, like the Phase 2.2 contracts: the model reads a sanitized projection of one
+# independently-verified detection-control finding and *recommends* a REGISTERED remediation-profile
+# id. That recommendation is NON-AUTHORITATIVE — ``remediation_authoritative`` is fixed False and
+# the controller re-selects and re-validates the registered profile itself. There is NO field via
+# which the model can author a shell command, a source patch, a container command, a raw control-
+# endpoint request, a target/mode/scope override, a verdict, PASS/CONFIRMED, severity or controller
+# state. ``finding_domain`` is fixed ``ADVERSARY_SIMULATION`` and ``unconfirmed`` is fixed True. The
+# literal alias is kept in lockstep with the remediation module's REMEDIATION_PROFILE_IDS by a
+# drift-guard test; it is duplicated here, not imported, so the isolated gateway process never
+# imports the range inventory or the remediation ledger.
+_GwRemediationProfileId = Literal["enforce_uniform_detection_control_v1"]
+
+
+class AdversaryRemediationRecommendationOutput(StrictModel):
+    """RECOMMEND_ADVERSARY_REMEDIATION: interpret the verified finding and recommend a REGISTERED
+    remediation profile (non-authoritative).
+
+    This single output covers both the reference-only interpretation of the verified finding and the
+    non-authoritative remediation recommendation (call 3 of the bounded loop). It cannot express a
+    verdict, PASS/CONFIRMED, severity, a controller state, a target/mode/scope override, or any raw
+    shell/source/container/control-endpoint instruction — those are structurally unrepresentable.
+    ``remediation_authoritative`` (fixed False) restates that only the controller may authorize a
+    remediation; ``unconfirmed`` (fixed True) restates that only the verifier may confirm.
+    """
+
+    summary: str = Field(min_length=3, max_length=400)
+    finding_domain: _GwAdvDomain = "ADVERSARY_SIMULATION"
+    salient_observation_kinds: list[_GwAdvObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    technique_hypothesis: _GwAdvTechniqueClass
+    recommended_remediation_profile_id: _GwRemediationProfileId = (
+        "enforce_uniform_detection_control_v1"
+    )
+    remediation_authoritative: Literal[False] = False
+    rationale: str = Field(min_length=3, max_length=300)
+    unconfirmed: Literal[True] = True
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -966,6 +1008,8 @@ class AgentGatewayRequest(StrictModel):
         "PLAN_ADVERSARY_SIMULATION",
         "INTERPRET_ADVERSARY_OBSERVATIONS",
         "SUBMIT_ADVERSARY_FOR_VERIFICATION",
+        # Phase 2.3 controlled adaptive-retest / remediation-recommendation task type.
+        "RECOMMEND_ADVERSARY_REMEDIATION",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)

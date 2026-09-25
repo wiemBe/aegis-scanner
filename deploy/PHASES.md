@@ -725,17 +725,106 @@ provider calls. **Stop condition.** Do **not** start Phase 2.3.
 
 ---
 
-### Phase 2.3 — Adaptive Retest & Remediation Loop — `PLANNED`
-**Goal.** Adapt after a failed method and re-test patched targets.
+### Phase 2.3 — Adaptive Retest & Remediation Loop — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** Demonstrate one bounded synthetic remediation/retest loop: a fresh verifier-confirmed
+detection-control finding is remediated by a controller-authorized registered remediation and then
+re-tested by a fresh agent-directed run that the independent verifier PASSes — proving a causal
+CONFIRMED→PASS transition of the *same* finding.
 
-**Acceptance checks:**
-- First method fails → a **new hypothesis** is generated (not a blind retry of the same
-  method).
-- New hypothesis validated by the verifier.
-- Post-patch target re-tested → **PASS** proven against ground truth.
-- Adaptation trail auditable end to end.
+**Narrow semantics (all this phase claims).** *"A controller-authorized synthetic remediation
+transition followed by a fresh agent-directed retest of the same verified detection-control
+finding."* It explicitly **excludes** autonomous source-code repair, arbitrary patch generation,
+production remediation, general adaptive exploitation and broad regression coverage.
 
-**Budget.** ≤ 15 calls / ≤ 60,000 tokens. **Stop condition.** Do not start 2.4.
+**Reuse (unchanged from 2.2).** target `aegis-ops`; scenario `ops-detection-control-bypass-v1`
+(GT-RANGE-OPS-005, CWE-693); capability `aegis.ops.detection_control_probe`; probe profile
+`http_detection_control_probe_v1`; the existing real Lead→Recon job lifecycle (`AdvSimTaskQueue`);
+the Phase 2.2 disposable worker, sentinel mechanics and independent verifier. **No new AI role** is
+minted — the `RECON_AGENT` does the initial plan, the interpretation/remediation recommendation and
+the fresh retest plan.
+
+**Authority model.** The model may only *recommend* a registered `remediation_profile_id` (a non-
+authoritative hint recorded but never trusted; `remediation_authoritative` is fixed `False`). The
+non-AI **controller** owns whether remediation is allowed, the target/scenario, the current/desired
+synthetic mode, the authorization + lease, the patch operation, the typed state transition, the
+sentinel rotation, the immutable patch receipt, retest eligibility and rollback/reset. AI output
+never sets an authoritative state — every transition goes through the controller-owned state machine.
+The model can never emit a shell command, source patch, container command or raw control request:
+those are structurally unrepresentable in the recommendation contract.
+
+**State machine (controller-owned, typed).** `INITIAL_EXECUTION_PENDING → INITIAL_CONFIRMED →
+REMEDIATION_RECOMMENDED → PATCH_AUTHORIZED → PATCH_APPLIED → RETEST_QUEUED → RETEST_RUNNING →
+RETEST_PASS | RETEST_FAIL`, plus `INCOMPLETE` and `CLEANUP_FAILED` fallbacks. Skipping initial
+verification (`INITIAL_EXECUTION_PENDING → REMEDIATION_RECOMMENDED`/`PATCH_AUTHORIZED`) and retesting
+before the patch is applied are structurally rejected. The remediation/retest step begins only after
+a fresh initial worker execution, verifier `CONFIRMED`, a persisted finding, a model recommendation,
+a controller-selected registered remediation and a successful patch receipt — never as an
+unconditional second scan.
+
+**Patch receipt.** An **immutable** (frozen), typed, persisted receipt carries receipt id + URI
+(`patchreceipt://range-ops/<id>`), campaign id, finding ref, target/scenario ids, the registered
+remediation profile, the authorization/lease refs, the controller decision, the previous/resulting
+modes, the pre/post controller-state digests, the old/new sentinel epochs+digests (safe hashes),
+the applied timestamp, the consumed/replay state and the cleanup obligations. It is **consumed
+exactly once** for the retest; a replay fails closed, and the retest is rejected without a valid
+unused receipt.
+
+**Causal acceptance.** The offline causal-break proof asserts: initial evidence predates the patch;
+retest evidence follows it; the retest is bound to the same target/scenario/finding lineage; the
+controller state actually changed (pre≠post digest); the sentinel epoch rotated; stale initial
+evidence cannot satisfy the retest (adjudicated against the rotated ground truth it is not a PASS);
+the patch receipt is required and consumed. The verifier adjudicates only fresh retest evidence and
+generates no substitute probe traffic.
+
+**Required typed acceptance checks** (all `NOT_EVALUATED` until a live run):
+`fresh_initial_lead_job_persisted`, `fresh_initial_recon_job_persisted`,
+`initial_worker_execution_fresh`, `initial_verifier_confirmed`,
+`remediation_recommendation_model_generated`, `remediation_recommendation_non_authoritative`,
+`registered_remediation_selected_by_controller`, `patch_authorization_valid`,
+`patch_receipt_persisted`, `patch_changed_controller_state`, `sentinel_epoch_rotated`,
+`fresh_retest_job_persisted`, `retest_bound_to_original_finding`, `retest_used_valid_patch_receipt`,
+`patch_receipt_replay_blocked`, `retest_started_after_patch`, `stale_evidence_reuse_blocked`,
+`retest_worker_reexecuted_sequence`, `retest_verifier_adjudicated_fresh_evidence`,
+`verifier_did_not_substitute`, `patched_retest_pass`, `causal_remediation_break_proven`,
+`inventory_scope_enforced`, `no_public_egress`, `reset_complete`, `cleanup_complete`, `no_leftovers`,
+`identity_exact_deepseek_v4_pro`, `provider_call_ceiling_enforced`, `campaign_token_ceiling_enforced`.
+
+**New code.** `src/aegis/multi_agent/remediation.py` (typed state machine + `assert_transition`;
+controller-owned registered remediation-profile registry `enforce_uniform_detection_control_v1`;
+`PersistedFinding`, `RemediationAuthorization`, immutable `PatchReceipt`; durable `RemediationLedger`
+on SQLite with single-use/replay-blocked receipts and a transition trail; sanitized
+`build_recommendation_projection` / `build_retest_projection` + `assert_projection_clean`; the
+`RemediationController` with `confirm_initial_finding` / `record_recommendation` /
+`authorize_remediation` / `apply_remediation` / `begin_retest` / `conclude_retest` /
+`prove_causal_break`); one new strict gateway contract
+`AdversaryRemediationRecommendationOutput` + `_GwRemediationProfileId` + task type
+`RECOMMEND_ADVERSARY_REMEDIATION` (RECON_AGENT) wired in `gateway.py`/`providers.py`;
+`RangeController.apply_detection_control_remediation` + `_ops_synthetic_state`;
+`scripts/phase_2_3_live_adaptive_retest.py` (the future single-loop live harness with a fail-closed
+cross-step budget gate and the typed verdict); `tests/test_phase_2_3.py` (41 offline tests). Ruff +
+mypy clean (no new mypy errors).
+
+**Status.** `adaptive_retest_implementation_status = OFFLINE_PASS`;
+`live_adaptive_retest_status = NOT_EVALUATED`. Offline tests are **not** live acceptance; no LIVE GO
+is claimed from fixtures or offline tests.
+
+**Future permitted claim (only after a successful live run).** *"LIVE GO for one controller-
+authorized synthetic remediation and fresh agent-directed retest loop that changed one verifier-
+confirmed detection-control finding from CONFIRMED to PASS."*
+
+**Budget (future live campaign — not yet authorized).** ≤ **4** provider calls; ≤ **12,000**
+campaign-cumulative tokens; exact `deepseek-v4-pro`; concurrency 1; no retry / schema repair /
+second campaign. Suggested allocation: (1) Lead initial delegation, (2) Recon initial plan, (3) Recon
+interpretation + registered remediation recommendation, (4) Recon fresh retest plan after the patch
+receipt. The cumulative budget reserves worst-case usage before each call and fails closed with
+`BUDGET_STOP`.
+
+**Cleanup.** On completion or failure: restore/reset the synthetic target to baseline, invalidate the
+patch receipt, rotate/remove sentinel state, revoke temporary references, stop the Compose stacks
+with volumes+orphans, and prove no Phase 2.3 stacks or networks remain. Cleanup failure is a hard
+NO-GO.
+
+**Stop condition.** Do not execute the paid campaign; do not start Phase 2.4.
 
 ---
 
