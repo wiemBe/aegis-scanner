@@ -63,6 +63,35 @@ class SqlmapBudgetOutcome(_Strict):
         return self.stop_reason is not BudgetStopReason.COMPLETED
 
 
+class SqlmapProxyOutcome(_Strict):
+    """The result of the controller-owned inline counting proxy that strictly caps SQLMap requests.
+
+    Unlike the reactive watchdog (which kills the container *after* observing N logged requests),
+    this proxy sits inline: requests 1..N are forwarded to the single authorized upstream and
+    request N+1 is rejected *before* it reaches the target. The ceiling is controller-owned and
+    cannot be set or widened by the model-facing plan. Only safe metadata is retained — never
+    request/response bodies, headers or query values.
+    """
+
+    max_http_requests: int = Field(ge=1)
+    forwarded_requests: int = Field(ge=0)
+    rejected_over_budget: int = Field(ge=0)
+    rejected_out_of_scope: int = Field(ge=0)
+    upstream_authority: str
+
+    @property
+    def ceiling_reached(self) -> bool:
+        return self.rejected_over_budget > 0
+
+    @property
+    def within_budget(self) -> bool:
+        return self.forwarded_requests <= self.max_http_requests
+
+    @property
+    def escape_attempted(self) -> bool:
+        return self.rejected_out_of_scope > 0
+
+
 class GroundTruth(_Strict):
     """The controller-owned ground truth handed to the independent verifier.
 
