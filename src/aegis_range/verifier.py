@@ -408,6 +408,85 @@ class RangeVerifier:
             controller_sentinel_digest=controller_sentinel_digest,
         )
 
+    def adjudicate_sqli_offline(
+        self,
+        application_id: str,
+        worker_evidence: dict[str, Any],
+        *,
+        seeded_total: int,
+        control_selective_count: int,
+    ) -> VerificationResult:
+        """Delayed SQLi adjudication from WORKER-produced evidence + controller-owned ground truth.
+
+        The SQLi analogue of ``adjudicate_detection_control_bypass_offline``. The verifier
+        sends NO SQL injection traffic of its own: it adjudicates the injection worker's normalized
+        boolean-differential evidence (a benign control query, a boolean-TRUE and a boolean-FALSE
+        probe) against the controller seeded ground truth. A tool's own "injectable" verdict is
+        never an input — only the observed result-set differential is.
+
+        CONFIRMED requires the benign control selective while the boolean-TRUE probe expands the
+        result set to the full seeded population and the boolean-FALSE suppresses it (the query
+        semantics changed). PASS requires the injection to have no effect (a parameterized query
+        treats the payload as a literal, both probes returning nothing). Else INCOMPLETE.
+        """
+
+        if application_id not in RANGE_TARGETS:
+            raise ValueError("TARGET_NOT_IN_RANGE_INVENTORY")
+        target = RANGE_TARGETS[application_id]
+        scenario_id = "shop-catalog-query-v1"
+
+        def _slot(name: str) -> tuple[int, int]:
+            slot = worker_evidence.get(name) or {}
+            status = slot.get("status_code", slot.get("status", 0))
+            count = slot.get("result_count", slot.get("count", -1))
+            return (int(status) if isinstance(status, int) else 0,
+                    int(count) if isinstance(count, int) else -1)
+
+        control_status, control_count = _slot("control")
+        true_status, true_count = _slot("boolean_true")
+        false_status, false_count = _slot("boolean_false")
+
+        control_ok = control_status == 200 and control_count == control_selective_count
+        confirmed = (
+            control_ok
+            and true_status == 200
+            and true_count == seeded_total
+            and true_count > control_count
+            and false_count == 0
+        )
+        patched = (
+            control_ok
+            and true_status == 200
+            and true_count == 0
+            and false_count == 0
+        )
+        evidence = json.dumps(
+            {
+                "ground_truth": {
+                    "seeded_total": seeded_total,
+                    "control_selective_count": control_selective_count,
+                },
+                "worker_evidence": worker_evidence,
+            },
+            sort_keys=True,
+        ).encode()
+        return self._binary(
+            target,
+            scenario_id,
+            confirmed,
+            patched,
+            evidence,
+            {
+                "control_status": control_status,
+                "control_result_count": control_count,
+                "boolean_true_result_count": true_count,
+                "boolean_false_result_count": false_count,
+                "result_set_differential_present": confirmed,
+                "verifier_probe_requests": 0,
+                "verifier_generated_injection_traffic": False,
+            },
+        )
+
     def _decide_detection_control_bypass(
         self,
         application_id: str,

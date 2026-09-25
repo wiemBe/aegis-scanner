@@ -348,6 +348,14 @@ def test_recon_role_registers_exactly_the_four_capabilities() -> None:
             # Phase 2.2 separately registers a bounded adversary-simulation capability on the
             # existing RECON_AGENT (no new AI role); it is not a default recon capability.
             "aegis.ops.detection_control_probe",
+            # Phase 2.8-A Recon Capability Pack (bounded HTTP/DNS/TLS/API discovery tools): each a
+            # controller-owned Tool Broker capability on the existing RECON_AGENT (no new AI role).
+            "aegis.recon.http_probe",
+            "aegis.recon.web_crawl",
+            "aegis.recon.content_discovery",
+            "aegis.recon.api_discovery",
+            "aegis.recon.dns_discovery",
+            "aegis.recon.tls_inspect",
         }
     )
 

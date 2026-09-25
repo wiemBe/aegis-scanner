@@ -41,6 +41,7 @@ from aegis.multi_agent.contracts import (
     AgentGatewayRequestProjection,
     AgentGatewayResponse,
     AgentRole,
+    AssessmentReportDraftOutput,
     AttackChainPlanOutput,
     AuthenticationDelegationOutput,
     AuthenticationInterpretationOutput,
@@ -128,6 +129,11 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     # recommends only a registered remediation-profile id (non-authoritative); no raw shell, source
     # patch, container command, control-endpoint request, state or verdict is representable.
     "RECOMMEND_ADVERSARY_REMEDIATION": AdversaryRemediationRecommendationOutput,
+    # Phase 2.6 controlled REPORT_AGENT report drafting. Prose-only: no verdict, PASS/CONFIRMED/
+    # FAIL, severity, state, causal-link truth, provider/tool usage, credential value or live
+    # provenance is representable; the controller re-derives every authoritative fact and discards
+    # unsupported prose.
+    "GENERATE_ASSESSMENT_REPORT": AssessmentReportDraftOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -163,6 +169,8 @@ _AGENT_TASK_ROLES = {
     # Phase 2.3: the Recon Agent interprets the verified finding and recommends a registered
     # remediation (no new AI role); the non-AI controller authorizes and applies it.
     "RECOMMEND_ADVERSARY_REMEDIATION": AgentRole.RECON_AGENT,
+    # Phase 2.6: the Report Agent drafts the professional report prose (no new authority).
+    "GENERATE_ASSESSMENT_REPORT": AgentRole.REPORT_AGENT,
 }
 
 

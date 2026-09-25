@@ -828,31 +828,430 @@ NO-GO.
 
 ---
 
-### Phase 2.4 — Single vs Multi-Agent Benchmark — `PLANNED`
-**Goal.** Measure whether the multi-agent architecture actually helps.
+### Phase 2.4 — Single-Agent vs Multi-Agent Benchmark — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** A fair, deterministic, controller-owned framework that lines a bounded single-agent run up
+against the existing multi-agent architecture over identical conditions — WITHOUT a fake composite
+"winner" score and WITHOUT declaring one architecture superior absent live comparable runs.
 
-**Acceptance checks (same scenarios, both configs):**
-- Success rate compared.
-- Provider **calls / tokens** compared.
-- Wall-clock **duration** compared.
-- **False-positive rate** and **coverage** compared.
-- A written conclusion stating whether multi-agent is justified by the data.
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/benchmark.py`:
+- Typed benchmark **modes** `SINGLE_AGENT_BASELINE` / `MULTI_AGENT_DELEGATED`.
+- Immutable, digest-stable **benchmark specification** (`BenchmarkSpec`, `spec_sha256`) fixing the
+  shared fairness contract: same target/application/scenario, same immutable inventory snapshot
+  digest, same registered capabilities, same tool profiles, same ground truth, equivalent budget,
+  same verifier authority, same cleanup requirement.
+- Immutable **run-pair identifier** (`RunPairId`, `benchmarkpair://…`) freezing the spec digest and
+  both run refs at pairing time.
+- **Fairness validator** (`FairnessValidator`) + typed **comparable-run rejection reasons**
+  (`ComparabilityRejection`): scope/application/scenario/inventory/capability/tool-profile/
+  ground-truth/budget/verifier/cleanup mismatch, mode collision, wrong-mode-for-slot, missing run,
+  and the **mode-integrity** rules (a role label is not agent execution): the single-agent baseline
+  must carry **no** downstream delegation hand-off; the multi-agent mode must carry **real persisted
+  delegation** (`agent_jobs ≥ 2` and `handoffs ≥ 1`); both must use the Tool Broker and the
+  independent verifier.
+- Raw, controller-owned **metrics** (`BenchmarkRunMetrics`): verified findings, false/unsupported
+  findings, hypotheses, tool executions, successful/failed tool actions, provider calls,
+  input/output/total tokens, wall-clock, agent jobs, hand-offs, verifier confirmed/pass/incomplete,
+  causal chains, cleanup success, budget violations — every unmeasured value stays `UNKNOWN`, never
+  coerced to `0`, and is listed in `incomplete_measurements`.
+- Deterministic **comparison** (`compare_runs`): a side-by-side per-metric table whose `direction`
+  reports only which side is *lower* (never a winner); `superiority_claim_supported` is fixed
+  **False** offline (and even for a live comparable pair this framework reports evidence
+  sufficiency rather than crowning a winner).
+- Durable **result store** (`BenchmarkResultStore`, SQLite): immutable specs/pairs, per-run
+  conditions+metrics, comparison documents.
+- Deterministic **comparison report** (`render_comparison_markdown`).
+- **API / service access:** read-only `GET /api/console/benchmarks` and
+  `GET /api/console/benchmarks/{pair_id}` (both surface `NOT_EVALUATED` / `superiority_declared=false`).
+- Offline harness `scripts/phase_2_4_benchmark.py` emits the typed verdict
+  (`benchmark_framework_status=OFFLINE_PASS`, `live_single_vs_multi_benchmark_status=NOT_EVALUATED`).
 
-**Budget.** Benchmark-scoped; declare and enforce a combined ceiling before running.
-**Stop condition.** Do not start 2.5.
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable this sprint; the
+framework is provider- and container-free by construction).
+
+**Live-provider status — `NOT_EVALUATED`.** No paid single-vs-multi campaign was run.
+
+**Tests (`tests/test_phase_2_4.py`, 26 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Identical scope/profile enforcement; unequal-budget rejection; different inventory / ground-truth
+rejection; missing usage kept `UNKNOWN`; partial runs; verifier-disagreement comparison; cleanup
+failure surfaced (not hidden); single-vs-multi mode integrity; no superiority declared without live
+comparable runs; offline/live provenance; deterministic report; store round-trip + immutability.
+`ruff` + `mypy` clean on the changed files (the two pre-existing `main.py` ruff/mypy findings are
+unrelated and untouched).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for a deterministic controller-owned single-agent
+versus multi-agent benchmark framework."*
+
+**Exclusions.** Does **not** claim that either architecture performs better (that requires live
+comparable runs), nor any live/containerized measurement, nor a composite score.
+
+**Remaining live acceptance requirements.** One authorized live single-vs-multi campaign over the
+synthetic range: two comparable runs at `LIVE_PROVIDER` provenance under one immutable spec, real
+provider usage recorded (calls/tokens, no `UNKNOWN`), both runs cleaned up, and a human reviewer
+reading the raw side-by-side rows.
+
+**Budget.** Framework work is offline (zero provider calls). A future live campaign must declare and
+enforce a combined per-run ceiling equal on both sides before running.
+**Stop condition.** Do not start 2.5 in the same commit.
 
 ---
 
-### Phase 2.5 — Authenticated Staging Progression — `PLANNED`
-**Goal.** Controlled move from synthetic range to staging.
+### Phase 2.5 — Authenticated Staging Progression — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** The controlled progression path from synthetic authenticated testing toward *explicitly
+authorized* staging — WITHOUT connecting to any real staging target this sprint.
 
-**Acceptance checks:**
-- Inventory + authorization resolved for staging targets (controller-owned).
-- Secrets handled via gateway; no secret values in model context.
-- Rate limits respected.
-- **Rollback** and **cleanup** proven.
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/staging.py`:
+- **Environment tiers** `SYNTHETIC_RANGE` / `ISOLATED_STAGING` / `AUTHORIZED_STAGING` /
+  `PRODUCTION_PROHIBITED` (the single fail-closed sink). `classify_environment` maps anything
+  unknown, `None` or `PRODUCTION` to `PRODUCTION_PROHIBITED`; the model can never set/raise the tier.
+- **Controller-owned progression gates** (`evaluate_progression` + typed `ProgressionRejection`):
+  target inventory, environment classification, authorization reference, operator lease (validity),
+  approved assessment profile (per-tier registry), credential reference, session policy, tool/
+  capability allowlist, call/tool budgets, cleanup/reset plan — plus one-step-only tier progression,
+  `MODEL_ATTEMPTED_TIER_CHANGE`, and `ONBOARDING_ONLY_NOT_EXECUTION_READY`. Real
+  `AUTHORIZED_STAGING` is rejected `STAGING_DEPLOYMENT_DISABLED`.
+- **Opaque references**: target- and scenario-bound `CredentialReference` (`credentialref://…`) and
+  environment-bound `SessionReference` (`sessionref://…`), both single-scope + time-bounded; the
+  concrete value lives only in an isolated `OpaqueSecretStore` (revoke zeroizes; a resolve afterward
+  fails closed). No value is representable in any reference, projection, ledger row or audit event.
+- **Deterministic `SessionWorker`** against an in-process `SyntheticStagingApp`: authenticated
+  **positive control**, unauthorized **negative control**, **origin binding** (cross-origin use
+  fails closed), **redirect-escape** blocking (off-origin redirect not followed), cookie/header/token
+  isolation, expiry + revocation + **account reset**. Session material never crosses back to callers.
+- **Metadata-only model projection** (`build_staging_projection` + `assert_staging_projection_clean`):
+  states that an authorized reference *exists*, never a value; a forbidden-token guard fails closed.
+- **Staging capability activation state** (`StagingActivationState`): real staging is
+  `DEPLOYMENT_DISABLED`; synthetic/isolated tiers activate only when gates are satisfied.
+- **Audit events + durable `StagingLedger`** (progressions, opaque references, value-free events).
+- **API / service access:** read-only `GET /api/console/staging/tiers` (honest fail-closed state;
+  `NOT_EVALUATED` live) and `GET /api/console/staging/{campaign_id}/events`.
+- Offline harness `scripts/phase_2_5_authenticated_staging.py` demonstrates the full mechanism
+  (SYNTHETIC_RANGE → ISOLATED_STAGING acquire/use/revoke/reset; AUTHORIZED_STAGING disabled) and
+  emits the typed verdict.
 
-**Budget.** Declared per run; fail-closed. **Stop condition.** Do not start 3.0.
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable this sprint; the
+mechanics are proven in-process).
+
+**Live-provider / real-staging status — `NOT_EVALUATED`.** No real staging target was contacted; the
+`AUTHORIZED_STAGING` tier is `DEPLOYMENT_DISABLED`.
+
+**Tests (`tests/test_phase_2_5.py`, 28 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Fail-closed classification; target/origin binding; expired/revoked references; cross-target misuse;
+secret redaction; redirect escape; missing authorization; expired lease; deployment-disabled staging;
+cleanup/reset; account-state restoration; model-cannot-change-tier; onboarding≠execution; UNKNOWN/
+NOT_EVALUATED behaviour. `ruff` + `mypy` clean on the changed files (the one pre-existing `main.py`
+E501/S608 finding is unrelated; a pre-existing import-sort finding in `main.py` was incidentally
+corrected while adding the staging imports).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for controller-governed authenticated environment
+progression and opaque session handling."*
+
+**Exclusions.** Does **not** claim real staging or production readiness, nor any live/containerized
+authenticated run; the `AUTHORIZED_STAGING` connection is deployment-disabled.
+
+**Remaining live acceptance requirements.** An explicitly authorized isolated/authorized staging
+target with a real credential/session vault, real origin/redirect enforcement over the network, and
+proven rollback/cleanup — behind the controller-owned tier activation and a real operator lease.
+
+**Budget.** Framework work is offline (zero provider calls). A future live run declares its budget
+per run, fail-closed. **Stop condition.** Do not start 2.6 in the same commit.
+
+---
+
+### Phase 2.6 — REPORT_AGENT and Professional Reporting — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** A real, persisted REPORT_AGENT job architecture on top of the existing evidence-preserving
+reporting model, where the controller stays authoritative for every adjudicated fact and the model
+only drafts prose.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/report_agent.py`
++ a strict gateway contract in `contracts.py`:
+- **Real persisted addressable REPORT_AGENT jobs** (`ReportAgentJob`, `agentjob://REPORT_AGENT/…`,
+  QUEUED→CLAIMED→CLOSED with a transition trail) via `ReportAgentQueue`; a new `AgentRole.REPORT_AGENT`
+  and `GENERATE_ASSESSMENT_REPORT` task type wired into the gateway (`_AGENT_OUTPUTS`/
+  `_AGENT_TASK_ROLES`) and a provider directive.
+- **Typed request/response contracts**: the controller-owned `ReportSource` (authoritative facts) and
+  the strict **prose-only** `AssessmentReportDraftOutput` (executive summary, methodology/limitations,
+  per-finding remediation, per-chain explanation, readability notes; `unconfirmed=True`,
+  `authoritative=False`). The model has NO verdict/severity/state/causal/usage/provenance/credential
+  field — those are structurally unrepresentable.
+- **Controller-created sanitized projection** (`build_report_request_projection` +
+  `assert_report_projection_clean`): ids, titles, typed states/severity as data-to-explain, scope refs
+  and evidence digests only — never raw evidence, credential values or answer keys.
+- **Deterministic controller assembly** (`assemble_report`): every adjudicated fact comes from the
+  source; model prose is used only where it maps to a controller-owned id and is token-clean —
+  otherwise it is discarded and the controller fallback (registered/gate/generic remediation, neutral
+  summary) is used (`model_prose_downgraded`). Unverified chains are never explained as verified;
+  cleanup failures are never hidden; UNKNOWN usage is preserved; provenance is copied verbatim (no
+  offline→live conversion).
+- **Stable report identity + versions** (`report_id`, `version`, `content_sha256`, immutable at
+  `(report_id, version)`), report **status** (`COMPLETE`/`PARTIAL`/`INCOMPLETE`) and provenance.
+- **Deterministic exports**: JSON, Markdown and HTML (HTML-escaped, injection-inert) +
+  `write_report_bundle` with a SHA256SUMS manifest. **PDF export: `NOT_EVALUATED`** (no PDF dependency
+  is declared — omitted rather than faked).
+- **API / service access:** read-only `GET /api/console/reports` and
+  `GET /api/console/reports/{report_id}/v/{version}`.
+- Offline harness `scripts/phase_2_6_report_agent.py` runs the full job lifecycle + assembly + exports
+  and emits the typed verdict.
+
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable; reporting is
+provider- and container-free by construction).
+
+**Live-provider status — `NOT_EVALUATED`.** No live report model was called.
+
+**Tests (`tests/test_phase_2_6.py`, 24 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Injection-shaped evidence (inert); secret/credential exclusion; status/severity immutability;
+causal-link immutability (unverified chain not confirmed); provenance + historical-artifact labelling;
+cleanup-failure visibility; partial reports; malformed model output (fallback); deterministic exports;
+stable report identity + version immutability; no false live claims; gateway wiring; job lifecycle.
+`ruff` + `mypy` clean on the changed files (the one pre-existing `main.py` E501/S608 finding is
+unrelated).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the typed REPORT_AGENT job architecture and
+controller-authoritative professional reporting pipeline."*
+
+**Exclusions.** The report agent never confirms, decides PASS/FAIL, sets severity, invents evidence
+or causal links, hides cleanup failures, converts UNKNOWN/HYPOTHESIS→CONFIRMED/PASS, converts
+offline→live, or exposes credentials. No live report model; no PDF export this sprint.
+
+**Remaining live acceptance requirements.** One authorized live `GENERATE_ASSESSMENT_REPORT` call via
+the isolated gateway (bounded calls/tokens, exact `deepseek-v4-pro`), proving the same discard/
+downgrade guarantees over real model prose, with provider usage recorded (no `UNKNOWN`).
+
+**Budget.** Offline (zero provider calls). A future live report call declares ≤ a small call/token
+ceiling, fail-closed. **Stop condition.** Do not start 2.7 in the same commit.
+
+---
+
+### Phase 2.7 — Full Authorized Assessment Lifecycle — `OFFLINE PASS for the controller-owned assessment lifecycle state-machine framework (full live lifecycle integration NOT_EVALUATED)`
+**Goal.** Integrate the prior proven pieces into ONE bounded, resumable, controller-governed
+assessment lifecycle (a typed workflow/DAG), without requiring every vulnerability class in one
+campaign.
+
+> **Correction (follow-up commit after `d33599f`).** The original 2.7 report made two claims it had
+> not earned. (1) It said atomic usage-with-`DONE` persistence prevents "duplicate paid/tool
+> execution" on resume — but that alone does **not** prevent a duplicate *external* effect when a
+> crash occurs after the external call but before the local commit; it only prevents duplicate
+> *accounting*. (2) A typed DAG with stage names is **not** evidence that the existing Lead queue,
+> Tool Broker, verifier, remediation controller, report pipeline and cleanup ledger are actually
+> invoked. Both are corrected below; the earned claim is renamed accordingly and full live lifecycle
+> integration stays `NOT_EVALUATED`.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/lifecycle.py`:
+- **Controller-owned typed DAG** (`LifecycleStage`: AUTHORIZE → PREPARE → EXECUTE → VERIFY →
+  REMEDIATE → RETEST → REPORT → CLEANUP) with explicit dependencies and per-stage state
+  (`StageStatus`).
+- **Overall state machine** (`AssessmentState`: `CREATED`/`AUTHORIZED`/`READY`/`RUNNING`/`VERIFYING`/
+  `REMEDIATING`/`RETESTING`/`REPORTING`/`CLEANING_UP`/`COMPLETED`/`PARTIAL`/`FAILED`/`CANCELLED`/
+  `CLEANUP_FAILED`) with `assert_state_transition`. **The model can never advance it** — every
+  transition is a controller method; stage executors only report a typed `StageOutcome`.
+- **Crash-safe external-effect idempotency (corrected).** `run_external_stage` now persists a stable
+  **stage-attempt record + idempotency key BEFORE any dispatch**, then marks it `DISPATCHED`
+  (pre-response), then `COMPLETED` (post-response), and only then commits the stage `DONE` record with
+  its usage. This **distinguishes duplicate-accounting prevention** (usage committed atomically with
+  `DONE`; a crash before `DONE` charges nothing) **from duplicate-execution prevention** (the
+  idempotency key + a reconcilable broker, or an explicit re-authorize decision). A crash after
+  dispatch but before the response is persisted leaves the outcome **UNKNOWN** — the side effect may
+  have happened once already (**at-least-once, never exactly-once**); it is **never auto-reissued** on
+  resume. Deduplication of the *execution* is only guaranteed when the broker supports idempotent
+  reconciliation; otherwise a new attempt requires an explicit controller decision (and, for a paid
+  call, new operator authorization), and the abandoned attempt keeps cumulative usage `UNKNOWN`.
+  Re-running a `DONE` stage (or a completed idempotency key) is a no-op (no re-execution, no
+  re-charge); a fresh controller on the same DB resumes exactly.
+- **Evidence lineage + freshness**: a stage outcome must carry the current `run_epoch`; a stale
+  upstream (older epoch) and a **historical-artifact reuse** (any other epoch) both fail closed.
+- **Per-stage and cumulative budgets** with usage aggregation; an `UNKNOWN` provider usage fails
+  closed (budget unverifiable) — **usage is never defaulted to zero**.
+- **Lease expiry**, **cancellation**, **partial completion**, **cleanup compensation** (a cleanup
+  ledger), an **immutable audit trail**, an **artifact manifest** (`manifest_sha256`) and a **final
+  typed verdict** (`AssessmentVerdict`): no `COMPLETED` unless every required stage is `DONE` and
+  cleanup succeeded; cleanup failure → `CLEANUP_FAILED`; a cancel request → `CANCELLED`.
+- **Capability activation** + **authorization-reference** gates before execution.
+- **API / service access:** read-only `GET /api/console/assessments/{assessment_id}/lifecycle`
+  (overall state, per-stage records, cleanup ledger, audit trail; `NOT_EVALUATED` live).
+- Offline harness `scripts/phase_2_7_lifecycle.py` runs a full synthetic COMPLETED lifecycle and
+  emits the typed verdict.
+
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable; the DAG is
+provider- and container-free by construction — stage executors are deterministic callables).
+
+**Live-provider status — `NOT_EVALUATED`.** No paid full-lifecycle campaign was run.
+
+**Framework tests (`tests/test_phase_2_7.py`, 22 offline, all green; STATIC + UNIT +
+OFFLINE_INTEGRATION).** Successful offline lifecycle; restart/resume; duplicate-stage prevention;
+stale-evidence rejection; historical-artifact rejection; failed verifier; report failure → PARTIAL;
+per-stage + cumulative budget stop; UNKNOWN-usage fail-closed (no zero default); lease expiry;
+cancellation; cleanup compensation; cleanup failure → CLEANUP_FAILED; partial result; no COMPLETED
+when a required stage is incomplete; authorization/capability gates; immutable audit trail.
+
+**Crash-window tests (new — `tests/test_phase_2_7_crash.py`, 8 offline).** Crash before dispatch
+(safe re-attempt); crash after dispatch before response persist (outcome UNKNOWN, not auto-reissued);
+crash after response persist before stage completion (local replay, **no re-dispatch**); resume with
+a completed idempotency key (idempotent); resume with an unreconciled effect (fails closed);
+prevention of silent provider/tool replay; broker reconciliation dedup where available; usage
+remaining UNKNOWN where reconciliation is unavailable.
+
+**Real lifecycle-integration test (new — `tests/test_phase_2_7_integration.py`, 1 offline; adapters in
+`src/aegis/multi_agent/lifecycle_adapters.py`).** Drives a bounded ops detection-control lifecycle
+through the **actual existing controller/storage interfaces** — persisted Lead/agent queue
+(`AdvSimTaskQueue`), independent verifier (`RangeVerifier.adjudicate_detection_control_bypass_offline`,
+which alone owns CONFIRMED/PASS), remediation controller + immutable patch receipt
+(`RemediationController`), fresh post-patch retest + causal-break proof, Phase 2.6 report job path +
+assembler (`ReportAgentQueue` + `assemble_report`), and the cleanup ledger — with **only the
+network boundary** replaced by a deterministic in-process `httpx.MockTransport` double. It proves
+stable lineage (assessment → jobs → evidence → finding → remediation → retest → report), stage
+ordering, verifier ownership of CONFIRMED/PASS, fresh evidence after remediation, report truth
+inherited from records, cleanup completion, and resume without duplicate completed-stage execution.
+
+`ruff` + `mypy` clean on the changed files.
+
+**Exact bounded claim (earned, renamed):** *"OFFLINE PASS for the controller-owned assessment
+lifecycle state-machine framework"* — plus an **OFFLINE integration pass for the composed ops
+detection-control lifecycle** driven through the real queue/verifier/remediation/retest/report/cleanup
+interfaces (network boundary doubled).
+
+**Remaining `NOT_EVALUATED` behaviour (do not claim):**
+- **Full live lifecycle integration** — a paid provider-backed end-to-end run — `NOT_EVALUATED`.
+- **Tool-Broker-in-lifecycle** — the bank-scenario `ControlledToolBroker` is **not composed** into the
+  ops remediation lifecycle (its `AUTHORIZATION_COMPARISON` evidence has no remediation profile and
+  does not compose without fabrication). Its in-lifecycle adapter stays `NOT_EVALUATED`; the
+  integration test exercises the tool-execution boundary via a real HTTP client, not this class.
+- **Exactly-once external execution** — not provided; the guarantee is at-least-once with UNKNOWN
+  outcomes surfaced and never auto-reissued.
+- **Containerized synthetic full lifecycle** — `NOT_EVALUATED`.
+
+**Exclusions.** Does **not** claim production readiness, general autonomous exploitation, full OWASP
+coverage, nor any live/containerized full-lifecycle run.
+
+**Remaining live acceptance requirements.** One authorized paid full-lifecycle campaign over the
+synthetic range: real Lead/delegation/tool/verifier/remediation/retest/report stages wired to the
+live gateway (bounded per-stage + cumulative budgets, exact `deepseek-v4-pro`), a real operator lease
+and cleanup, with provider usage recorded (no `UNKNOWN`) and the same resume/idempotency guarantees.
+
+**Budget.** Offline (zero provider calls). A future live campaign declares per-stage + cumulative
+ceilings, fail-closed. **Stop condition.** Sprint scope ends at 2.7; do not begin 3.0.
+
+---
+
+### Phase 2.8-A — Recon Capability Pack — `OFFLINE_PASS (container/live NOT_EVALUATED)`
+**Goal.** Expand RECON_AGENT's controller-owned discovery surface with bounded HTTP/DNS/TLS/API
+discovery tools. Tools are **registered Tool Broker capabilities, not AI agents**: the model selects
+only a registered profile id; it never authors raw shell, argv, URLs, wordlists, headers, concurrency,
+timeout, redirect policy or target overrides. SQLMap is deliberately absent here — it belongs to
+INJECTION_AGENT (2.8-B).
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/recon_capabilities.py`:
+- **Six controller-owned typed profiles** across six capabilities (`aegis.recon.http_probe`,
+  `.web_crawl`, `.content_discovery`, `.api_discovery`, `.dns_discovery`, `.tls_inspect`): HTTP
+  service/technology probing (httpx), bounded same-scope crawling (katana), controller-wordlist
+  content discovery (ffuf), documented API/schema discovery (httpx), bounded DNS discovery (dnsx),
+  TLS certificate/parameter inspection (tlsx).
+- **Model-blind selection contract** (`ReconDiscoveryPlan`, strict `extra="forbid"`): only a
+  registered `capability_id`/`profile_id` + inventory `target_ref` (+ optional controller-approved
+  seed route/param). Raw URL/wordlist/header/concurrency/timeout/redirect/argv/target overrides are
+  structurally unrepresentable.
+- **Enforcement (all fail-closed):** controller-owned inventory resolution; exact authorized
+  origin/scope (the scope host must appear in the argv, nothing else may); redirect + target-escape
+  denied (`redirect_policy=DENY`, `-disable-redirects`); environment-tier policy (synthetic range
+  needs no lease; any higher tier needs a signed target-bound lease; unclassified →
+  `PRODUCTION_PROHIBITED`); lease and per-capability request budget; concurrency + request ceilings;
+  output-size limits; **deterministic argv rendering** with a defence-in-depth denylist (no output
+  files, proxies, redirect-follow, header/body injection, shell metacharacters); **tool/version/image
+  provenance** (`ToolProvenance`, recorded in the job + manifest); **normalized observations**
+  (reference-only, never a verdict/severity/payload); **untrusted-output sanitation** (size-bounded,
+  control-char stripped, secret-token redacted); per-run **artifact manifest** + cleanup status.
+- **Real Recon→Injection delegation**: `build_recon_to_injection_delegation` persists an injectable
+  candidate handoff to INJECTION_AGENT on the real `DelegationQueue` (recon never confirms).
+- Registered in `registry.py` under RECON_AGENT only (not granted to any other role).
+
+**Container synthetic status — `NOT_EVALUATED`.** The tool image digests are **synthetic placeholder
+pins** (not operator-resolved RepoDigests); `assert_container_pinned` fails closed until an operator
+pins the real digest. No container was built or run this phase.
+
+**Live status — `NOT_EVALUATED`.** No tool was executed against any target; no provider call.
+
+**Tests (`tests/test_phase_2_8_a.py`, 24 offline, all green).** Registry/role boundary (incl. SQLMap
+is not a recon capability); deterministic bounded shell-free rendering for all six profiles;
+redirect-disabled argv; model-blind contract (raw overrides rejected); profile/capability mismatch;
+unknown target; registered-wordlist-only content discovery; environment-tier + lease fail-closed;
+unpinned-provenance container fail-closed; argv denylist; output sanitation (truncate/redact/strip);
+manifest provenance + cleanup; real persisted Recon→Injection delegation. `ruff` + `mypy` clean on
+changed files.
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the controller-owned Recon Capability Pack
+(bounded HTTP/DNS/TLS/API discovery profiles, model-blind selection, deterministic argv rendering);
+container and live tool execution NOT_EVALUATED."*
+
+**Exclusions.** No exploitation, no confirmation (recon never PASSes/CONFIRMs), no container/live run,
+no real digests pinned.
+
+---
+
+### Phase 2.8-B — Injection Capability Pack (SQLMap) — `OFFLINE_PASS (container/live NOT_EVALUATED)`
+**Goal.** Give INJECTION_AGENT a controller-owned bounded SQL-injection testing capability. SQLMap is
+a **registered Tool Broker capability, not an AI agent**, and belongs to INJECTION_AGENT — never
+RECON_AGENT. The model selects only a registered profile id; it never authors raw shell, argv, URLs,
+SQLMap options, payloads, headers, concurrency, risk/level, technique, timeout or target overrides.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/sqlmap_capability.py`:
+- **Three controller-owned typed profiles** under `aegis.injection.sqlmap`:
+  `sqlmap_sqli_detect_v1` (boolean detection, level 1/risk 1), `sqlmap_sqli_confirm_bounded_v1`
+  (bounded confirmation + DBMS banner, level 2/risk 1), `sqlmap_sqli_canary_impact_v1` (a bounded
+  single-row/single-column seeded-canary read, **synthetic range only**).
+- **Default exclusions** — structurally (the typed profile cannot express them) and via a
+  defence-in-depth argv denylist: no OS shell (`--os-shell`/`--os-cmd`/…), no arbitrary file access
+  (`--file-read`/`--file-write`/…), no unrestricted dumping (`--dump-all`/`--dbs`/`--passwords`), no
+  persistence (`--udf-inject`/`--reg-add`), no out-of-scope crawling (`--crawl`/`--forms`), no
+  proxying/tamper/eval/request-file/arbitrary-SQL. The canary profile permits only a bounded
+  `--dump -T products -C name --where … --start 1 --stop 1`.
+- **Model-blind `SqlmapPlan`** (strict `extra="forbid"`): only capability/profile ids + inventory
+  target + a controller-approved route/parameter; raw overrides are structurally unrepresentable.
+- **Enforcement (fail-closed):** controller inventory; exact origin/scope (host must appear in the
+  argv, the target-url must be the exact controller-composed one); environment-tier policy (canary is
+  synthetic-range-only; any non-range tier needs a signed target-bound lease; unclassified →
+  `PRODUCTION_PROHIBITED`); request budget + ceilings; concurrency `--threads 1`; output-size limits;
+  **deterministic argv rendering**; **tool/version/image provenance** (recorded, unpinned → container
+  fails closed); untrusted-output sanitation; per-run artifact manifest + cleanup.
+- **Independent verification** — added `RangeVerifier.adjudicate_sqli_offline` (the SQLi analogue of
+  the 2.2 detection-control offline adjudication): it adjudicates the **worker's** boolean-differential
+  evidence against controller-owned seeded ground truth and sends **no SQL injection traffic of its
+  own**. **SQLMap output alone never sets CONFIRMED/PASS** — the tool's own "injectable" claim is
+  recorded for audit but is never a verdict input (`SqlmapWorkerEvidence.as_verifier_input()` excludes
+  it).
+- Registered in `registry.py` under INJECTION_AGENT only (rejected for RECON/AUTHORIZATION/CHAIN).
+
+**Offline scenario (`scripts/phase_2_8_b_sqli.py`).** The full chain, offline, against the existing
+synthetic vulnerable/patched `shop-catalog-query-v1` (aegis-shop `/api/products?q`): RECON candidate
+discovery → persisted Recon→Injection delegation (real `DelegationQueue`) → INJECTION_AGENT job
+pickup (resolve by address) → controller-rendered SQLMap job → offline worker **double** issues the
+boolean control/TRUE/FALSE probes SQLMap would drive (in-process `httpx.ASGITransport`, no socket) →
+normalized worker evidence → independent verifier → **vulnerable CONFIRMED, patched PASS** → range
+reset + manifest.
+
+**Container synthetic status — `NOT_EVALUATED`.** The SQLMap binary/image was not built or run; the
+image digest is a synthetic placeholder pin (`assert_container_pinned` fails closed until pinned). The
+offline worker double reproduces the exact result-set differential a boolean-based SQLMap run
+surfaces, so the verifier logic is exercised on real HTTP evidence without running SQLMap itself.
+
+**Live status — `NOT_EVALUATED`.** No SQLMap execution against any target; no provider call.
+
+**Tests (`tests/test_phase_2_8_b.py`, 21 offline, all green).** Registry/role boundary (INJECTION only,
+never recon); bounded shell-free rendering for all three profiles + the default exclusions;
+detect/confirm/canary specifics (canary reads one bounded row, never `--dump-all`); model-blind
+contract; capability/profile/target fail-closed; canary synthetic-range-only + non-range lease
+fail-closed; argv denylist; provenance unpinned → container fail-closed; output sanitation; manifest
+(container NOT_EVALUATED); verifier CONFIRMED/PASS/INCOMPLETE adjudication; **SQLMap-verdict-alone-never
+-confirms**; verifier sends no traffic; and the full vulnerable→CONFIRMED / patched→PASS scenario.
+`ruff` + `mypy` clean on changed files.
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the controller-owned bounded SQLMap injection
+capability (three profiles, model-blind selection, deterministic argv rendering, default-safe
+exclusions) and a bounded synthetic vulnerable→CONFIRMED / patched→PASS SQLi scenario adjudicated by an
+independent verifier over worker evidence; container and live SQLMap execution NOT_EVALUATED."*
+
+**Exclusions.** No live/container SQLMap run, no real digest pin, no exploitation beyond the bounded
+synthetic canary, no verdict from SQLMap output alone.
 
 ---
 
