@@ -32,6 +32,10 @@ from aegis.models import (
     GatewaySelectResponse,
 )
 from aegis.multi_agent.contracts import (
+    AdversarySimulationDelegationOutput,
+    AdversarySimulationInterpretationOutput,
+    AdversarySimulationPlanOutput,
+    AdversarySimulationSubmissionOutput,
     AgentGatewayRequest,
     AgentGatewayRequestProjection,
     AgentGatewayResponse,
@@ -112,6 +116,13 @@ _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_AUTHENTICATION_TEST": AuthenticationPlanOutput,
     "INTERPRET_AUTHENTICATION_OBSERVATIONS": AuthenticationInterpretationOutput,
     "SUBMIT_AUTHENTICATION_FOR_VERIFICATION": AuthenticationSubmissionOutput,
+    # Phase 2.2 controlled adversary-simulation task types. Same reference-only guarantee: no raw
+    # shell, argv, header, payload, target override, redirect, source address or verdict is
+    # representable in any shape; the controller-owned profile owns the deterministic sequence.
+    "DELEGATE_ADVERSARY_SIMULATION": AdversarySimulationDelegationOutput,
+    "PLAN_ADVERSARY_SIMULATION": AdversarySimulationPlanOutput,
+    "INTERPRET_ADVERSARY_OBSERVATIONS": AdversarySimulationInterpretationOutput,
+    "SUBMIT_ADVERSARY_FOR_VERIFICATION": AdversarySimulationSubmissionOutput,
 }
 _AGENT_TASK_ROLES = {
     "PLAN_SURFACE": AgentRole.LEAD_ORCHESTRATOR,
@@ -138,6 +149,12 @@ _AGENT_TASK_ROLES = {
     "PLAN_AUTHENTICATION_TEST": AgentRole.AUTHORIZATION_AGENT,
     "INTERPRET_AUTHENTICATION_OBSERVATIONS": AgentRole.AUTHORIZATION_AGENT,
     "SUBMIT_AUTHENTICATION_FOR_VERIFICATION": AgentRole.AUTHORIZATION_AGENT,
+    # Phase 2.2: the Lead Orchestrator delegates the adversary simulation; the Recon Agent (with a
+    # separately registered adversary-simulation capability) plans, interprets and submits it.
+    "DELEGATE_ADVERSARY_SIMULATION": AgentRole.LEAD_ORCHESTRATOR,
+    "PLAN_ADVERSARY_SIMULATION": AgentRole.RECON_AGENT,
+    "INTERPRET_ADVERSARY_OBSERVATIONS": AgentRole.RECON_AGENT,
+    "SUBMIT_ADVERSARY_FOR_VERIFICATION": AgentRole.RECON_AGENT,
 }
 
 

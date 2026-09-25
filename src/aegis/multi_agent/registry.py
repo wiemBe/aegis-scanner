@@ -83,12 +83,17 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
         "references. Never author raw flags, templates, policies, URLs, headers or payloads; never "
         "confirm a vulnerability, emit PASS, severity, or a final finding.",
         frozenset({ObservationType.SURFACE, ObservationType.RECON_INVENTORY}),
+        # Phase 2.2 adds a separately registered, more aggressive adversary-simulation capability
+        # (a bounded HTTP detection-control probe). It is NOT one of the default recon capabilities;
+        # it is granted here so the existing RECON_AGENT can run the bounded adversary simulation
+        # without minting a new AI role, and it stays subject to the same never-confirm boundary.
         frozenset(
             {
                 "aegis.surface.openapi",
                 "aegis.recon.network_service_discovery",
                 "aegis.recon.nuclei_reviewed_exposure",
                 "aegis.recon.zap_passive_openapi",
+                "aegis.ops.detection_control_probe",
             }
         ),
         "NormalizedReconReport",
@@ -218,6 +223,21 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
         "aegis.bank.auth_rate_limit_probe",
         frozenset({AgentRole.AUTHORIZATION_AGENT}),
         12,
+        False,
+    ),
+    # Phase 2.2 controlled adversary-simulation capability (bounded HTTP detection-control probe).
+    # It issues a controller-owned deterministic sequence — one recognizable baseline probe and one
+    # controller-approved alternate probe variant — against the synthetic aegis-ops protected
+    # operation, at concurrency 1, following no redirects. The model authors no route, header,
+    # payload, source address, decoy or count; the controller-owned profile owns the whole sequence.
+    # It is not read-only (the alternate probe may reach the protected operation's sentinel effect)
+    # and it never confirms, PASSes or sets severity — only the independent deterministic range
+    # verifier does, from controller-owned ground truth. ``target_requests`` bounds the total probe
+    # budget the capability may ever render.
+    "aegis.ops.detection_control_probe": CapabilityPolicy(
+        "aegis.ops.detection_control_probe",
+        frozenset({AgentRole.RECON_AGENT}),
+        4,
         False,
     ),
 }

@@ -199,6 +199,25 @@ GROUND_TRUTH: tuple[ScenarioTruth, ...] = (
         compatible_engines=("NUCLEI", "BEAST_MODE"),
     ),
     ScenarioTruth(
+        "GT-RANGE-OPS-005",
+        "aegis-ops",
+        "ops-detection-control-bypass-v1",
+        "CWE-693",
+        "HTTP detection-control bypass",
+        "HIGH",
+        (
+            "A synthetic HTTP detection control denies a recognizable baseline probe but, in the "
+            "vulnerable mode, fails to recognize one controller-approved alternate probe variant, "
+            "which reaches a harmless protected operation and produces a controller-owned sentinel "
+            "effect. In the patched mode the alternate variant is also denied and no effect occurs."
+        ),
+        (
+            "baseline probe denied by the detection control",
+            "alternate probe reaches the protected sentinel (vulnerable) or is denied (patched)",
+            "controller-owned sentinel effect present (vulnerable) or absent (patched)",
+        ),
+    ),
+    ScenarioTruth(
         "GT-RANGE-OPS-001",
         "aegis-ops",
         "ops-report-selection-v1",

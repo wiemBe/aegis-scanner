@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -349,6 +350,124 @@ class RangeVerifier:
                 "rate_limit_or_lockout_observed": lockout_observed,
                 "invalid_never_authenticated": not invalid_authenticated,
                 "post_burst_status": post.status_code,
+            },
+        )
+
+    async def adjudicate_detection_control_bypass(
+        self, application_id: str, worker_evidence: dict[str, Any]
+    ) -> VerificationResult:
+        """Adjudicate the Phase 2.2 detection-control-bypass slice from WORKER-produced evidence.
+
+        The verifier reads only controller-owned ground truth from the management plane (the current
+        sentinel digest and whether the detection control is active). It then adjudicates the
+        disposable worker's own baseline/alternate probe evidence. It never itself sends the
+        baseline or alternate probe against the protected operation — it generates NO substitute
+        bypass traffic — so a confirmation requires that the *worker's* alternate probe reached the
+        controller-owned sentinel (its observed digest equals the controller's), not merely that a
+        status code differed.
+        """
+
+        target = RANGE_TARGETS.get(application_id)
+        if target is None:
+            raise ValueError("TARGET_NOT_IN_RANGE_INVENTORY")
+        async with self._client(target) as client:
+            state = await client.get("/__control/detection/state")
+        ground_truth: dict[str, Any] = state.json() if state.status_code == 200 else {}
+        controller_digest = ground_truth.get("sentinel_digest")
+        return self._decide_detection_control_bypass(
+            application_id,
+            worker_evidence,
+            detection_active=bool(ground_truth.get("detection_active")),
+            controller_sentinel_digest=controller_digest
+            if isinstance(controller_digest, str)
+            else None,
+        )
+
+    def adjudicate_detection_control_bypass_offline(
+        self,
+        application_id: str,
+        worker_evidence: dict[str, Any],
+        *,
+        detection_active: bool,
+        controller_sentinel_digest: str | None,
+    ) -> VerificationResult:
+        """Delayed adjudication from PERSISTED inputs only — no live/mutable range state, no probes.
+
+        Identical deterministic decision as the live path, but the controller-owned ground truth
+        (whether the detection control was active and the sentinel digest that was live when the
+        worker probed) is supplied from the persisted campaign artifact rather than read from a live
+        management plane. It generates no HTTP traffic of any kind and reconstructs nothing.
+        """
+
+        if application_id not in RANGE_TARGETS:
+            raise ValueError("TARGET_NOT_IN_RANGE_INVENTORY")
+        return self._decide_detection_control_bypass(
+            application_id,
+            worker_evidence,
+            detection_active=detection_active,
+            controller_sentinel_digest=controller_sentinel_digest,
+        )
+
+    def _decide_detection_control_bypass(
+        self,
+        application_id: str,
+        worker_evidence: dict[str, Any],
+        *,
+        detection_active: bool,
+        controller_sentinel_digest: str | None,
+    ) -> VerificationResult:
+        """The single deterministic decision shared by the live and delayed adjudication paths.
+
+        A confirmation requires that the *worker's* alternate probe reached the controller-owned
+        sentinel (its observed digest equals the controller's), not merely that a status code
+        differed. This function itself sends no probe against the protected operation.
+        """
+
+        target = RANGE_TARGETS[application_id]
+        scenario_id = "ops-detection-control-bypass-v1"
+        baseline = worker_evidence.get("baseline") or {}
+        alternate = worker_evidence.get("alternate") or {}
+        baseline_denied = bool(baseline.get("blocked")) and not bool(
+            baseline.get("sentinel_present")
+        )
+        alternate_reached = (
+            not bool(alternate.get("blocked"))
+            and bool(alternate.get("sentinel_present"))
+            and isinstance(controller_sentinel_digest, str)
+            and bool(controller_sentinel_digest)
+            and alternate.get("sentinel_digest") == controller_sentinel_digest
+        )
+        alternate_denied = bool(alternate.get("blocked")) and not bool(
+            alternate.get("sentinel_present")
+        )
+        confirmed = detection_active and baseline_denied and alternate_reached
+        patched = (
+            detection_active and baseline_denied and alternate_denied and not alternate_reached
+        )
+        evidence = json.dumps(
+            {
+                "ground_truth": {
+                    "detection_active": detection_active,
+                    "sentinel_digest": controller_sentinel_digest,
+                },
+                "worker_evidence": worker_evidence,
+            },
+            sort_keys=True,
+        ).encode()
+        return self._binary(
+            target,
+            scenario_id,
+            confirmed,
+            patched,
+            evidence,
+            {
+                "detection_active": detection_active,
+                "baseline_denied": baseline_denied,
+                "alternate_reached_sentinel": alternate_reached,
+                "alternate_denied": alternate_denied,
+                "sentinel_effect_present": alternate_reached,
+                "verifier_probe_requests": 0,
+                "verifier_generated_bypass_traffic": False,
             },
         )
 

@@ -270,8 +270,8 @@ def test_modes_are_strict_and_resets_default_to_patched() -> None:
 
 
 def test_ground_truth_is_controller_owned_and_not_imported_by_apps() -> None:
-    assert len(GROUND_TRUTH) == 20
-    assert len({item.ground_truth_id for item in GROUND_TRUTH}) == 20
+    assert len(GROUND_TRUTH) == 21
+    assert len({item.ground_truth_id for item in GROUND_TRUTH}) == 21
     assert len(CHAIN_GROUND_TRUTH) == 3
     for item in GROUND_TRUTH:
         assert item.evidence_requirements and item.severity_rationale and item.verifier_id
@@ -427,6 +427,12 @@ async def test_incomplete_evidence_never_becomes_pass_for_any_scenario() -> None
         use_management_origins=True,
     )
     for truth in GROUND_TRUTH:
+        # The Phase 2.2 detection-control-bypass scenario is adjudicated from worker-produced
+        # evidence (RangeVerifier.adjudicate_detection_control_bypass), not through the generic
+        # single-request verify() path, so the verifier never generates substitute bypass traffic.
+        # Its incomplete/reset behaviour is covered in tests/test_phase_2_2.py.
+        if truth.scenario_id == "ops-detection-control-bypass-v1":
+            continue
         result = await verifier.verify(truth.application_id, truth.scenario_id)
         assert result.status is VerificationStatus.INCOMPLETE
         assert not result.complete
@@ -436,6 +442,10 @@ async def test_incomplete_evidence_never_becomes_pass_for_any_scenario() -> None
 async def test_reset_replay_restores_every_scenario_to_a_fresh_vulnerable_result() -> None:
     controller = RangeController(transports(), service_transports())
     for truth in GROUND_TRUTH:
+        # See the note above: the Phase 2.2 detection-control-bypass scenario is adjudicated from
+        # worker evidence, not the generic verify() path (covered in tests/test_phase_2_2.py).
+        if truth.scenario_id == "ops-detection-control-bypass-v1":
+            continue
         await controller.select_mode(truth.application_id, truth.scenario_id, Mode.VULNERABLE)
         first = await controller.verify(truth.application_id, truth.scenario_id)
         reset = await controller.reset_application(truth.application_id)

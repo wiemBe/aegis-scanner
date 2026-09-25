@@ -169,6 +169,59 @@ class RangeController:
             result.update(body)
         return result
 
+    async def reset_detection_sentinel(self, application_id: str) -> dict[str, object]:
+        """Rotate the Phase 2.2 detection-control sentinel marker without changing scenario modes.
+
+        This is the sentinel reset the Phase 2.2 cleanup path uses to prove no sentinel state
+        survives a completed run (any previously observed digest is invalidated).
+        """
+
+        target = self._target(application_id)
+        async with self._client(target) as client:
+            response = await client.post("/__control/detection/reset")
+        body: object = response.json() if response.status_code == 200 else {}
+        result: dict[str, object] = {"status_code": response.status_code}
+        if isinstance(body, dict):
+            result.update(body)
+        return result
+
+    async def adjudicate_detection_control_bypass(
+        self, application_id: str, worker_evidence: dict[str, object]
+    ) -> VerificationResult:
+        """Independent adjudication of the Phase 2.2 detection-control-bypass slice.
+
+        Delegates to the deterministic verifier, which reads controller ground truth from the
+        management plane and adjudicates the disposable worker's own evidence without generating any
+        substitute bypass traffic.
+        """
+
+        truth = GROUND_TRUTH_BY_SCENARIO.get("ops-detection-control-bypass-v1")
+        if truth is None or truth.application_id != application_id:
+            raise ValueError("SCENARIO_NOT_IN_APPLICATION")
+        return await self.verifier.adjudicate_detection_control_bypass(
+            application_id, worker_evidence
+        )
+
+    def adjudicate_detection_control_bypass_offline(
+        self,
+        application_id: str,
+        worker_evidence: dict[str, object],
+        *,
+        detection_active: bool,
+        controller_sentinel_digest: str | None,
+    ) -> VerificationResult:
+        """Delayed deterministic adjudication from persisted inputs only (no live range/probes)."""
+
+        truth = GROUND_TRUTH_BY_SCENARIO.get("ops-detection-control-bypass-v1")
+        if truth is None or truth.application_id != application_id:
+            raise ValueError("SCENARIO_NOT_IN_APPLICATION")
+        return self.verifier.adjudicate_detection_control_bypass_offline(
+            application_id,
+            worker_evidence,
+            detection_active=detection_active,
+            controller_sentinel_digest=controller_sentinel_digest,
+        )
+
     async def reset_all(self) -> list[HealthResult]:
         results: list[HealthResult] = []
         for application_id in sorted(RANGE_TARGETS):

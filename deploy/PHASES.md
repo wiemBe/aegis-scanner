@@ -529,16 +529,199 @@ not start 2.2.
 
 ---
 
-### Phase 2.2 — Adversary Simulation — `PLANNED`
-**Goal.** More aggressive but lease-controlled capabilities (spoofing/decoy/evasion class).
+### Phase 2.2 — Adversary Simulation — `LIVE GO` (live worker campaign + delayed deterministic verifier adjudication)
+**Goal.** One bounded synthetic adversary-simulation vertical slice proving Aegis can run a
+narrow, controller-bounded HTTP **detection-control bypass** — LEAD_ORCHESTRATOR → real persisted
+RECON_AGENT hand-off → controller-owned typed adversary-simulation profile → real Tool Broker
+execution → vulnerable/patched observations → **independent verifier adjudication of the worker's
+evidence** → cleanup/reset — without minting a new AI role and without any general evasion,
+spoofing, decoy scanning, source-address manipulation, credential attack or unrestricted shell.
 
-**Acceptance checks:**
-- Runs under a **separate capability lease** (not granted by default).
-- Uses **disposable workers**.
-- Explicit budget declared and enforced; cleanup proven.
-- No capability escalation beyond the granted lease.
+**Scenario.** `ops-detection-control-bypass-v1` (GT-RANGE-OPS-005, **CWE-693**, HIGH) on `aegis-ops`.
+A synthetic HTTP detection control (a request-signature filter) protects one harmless internal
+operation (`GET /api/ops/incident-export`). A recognizable **baseline** probe variant is denied in
+both modes. In the **vulnerable** mode the detection ruleset fails to recognize one
+controller-approved **alternate** variant, which reaches the protected operation and emits a
+reset-specific synthetic **sentinel** marker (the controller-owned effect); in the **patched** mode
+the alternate is also denied and no sentinel effect occurs. Confirmation requires that
+controller-owned sentinel effect — a bare status-code difference is never sufficient.
 
-**Budget.** Lease-declared, hard-capped. **Stop condition.** Do not start 2.3.
+#### Architecture and authority boundaries
+- **No new AI role.** The existing `RECON_AGENT` gains a separately registered adversary-simulation
+  capability `aegis.ops.detection_control_probe` (RECON_AGENT only, not read-only, target-request
+  budget 4). The Lead delegates; the Recon Agent plans/interprets/submits.
+- **Controller-owned typed profile.** `http_detection_control_probe_v1`
+  (`HttpDetectionControlProbeProfile` in `adversary_simulation.py`) owns the complete deterministic
+  sequence: the baseline+alternate variant order, the fixed route/method, concurrency 1, pacing,
+  the maximum requests, the `DENY` redirect policy, the timeout, the stop conditions, the evidence
+  fields and the reset requirement. The model may only **name** the registered profile id; it
+  authors no route, header, user agent, payload, target override, redirect destination, source
+  address, spoof/decoy parameter, attempt count, concurrency, pacing or stop condition. A
+  model-supplied `requested_probe_variants` is a **non-authoritative hint**; the broker always
+  renders the profile's own effective sequence and records model-vs-controller fields separately
+  (`model_requested_probe_variants` vs `controller_effective_probe_variants`). Raw model-created
+  request fields are structurally unrepresentable (strict `AdversarySimulationPlanOutput` /
+  `GatewayAdvProbeSelection`) and re-rejected broker-side; an unknown/disabled profile, an
+  unregistered capability/technique class and a **target escape** (any `target_ref` ≠ `range-ops`)
+  all fail closed.
+- **Secret path.** The concrete probe-variant signature markers live only in the
+  `adversary_simulation` broker secret path and reach the disposable worker via `ADV_PROBE_SPECS`;
+  the auditable rendered execution, queue payloads, projections and artifacts carry only variant
+  labels. The protected-operation sentinel value is redacted to a SHA-256 digest at the source
+  (inside the worker); the raw marker never leaves.
+- **Verifier adjudicates, never substitutes.** `RangeVerifier.adjudicate_detection_control_bypass`
+  reads only controller-owned ground truth from the management plane (the current sentinel digest +
+  detection-active flag) and adjudicates the **worker's** baseline/alternate evidence. It sends **no
+  baseline or alternate probe** against the protected operation (`verifier_probe_requests=0`,
+  `verifier_generated_bypass_traffic=false`; a unit test records the verifier's outbound paths and
+  asserts it touches only `/__control/detection/state`). CONFIRMED requires the worker's alternate
+  probe to have reached the sentinel with a digest **equal to** the controller's; a fabricated or
+  mismatched sentinel digest is not a confirmation.
+- **Never-confirm.** Every model output carries `finding_domain="ADVERSARY_SIMULATION"` (a dedicated
+  `ObservationType.ADVERSARY_PROBE`, distinct from recon inventory) and `unconfirmed=True`. Only the
+  independent deterministic verifier promotes CONFIRMED (vulnerable) / PASS (patched).
+- **Real hand-off.** A real addressable `agentjob://LEAD_ORCHESTRATOR/<id>` job is queued+claimed, a
+  live `DELEGATE_ADVERSARY_SIMULATION` produces a typed delegation persisted at
+  `agentqueue://RECON_AGENT/<id>`, and a separate real `agentjob://RECON_AGENT/<id>` job (carrying
+  that delegation id + producer job id) is queued+claimed; both reach `CLOSED`
+  (QUEUED→CLAIMED→CLOSED). `AdvSimTaskQueue.handoff_linked` proves the producer→delegation→consumer
+  linkage — role labels alone are never accepted.
+
+#### Focused offline test results (no live provider, no Docker)
+`tests/test_phase_2_2.py` — **39 offline tests, all green.** Coverage: strict contracts + drift
+guard (`_GwAdvTechniqueClass`/`_GwAdvProbeProfileId`/`AdversarySimCapabilityId` in lockstep with the
+module) + no-raw-request-field / no-verdict / no-sanitizer-token guards; controller-owned profile
+registry and deterministic rendering (profile sequence overrides the model hint); broker fail-closed
+rejections (unregistered profile, target escape, unregistered technique class, concurrency>1);
+source-side sentinel-redacting sanitizer; disposable worker baseline+alternate execution (vulnerable
+reaches sentinel, patched denied) with no raw sentinel value leaking; typed reference-only
+observation normalizer (absent result → INCOMPLETE, never PASS); **verifier adjudicates worker
+evidence and generates no substitute bypass traffic** (+ digest-mismatch is not CONFIRMED); real
+persisted addressable LEAD→RECON job/delegation queue + hand-off linkage + fail-closed
+address/transition parsing; gateway/registry wiring; and the host-side two-arm verdict with all the
+required typed checks. `ruff` + `mypy` clean on the changed files. Adjacent suites updated for the
+new registered capability/scenario and green: `test_phase_1_6.py` (ground-truth count 20→21; the new
+scenario is skipped in the two generic-`verify()` all-scenario loops because it uses the
+worker-evidence adjudication path), `test_phase_1_7c.py` (RECON_AGENT capability set now includes the
+adversary-simulation capability), `test_phase_2_1.py` / `test_phase_2_0.py` / `test_phase_1_9.py`
+unaffected.
+
+#### Remaining live checks (`NOT_EVALUATED` until an authorized paid campaign runs)
+`real_lead_job_persisted`, `real_recon_job_persisted`, `lead_to_recon_handoff_persisted`,
+`registered_adversary_profile_selected`, `controller_rendered_effective_sequence`,
+`model_fields_non_authoritative`, `worker_executed_baseline_probe`, `worker_executed_alternate_probe`,
+`vulnerable_baseline_denied`, `vulnerable_alternate_reached_sentinel`, `patched_baseline_denied`,
+`patched_alternate_denied`, `patched_no_sentinel_effect`, `verifier_adjudicated_worker_evidence`,
+`verifier_did_not_substitute_for_worker_execution`, `inventory_scope_enforced`,
+`redirect_and_target_escape_blocked`, `no_public_egress`, `cleanup_and_reset_complete`,
+`no_leftovers` (plus `identity_exact_deepseek_v4_pro`, `within_call_ceiling`, `within_token_ceiling`).
+The host-side verdict emits each as `true`/`false` when live data is present and `NOT_EVALUATED`
+otherwise; unknown provider usage is reported `UNKNOWN`, never zero.
+
+#### Proposed single live campaign (NOT yet authorized — do not run without explicit approval)
+`scripts/phase_2_2_live_adversary_simulation.py`, exact `deepseek-v4-pro` via the isolated gateway
+only, **≤ 4 provider calls total, ≤ 12,000 tokens total**, per-task output ceiling 4096, concurrency
+1, **no auto-retry / no schema repair**, one vulnerable arm + one patched arm. The 4-call budget is
+spent as **2 live calls per arm — `DELEGATE_ADVERSARY_SIMULATION` (Lead→Recon hand-off) +
+`PLAN_ADVERSARY_SIMULATION` (Recon selects the registered profile)**; the disposable worker executes
+both probes (free) and the independent verifier adjudicates. `INTERPRET_ADVERSARY_OBSERVATIONS` and
+`SUBMIT_ADVERSARY_FOR_VERIFICATION` are built, gateway-wired and offline-tested but deliberately kept
+out of the paid path to hold the 4-call ceiling. Attempt-level and campaign-cumulative usage are
+reported separately.
+
+#### Cleanup strategy
+Per arm: the controller's `/__control/detection/reset` rotates the reset-specific sentinel marker so
+any previously observed digest is invalidated (`sentinel_reset`), then the compose stacks are torn
+down (`down -v --remove-orphans`) and stack/network leftovers are asserted empty. Cleanup failure,
+authorization bypass, target escape, verifier substitution or leftover sentinel state are hard NO-GO
+conditions.
+
+#### Live campaign (one authorized run — `PARTIAL`, not LIVE GO)
+Artifact `artifacts/phase-2.2-live-adversary-simulation-20260925T052051Z` (86.7s). Budget respected:
+**4 provider calls / 5,853 cumulative tokens** (caps 4 / 12,000; a fail-closed cross-step budget gate
+reserved the 4,096 output ceiling before each call), exact `deepseek-v4-pro` on all 4 calls, every
+projection CLEAN, concurrency 1. **35 of 38 typed checks True**, including: real Lead→Recon hand-off
+in both arms (`agentjob://LEAD_ORCHESTRATOR/…` + separate `agentjob://RECON_AGENT/…`, each
+QUEUED→CLAIMED→CLOSED, `handoff_linked`), controller-rendered effective sequence, model fields
+non-authoritative, worker executed both probes with correct semantics (vulnerable: baseline 403 /
+alternate 200 reached the sentinel; patched: baseline 403 / alternate 403 / no sentinel), verifier
+non-substitution (`verifier_probe_requests=0`, `verifier_generated_bypass_traffic=false`), inventory
+scope, redirect/target-escape blocked, no public egress, sentinel reset (200) + `down_rc=0` + no
+leftovers + control-plane holds no provider key.
+
+**Three checks False → PARTIAL:** `verifier_adjudicated_worker_evidence`,
+`vulnerable_bypass_confirmed_only_by_verifier`, `patched_control_passed_only_by_verifier`. The
+independent verifier returned **INCOMPLETE** for both arms. **Root cause — harness plumbing, not
+authority/scope/model/scenario:** `_controller_op` forwarded the worker evidence to the
+range-controller container via a host env var (`ADV_WORKER_EVIDENCE`) set through
+`subprocess.run(env=...)`, but `docker compose exec` does not inject host env vars into the container
+(it needs `-e`/`--env` or stdin), so the verifier adjudicated empty evidence. The correct worker
+evidence + adjudication input are present in the record; the verifier simply never received them, and
+per the never-self-confirm rule only its verdict counts. No rerun/repair was performed (the single
+authorized campaign forbade a second run). The one-line fix (pass evidence with `-e` or via stdin) is
+deferred to a future explicitly authorized campaign.
+
+#### Verifier transport fix + delayed deterministic adjudication (`LIVE GO`)
+The env-forwarding defect was fixed **without any new paid campaign**: worker evidence now crosses the
+process boundary over **stdin** as canonically serialized, size-bounded, SHA-256-digest-checked bytes
+(`serialize_worker_evidence` / `load_worker_evidence` in `adversary_simulation.py`; the controller
+snippet reads `sys.stdin.buffer.read()` and there is **no** `ADV_WORKER_EVIDENCE` env path anywhere).
+The receiver fails closed on missing / malformed / oversized / digest-mismatched / schema-invalid
+input; structurally-valid-but-empty evidence is accepted and the *decision* layer returns INCOMPLETE.
+
+Delayed adjudication was then run over the **persisted, immutable** inputs of the original campaign
+(`scripts/phase_2_2_replay_verifier.py`) — **zero** provider calls, **zero** worker probes, **zero**
+verifier probes, **zero** containers, no live/mutable range state, nothing reconstructed. Eligibility
+held: the original artifact + SHA256SUMS verify, the worker evidence and controller adjudication input
+are complete, and the controller-owned ground truth needed (the sentinel digest live when the worker
+probed, persisted as `sentinel_reset.previous_sentinel_digest`, plus `detection_active`) is present in
+the artifact, so the deterministic verifier decides **solely** from persisted inputs. The verifier
+(`RangeVerifier.adjudicate_detection_control_bypass_offline`, the same decision code as the live path)
+returned **vulnerable → CONFIRMED** (worker's alternate digest `188786bb…` equals the controller
+ground-truth digest) and **patched → PASS** (alternate denied, no sentinel). The corrected verdict is
+**all 38 checks True**. Supplemental artifact (original never rewritten):
+`artifacts/phase-2.2-delayed-verifier-adjudication-20260925T054328Z` — references the original run,
+original acceptance SHA-256 `22816d76…`, per-arm worker-evidence + controller digests, verifier code
+digests, and `provider_calls=0` / `worker_probe_requests=0` / `verifier_probe_requests=0`. Regression
+tests (`tests/test_phase_2_2.py`, now **44** green) prove: exact-bytes stdin round-trip, empty→
+INCOMPLETE, fail-closed on missing/malformed/oversized/digest-mismatch/schema-invalid, offline verifier
+generates no bypass traffic, and no env-var fallback silently succeeds (real `shell=False` subprocess).
+
+The final decision **combines the original live worker campaign** (real Lead→Recon hand-off + the
+disposable worker's baseline/alternate probes in both arms, 4 provider calls / 5,853 tokens, exact
+`deepseek-v4-pro`) **with the delayed deterministic verifier adjudication** over its persisted inputs.
+
+- **Status.** `implementation_status = OFFLINE_PASS`; `live_adversary_simulation_status =
+  LIVE_GO_WITH_DELAYED_VERIFIER_ADJUDICATION` (original live worker campaign 20260925T052051Z +
+  delayed deterministic verifier adjudication 20260925T054328Z; the first-pass PARTIAL was caused by a
+  since-fixed stdin/env transport defect, not by authority, scope, model or scenario logic). Narrow
+  acceptance claim (now earned):
+  “LIVE GO for one controller-bounded synthetic HTTP detection-control bypass scenario pair with a
+  real Lead-to-Recon-Agent handoff.” Explicitly **excludes** general adversary simulation, arbitrary
+  evasion, IP spoofing / source-address manipulation, decoy scanning, credential attacks,
+  persistence, destructive actions, unrestricted shell, production/company targets and broad
+  detection-control coverage.
+
+**New code.** Range scenario `ops-detection-control-bypass-v1` in `src/aegis_range/ops.py`
+(protected `/api/ops/incident-export` op + synthetic signature detection control + `/__control/
+detection/state` and `/__control/detection/reset` routes + reset-specific sentinel), `GT-RANGE-OPS-005`
+in `ground_truth.py`, `RangeVerifier.adjudicate_detection_control_bypass` +
+`RangeController.adjudicate_detection_control_bypass` / `reset_detection_sentinel`;
+`src/aegis/multi_agent/adversary_simulation.py` (controller-owned probe-profile registry, shell-free
+Tool Broker with model-vs-controller fields, source-side sentinel-redacting sanitizer, disposable
+`run_bounded_detection_probes` worker, typed observation normalizer, worker-evidence adjudication
+input builder, real addressable `AdvSimTaskQueue` for LEAD + RECON jobs and the persisted
+delegation); four strict gateway contracts (`DELEGATE_ADVERSARY_SIMULATION`,
+`PLAN_ADVERSARY_SIMULATION`, `INTERPRET_ADVERSARY_OBSERVATIONS`, `SUBMIT_ADVERSARY_FOR_VERIFICATION`)
++ `_GwAdv*` literals + `ObservationType.ADVERSARY_PROBE` + gateway/role wiring; registered capability
+`aegis.ops.detection_control_probe` (RECON_AGENT only); `scripts/phase_2_2_live_adversary_simulation.py`
+(stdin worker-evidence transport + fail-closed cross-step budget gate); the bounded stdin transport
+helpers + delayed offline verifier path (`serialize_worker_evidence` / `load_worker_evidence`,
+`RangeVerifier.adjudicate_detection_control_bypass_offline`); `scripts/phase_2_2_replay_verifier.py`;
+`tests/test_phase_2_2.py`.
+
+**Budget.** Campaign spent 4 calls / 5,853 tokens (caps 4 / 12,000); delayed adjudication spent 0
+provider calls. **Stop condition.** Do **not** start Phase 2.3.
 
 ---
 

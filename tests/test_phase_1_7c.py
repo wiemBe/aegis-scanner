@@ -345,6 +345,9 @@ def test_recon_role_registers_exactly_the_four_capabilities() -> None:
             "aegis.recon.network_service_discovery",
             "aegis.recon.nuclei_reviewed_exposure",
             "aegis.recon.zap_passive_openapi",
+            # Phase 2.2 separately registers a bounded adversary-simulation capability on the
+            # existing RECON_AGENT (no new AI role); it is not a default recon capability.
+            "aegis.ops.detection_control_probe",
         }
     )
 

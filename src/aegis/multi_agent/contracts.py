@@ -55,6 +55,9 @@ class ObservationType(StrEnum):
     VERIFIER_SUMMARY = "VERIFIER_SUMMARY"
     RECON_INVENTORY = "RECON_INVENTORY"
     INJECTION_PROBE = "INJECTION_PROBE"
+    # Phase 2.2: bounded adversary-simulation observations (detection-control probe responses), kept
+    # distinct so a detection-control-bypass finding never conflates with a recon-inventory finding.
+    ADVERSARY_PROBE = "ADVERSARY_PROBE"
 
 
 class EvaluationVerdict(StrEnum):
@@ -796,6 +799,127 @@ class AuthenticationSubmissionOutput(StrictModel):
     rationale: str = Field(min_length=3, max_length=300)
 
 
+# --- Phase 2.2 controlled Adversary-Simulation gateway output contracts (server-selected) --------
+#
+# The strict schemas the gateway derives for the LEAD_ORCHESTRATOR delegation and the RECON_AGENT
+# adversary-simulation task types. Reference-only, exactly like the recon/auth contracts: the model
+# may select only a registered adversary-simulation capability id, a registered target reference, a
+# typed technique class and a registered controller-owned probe-profile id. There is NO field
+# through which it can emit a raw shell string, raw argv, an arbitrary header, user agent, payload,
+# target override, redirect destination, source address, spoofing/decoy parameter, or an attempt
+# count / concurrency / pacing / stop condition — the controller-owned profile owns all of those.
+# ``finding_domain`` is fixed ``ADVERSARY_SIMULATION``; every ``unconfirmed`` flag is fixed True so
+# only the independent verifier may confirm. The literal alias values are kept in lockstep with
+# aegis.multi_agent.adversary_simulation by a drift-guard test; they are duplicated here, not
+# imported, so the isolated gateway process never imports the range inventory.
+AdversarySimCapabilityId = Literal["aegis.ops.detection_control_probe"]
+_GwAdvTechniqueClass = Literal[
+    "HTTP_DETECTION_CONTROL_BYPASS",
+    "REQUEST_SIGNATURE_EVASION",
+]
+# A registered, controller-owned probe profile. The model may only *select* this id; the controller
+# resolves it into the bounded effective probe sequence (baseline variant, alternate variant, route,
+# concurrency, pacing, maximum requests, redirect policy, timeout, stop conditions, reset). The
+# vulnerable/patched mode and the expected result are never encoded in the id and never reach the
+# model. Kept in lockstep with aegis.multi_agent.adversary_simulation.ADV_PROBE_PROFILE_IDS.
+_GwAdvProbeProfileId = Literal["http_detection_control_probe_v1"]
+_GwAdvObservationKind = Literal[
+    "DETECTION_PROBE_RESPONSE",
+    "PROTECTED_SENTINEL_REACHED",
+    "PROTECTED_SENTINEL_ABSENT",
+    "DETECTION_CONTROL_ACTIVE",
+    "NO_FINDING",
+    "INCOMPLETE_TOOL_ERROR",
+]
+_GwAdvDomain = Literal["ADVERSARY_SIMULATION"]
+
+
+class AdversarySimulationDelegationOutput(StrictModel):
+    """DELEGATE_ADVERSARY_SIMULATION (LEAD_ORCHESTRATOR): a typed hand-off to the recon agent.
+
+    The lead references only the downstream agent, the finding domain, a registered adversary-
+    simulation capability, a target reference and a typed technique class. It cannot express a URL,
+    a raw request, a payload, a verdict or severity. ``unconfirmed`` is fixed True.
+    """
+
+    to_agent: Literal["RECON_AGENT"] = "RECON_AGENT"
+    finding_domain: _GwAdvDomain = "ADVERSARY_SIMULATION"
+    capability_id: AdversarySimCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    technique_class: _GwAdvTechniqueClass
+    rationale: str = Field(min_length=3, max_length=300)
+    unconfirmed: Literal[True] = True
+
+
+class GatewayAdvProbeSelection(StrictModel):
+    """Typed probe-profile *selection* only. No route, header, payload, count or pacing here.
+
+    The model selects a registered controller-owned probe profile (``probe_profile_id``). The
+    profile — not the model — owns the complete deterministic sequence (baseline variant, alternate
+    variant, route, concurrency, pacing, maximum requests, redirect policy, timeout, stop
+    conditions, reset). ``requested_probe_variants`` is a NON-AUTHORITATIVE hint only; controller
+    records it but always renders the profile's own effective sequence. ``concurrency`` is fixed 1.
+    """
+
+    probe_profile_id: _GwAdvProbeProfileId = "http_detection_control_probe_v1"
+    requested_probe_variants: int = Field(default=2, ge=1, le=4)
+    concurrency: Literal[1] = 1
+
+
+class AdversarySimulationPlanOutput(StrictModel):
+    """PLAN_ADVERSARY_SIMULATION: select the registered capability and a bounded probe profile.
+
+    The plan references only a registered adversary-simulation capability, an inventory target
+    reference, a typed technique class and the typed probe-profile selection. It cannot express a
+    URL, raw request, header, payload, source address, decoy/spoof parameter, redirect destination
+    or verdict. ``unconfirmed`` is fixed True — only the verifier confirms.
+    """
+
+    finding_domain: _GwAdvDomain = "ADVERSARY_SIMULATION"
+    capability_id: AdversarySimCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    technique_class: _GwAdvTechniqueClass
+    probe: GatewayAdvProbeSelection
+    rationale: str = Field(min_length=3, max_length=300)
+    unconfirmed: Literal[True] = True
+
+
+class AdversarySimulationInterpretationOutput(StrictModel):
+    """INTERPRET_ADVERSARY_OBSERVATIONS: a bounded, reference-only reading of observations.
+
+    It has no verdict, PASS, CONFIRMED or severity field: the agent cannot confirm a detection-
+    control bypass. ``unconfirmed`` is fixed True so the schema itself restates that only the
+    independent verifier may confirm.
+    """
+
+    summary: str = Field(min_length=3, max_length=400)
+    finding_domain: _GwAdvDomain = "ADVERSARY_SIMULATION"
+    salient_observation_kinds: list[_GwAdvObservationKind] = Field(
+        default_factory=list, max_length=8
+    )
+    technique_hypothesis: _GwAdvTechniqueClass
+    unconfirmed: Literal[True] = True
+
+
+class AdversarySimulationSubmissionOutput(StrictModel):
+    """SUBMIT_ADVERSARY_FOR_VERIFICATION: recommend independent verification, never confirm.
+
+    The submission carries only references: the deterministic verifier authority, the finding
+    domain, a registered capability id, a target reference and the typed technique class. There is
+    deliberately no verdict field of any kind — the agent structurally cannot self-confirm, and
+    ``unconfirmed`` (fixed True) restates that. (A ``confirmed`` field is intentionally absent: it
+    would re-introduce a self-confirmation surface and trip the gateway's verdict-token sanitizer.)
+    """
+
+    to_verifier: Literal["DETERMINISTIC_RANGE_VERIFIER"]
+    finding_domain: _GwAdvDomain = "ADVERSARY_SIMULATION"
+    capability_id: AdversarySimCapabilityId
+    target_ref: str = Field(pattern=r"^range-[a-z0-9-]+$")
+    technique_class: _GwAdvTechniqueClass
+    unconfirmed: Literal[True] = True
+    rationale: str = Field(min_length=3, max_length=300)
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -837,6 +961,11 @@ class AgentGatewayRequest(StrictModel):
         "PLAN_AUTHENTICATION_TEST",
         "INTERPRET_AUTHENTICATION_OBSERVATIONS",
         "SUBMIT_AUTHENTICATION_FOR_VERIFICATION",
+        # Phase 2.2 controlled adversary-simulation task types.
+        "DELEGATE_ADVERSARY_SIMULATION",
+        "PLAN_ADVERSARY_SIMULATION",
+        "INTERPRET_ADVERSARY_OBSERVATIONS",
+        "SUBMIT_ADVERSARY_FOR_VERIFICATION",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)
