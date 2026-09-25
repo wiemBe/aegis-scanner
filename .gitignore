@@ -57,6 +57,9 @@ playwright/.cache/
 *.db-journal
 *.sqlite
 *.sqlite3
+# Checked-in, deterministic TEST_FIXTURE evidence (synthetic; never live evidence) is exempt so a
+# fresh checkout can exercise the report contract without a private artifacts/ directory.
+!tests/fixtures/**/*.sqlite3
 *.log
 logs/
 tmp/

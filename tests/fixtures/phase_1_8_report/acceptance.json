@@ -1,0 +1,22 @@
+{
+  "_fixture": "TEST_FIXTURE",
+  "phase": "1.7-D-TEST-FIXTURE",
+  "record": {
+    "artifact_db_path": "tests/fixtures/phase_1_8_report/delegation_queue.sqlite3",
+    "delegation_enqueue": {
+      "address": "agentqueue://INJECTION_AGENT/delg-bb6dc915960a7d7f",
+      "confirmed": false,
+      "source_evidence_sha256": "7526e1a1894b7096a4a80c0e76845ee4d45b4351b66832fa10d3921907a2b773",
+      "unconfirmed": true
+    }
+  },
+  "verdict": "PASS",
+  "verdict_detail": {
+    "checks": {
+      "controller_owned_verdict": true,
+      "live_provider_identity": "NOT_EVALUATED",
+      "unknown_example": "UNKNOWN"
+    },
+    "passed": true
+  }
+}

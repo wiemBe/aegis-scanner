@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from phase_1_8_report_fixture import ensure_fixture
 
 from aegis.reporting import (
     SQLI_REMEDIATION,
@@ -27,20 +28,16 @@ def repo_root() -> Path:
 
 @pytest.fixture
 def report(repo_root: Path) -> ReportDocument:
+    # Consume the checked-in, deterministic TEST_FIXTURE evidence set rather than a developer's
+    # private, gitignored artifacts/ directory. The report contract (checksum verification,
+    # cross-referenced delegation identity, ground-truth severity trace) is exercised in full; the
+    # fixture is synthetic and is never treated as live-provider evidence.
+    paths = ensure_fixture(repo_root)
     return build_report(
         repo_root=repo_root,
-        verifier_results_path=(
-            repo_root
-            / "artifacts/phase-1.7b-offline-20260923T085928Z/verifier-results.json"
-        ),
-        live_acceptance_path=(
-            repo_root
-            / "artifacts/phase-1.7d-live-e2e-recon-20260923T153518Z/acceptance.json"
-        ),
-        delegation_queue_path=(
-            repo_root
-            / "artifacts/phase-1.7d-live-e2e-recon-20260923T153518Z/delegation_queue.sqlite3"
-        ),
+        verifier_results_path=paths.verifier_results,
+        live_acceptance_path=paths.acceptance,
+        delegation_queue_path=paths.delegation_queue,
         generated_at=datetime(2026, 9, 23, tzinfo=UTC),
     )
 
@@ -159,13 +156,12 @@ def test_human_and_machine_report_preserve_evidence_links(
 
 
 def test_checksum_mismatch_fails_closed(repo_root: Path, tmp_path: Path) -> None:
-    source = (
-        repo_root / "artifacts/phase-1.7b-offline-20260923T085928Z/verifier-results.json"
-    )
+    paths = ensure_fixture(repo_root)
     verifier_dir = tmp_path / "verifier"
     verifier_dir.mkdir()
     copied = verifier_dir / "verifier-results.json"
-    copied.write_bytes(source.read_bytes())
+    copied.write_bytes(paths.verifier_results.read_bytes())
+    # A SHA256SUMS entry that does not match the file's real digest must fail closed.
     (verifier_dir / "SHA256SUMS").write_text(
         f"{'0' * 64}  verifier-results.json\n", encoding="utf-8"
     )
@@ -173,12 +169,6 @@ def test_checksum_mismatch_fails_closed(repo_root: Path, tmp_path: Path) -> None
         build_report(
             repo_root=repo_root,
             verifier_results_path=copied,
-            live_acceptance_path=(
-                repo_root
-                / "artifacts/phase-1.7d-live-e2e-recon-20260923T153518Z/acceptance.json"
-            ),
-            delegation_queue_path=(
-                repo_root
-                / "artifacts/phase-1.7d-live-e2e-recon-20260923T153518Z/delegation_queue.sqlite3"
-            ),
+            live_acceptance_path=paths.acceptance,
+            delegation_queue_path=paths.delegation_queue,
         )

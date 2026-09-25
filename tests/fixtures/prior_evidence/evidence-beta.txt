@@ -1,0 +1,2 @@
+TEST_FIXTURE prior-evidence beta
+deterministic byte-identity sample

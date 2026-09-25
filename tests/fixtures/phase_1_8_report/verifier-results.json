@@ -1,0 +1,122 @@
+[
+  {
+    "evidence_sha256": "bde9de637a7738a895db532da63010fafa262f42f9c995c2c92724b378c38e7f",
+    "facts": {
+      "candidate_tests": 2,
+      "no_mutation": true,
+      "observed_routes": 8,
+      "warnings": 0
+    },
+    "false_positive": false,
+    "gate": "recon",
+    "mode": "vulnerable",
+    "outcome": "PASS",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": null
+  },
+  {
+    "evidence_sha256": "bde9de637a7738a895db532da63010fafa262f42f9c995c2c92724b378c38e7f",
+    "facts": {
+      "candidate_tests": 2,
+      "no_mutation": true,
+      "observed_routes": 8,
+      "warnings": 0
+    },
+    "false_positive": false,
+    "gate": "recon",
+    "mode": "patched",
+    "outcome": "PASS",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": null
+  },
+  {
+    "evidence_sha256": "ce4560ceaefda3d5db192f44d51193c7f1a48661f7e707edfe59eb4b36a31fc6",
+    "facts": {
+      "contextually_encoded": false,
+      "control_status": 200,
+      "probe_status": 200,
+      "raw_html_context": true,
+      "verification_reference": "0161fa83b2a941889c33bc210b4ab3bc"
+    },
+    "false_positive": false,
+    "gate": "xss",
+    "mode": "vulnerable",
+    "outcome": "CONFIRMED",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": "CONFIRMED"
+  },
+  {
+    "evidence_sha256": "ff8cff0bb52a5d7db1c5e132d3e4727308f02edc6b7af5d643e40676f23c8d4b",
+    "facts": {
+      "contextually_encoded": true,
+      "control_status": 200,
+      "probe_status": 200,
+      "raw_html_context": false,
+      "verification_reference": "e4c3b6c37a4a434a97c65cff5885206d"
+    },
+    "false_positive": false,
+    "gate": "xss",
+    "mode": "patched",
+    "outcome": "PASS",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": "PASS"
+  },
+  {
+    "evidence_sha256": "67d311414f63f752c87b3862f41e90eee4ae41c9dea9ee67ab62f7348e1a8bb1",
+    "facts": {
+      "control_result_count": 1,
+      "control_status": 200,
+      "probe_result_count": 3,
+      "probe_status": 200,
+      "verification_reference": "973f56cdb79e44beaa43b3afd344261f"
+    },
+    "false_positive": false,
+    "gate": "sqli",
+    "mode": "vulnerable",
+    "outcome": "CONFIRMED",
+    "scenario_id": "shop-catalog-query-v1",
+    "verifier_status": "CONFIRMED"
+  },
+  {
+    "evidence_sha256": "f85860f7cbe85cc5389d1bdfcabd134bf34c42b0ef772cc6caaabd863e4e4d41",
+    "facts": {
+      "control_result_count": 1,
+      "control_status": 200,
+      "probe_result_count": 0,
+      "probe_status": 200,
+      "verification_reference": "1db04f96479a4ed2adc9389567b760fe"
+    },
+    "false_positive": false,
+    "gate": "sqli",
+    "mode": "patched",
+    "outcome": "PASS",
+    "scenario_id": "shop-catalog-query-v1",
+    "verifier_status": "PASS"
+  },
+  {
+    "evidence_sha256": "053d8bcb47ad793853eeb2f82f26adc12eb5a5f2c38b0c5fec70d64d4e40c80b",
+    "facts": {
+      "links_complete": true,
+      "recon_candidates": 2
+    },
+    "false_positive": false,
+    "gate": "chain",
+    "mode": "vulnerable",
+    "outcome": "CONFIRMED",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": "CONFIRMED"
+  },
+  {
+    "evidence_sha256": "f3dad8ac6e88d1d172b40667b369c45c2dabe196f87651a6230f3848565554b5",
+    "facts": {
+      "links_complete": true,
+      "recon_candidates": 2
+    },
+    "false_positive": false,
+    "gate": "chain",
+    "mode": "patched",
+    "outcome": "PASS",
+    "scenario_id": "shop-promotion-preview-v1",
+    "verifier_status": "PASS"
+  }
+]
