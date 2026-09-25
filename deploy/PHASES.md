@@ -1022,6 +1022,66 @@ ceiling, fail-closed. **Stop condition.** Do not start 2.7 in the same commit.
 
 ---
 
+### Phase 2.7 — Full Authorized Assessment Lifecycle — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** Integrate the prior proven pieces into ONE bounded, resumable, controller-governed
+assessment lifecycle (a typed workflow/DAG), without requiring every vulnerability class in one
+campaign.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/lifecycle.py`:
+- **Controller-owned typed DAG** (`LifecycleStage`: AUTHORIZE → PREPARE → EXECUTE → VERIFY →
+  REMEDIATE → RETEST → REPORT → CLEANUP) with explicit dependencies and per-stage state
+  (`StageStatus`).
+- **Overall state machine** (`AssessmentState`: `CREATED`/`AUTHORIZED`/`READY`/`RUNNING`/`VERIFYING`/
+  `REMEDIATING`/`RETESTING`/`REPORTING`/`CLEANING_UP`/`COMPLETED`/`PARTIAL`/`FAILED`/`CANCELLED`/
+  `CLEANUP_FAILED`) with `assert_state_transition`. **The model can never advance it** — every
+  transition is a controller method; stage executors only report a typed `StageOutcome`.
+- **Idempotency + resume**: usage is committed atomically with a stage's `DONE` record, so an
+  interruption before `DONE` records no usage (safe re-execution) and re-running a `DONE` stage
+  returns the cached record — **no duplicate paid/tool execution** on resume (a fresh controller on
+  the same DB resumes exactly).
+- **Evidence lineage + freshness**: a stage outcome must carry the current `run_epoch`; a stale
+  upstream (older epoch) and a **historical-artifact reuse** (any other epoch) both fail closed.
+- **Per-stage and cumulative budgets** with usage aggregation; an `UNKNOWN` provider usage fails
+  closed (budget unverifiable) — **usage is never defaulted to zero**.
+- **Lease expiry**, **cancellation**, **partial completion**, **cleanup compensation** (a cleanup
+  ledger), an **immutable audit trail**, an **artifact manifest** (`manifest_sha256`) and a **final
+  typed verdict** (`AssessmentVerdict`): no `COMPLETED` unless every required stage is `DONE` and
+  cleanup succeeded; cleanup failure → `CLEANUP_FAILED`; a cancel request → `CANCELLED`.
+- **Capability activation** + **authorization-reference** gates before execution.
+- **API / service access:** read-only `GET /api/console/assessments/{assessment_id}/lifecycle`
+  (overall state, per-stage records, cleanup ledger, audit trail; `NOT_EVALUATED` live).
+- Offline harness `scripts/phase_2_7_lifecycle.py` runs a full synthetic COMPLETED lifecycle and
+  emits the typed verdict.
+
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable; the DAG is
+provider- and container-free by construction — stage executors are deterministic callables).
+
+**Live-provider status — `NOT_EVALUATED`.** No paid full-lifecycle campaign was run.
+
+**Tests (`tests/test_phase_2_7.py`, 22 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Successful offline lifecycle; restart/resume; duplicate-stage prevention; stale-evidence rejection;
+historical-artifact rejection; failed verifier; report failure → PARTIAL; per-stage + cumulative
+budget stop; UNKNOWN-usage fail-closed (no zero default); lease expiry; cancellation; cleanup
+compensation; cleanup failure → CLEANUP_FAILED; partial result; no COMPLETED when a required stage is
+incomplete; authorization/capability gates; immutable audit trail. `ruff` + `mypy` clean on the
+changed files (the one pre-existing `main.py` E501/S608 finding is unrelated).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for a bounded, resumable and controller-governed
+synthetic assessment lifecycle."*
+
+**Exclusions.** Does **not** claim production readiness, general autonomous exploitation, full OWASP
+coverage, nor any live/containerized full-lifecycle run.
+
+**Remaining live acceptance requirements.** One authorized paid full-lifecycle campaign over the
+synthetic range: real Lead/delegation/tool/verifier/remediation/retest/report stages wired to the
+live gateway (bounded per-stage + cumulative budgets, exact `deepseek-v4-pro`), a real operator lease
+and cleanup, with provider usage recorded (no `UNKNOWN`) and the same resume/idempotency guarantees.
+
+**Budget.** Offline (zero provider calls). A future live campaign declares per-stage + cumulative
+ceilings, fail-closed. **Stop condition.** Sprint scope ends at 2.7; do not begin 3.0.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 

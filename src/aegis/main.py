@@ -28,6 +28,7 @@ from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
 from aegis.multi_agent.benchmark import BenchmarkResultStore
+from aegis.multi_agent.lifecycle import LifecycleLedger
 from aegis.multi_agent.report_agent import ReportAgentQueue
 from aegis.multi_agent.runtime import console_projection as multi_agent_projection
 from aegis.multi_agent.staging import (
@@ -95,6 +96,8 @@ benchmark_store = BenchmarkResultStore(settings.database_path)
 staging_ledger = StagingLedger(settings.database_path)
 # Phase 2.6 controller-authoritative REPORT_AGENT job queue + report store (read-only surface).
 report_agent_queue = ReportAgentQueue(settings.database_path)
+# Phase 2.7 controller-governed assessment-lifecycle ledger (read-only surface).
+lifecycle_ledger = LifecycleLedger(settings.database_path)
 # Controller-owned operator target inventory (Phase 1.9.5). Persists onboarded company targets;
 # the browser never holds authority over scope.
 target_store = TargetInventoryStore(settings.database_path)
@@ -143,6 +146,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     benchmark_store.initialize()
     staging_ledger.initialize()
     report_agent_queue.initialize()
+    lifecycle_ledger.initialize()
     target_store.initialize()
     yield
 
@@ -424,6 +428,34 @@ async def console_report(report_id: str, version: int) -> dict[str, object]:
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report.model_dump(mode="json")
+
+
+@app.get("/api/console/assessments/{assessment_id}/lifecycle")
+async def console_assessment_lifecycle(assessment_id: str) -> dict[str, object]:
+    """Read-only projection of a controller-governed assessment lifecycle (Phase 2.7).
+
+    Surfaces the overall state, per-stage records, the cleanup ledger and the immutable audit
+    trail — the controller owns every transition; the browser never advances state. Live
+    full-lifecycle execution is NOT_EVALUATED this sprint.
+    """
+
+    if not re.fullmatch(r"asmt-[a-f0-9]{16}", assessment_id):
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    spec = lifecycle_ledger.get_spec(assessment_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return {
+        "assessment_id": assessment_id,
+        "campaign_id": spec.campaign_id,
+        "state": lifecycle_ledger.get_state(assessment_id).value,
+        "cancel_requested": lifecycle_ledger.cancel_requested(assessment_id),
+        "stages": [record.model_dump(mode="json") for record in
+                   lifecycle_ledger.all_stages(assessment_id)],
+        "cleanup": [entry.model_dump(mode="json") for entry in
+                    lifecycle_ledger.cleanup_entries(assessment_id)],
+        "audit_trail": lifecycle_ledger.audit_trail(assessment_id),
+        "live_full_lifecycle_status": "NOT_EVALUATED",
+    }
 
 
 class EmergencyStopRequest(BaseModel):
