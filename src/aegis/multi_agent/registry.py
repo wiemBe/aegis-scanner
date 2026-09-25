@@ -87,6 +87,11 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
         # (a bounded HTTP detection-control probe). It is NOT one of the default recon capabilities;
         # it is granted here so the existing RECON_AGENT can run the bounded adversary simulation
         # without minting a new AI role, and it stays subject to the same never-confirm boundary.
+        # Phase 2.8-A adds the Recon Capability Pack: bounded HTTP probe / crawl / content discovery
+        # / API-schema discovery / DNS discovery / TLS inspection. Each is a controller-owned Tool
+        # Broker capability (not an AI agent); the model selects only a registered profile id and
+        # stays subject to the same never-confirm boundary. SQLMap is deliberately NOT here — it
+        # belongs to INJECTION_AGENT (Phase 2.8-B).
         frozenset(
             {
                 "aegis.surface.openapi",
@@ -94,6 +99,12 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
                 "aegis.recon.nuclei_reviewed_exposure",
                 "aegis.recon.zap_passive_openapi",
                 "aegis.ops.detection_control_probe",
+                "aegis.recon.http_probe",
+                "aegis.recon.web_crawl",
+                "aegis.recon.content_discovery",
+                "aegis.recon.api_discovery",
+                "aegis.recon.dns_discovery",
+                "aegis.recon.tls_inspect",
             }
         ),
         "NormalizedReconReport",
@@ -239,6 +250,29 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
         frozenset({AgentRole.RECON_AGENT}),
         4,
         False,
+    ),
+    # Phase 2.8-A Recon Capability Pack. Each is a controller-owned bounded discovery tool the
+    # RECON_AGENT may select only by registered profile id (never a raw flag, URL, wordlist, header,
+    # concurrency, timeout, redirect policy or target override). All are read-only; none can
+    # confirm, PASS or set severity. ``target_requests`` bounds the request ceiling the controller
+    # profile may ever render. Container/live execution is NOT_EVALUATED this phase.
+    "aegis.recon.http_probe": CapabilityPolicy(
+        "aegis.recon.http_probe", frozenset({AgentRole.RECON_AGENT}), 4, True
+    ),
+    "aegis.recon.web_crawl": CapabilityPolicy(
+        "aegis.recon.web_crawl", frozenset({AgentRole.RECON_AGENT}), 25, True
+    ),
+    "aegis.recon.content_discovery": CapabilityPolicy(
+        "aegis.recon.content_discovery", frozenset({AgentRole.RECON_AGENT}), 32, True
+    ),
+    "aegis.recon.api_discovery": CapabilityPolicy(
+        "aegis.recon.api_discovery", frozenset({AgentRole.RECON_AGENT}), 6, True
+    ),
+    "aegis.recon.dns_discovery": CapabilityPolicy(
+        "aegis.recon.dns_discovery", frozenset({AgentRole.RECON_AGENT}), 8, True
+    ),
+    "aegis.recon.tls_inspect": CapabilityPolicy(
+        "aegis.recon.tls_inspect", frozenset({AgentRole.RECON_AGENT}), 2, True
     ),
 }
 

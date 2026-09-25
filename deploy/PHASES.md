@@ -1132,6 +1132,61 @@ ceilings, fail-closed. **Stop condition.** Sprint scope ends at 2.7; do not begi
 
 ---
 
+### Phase 2.8-A — Recon Capability Pack — `OFFLINE_PASS (container/live NOT_EVALUATED)`
+**Goal.** Expand RECON_AGENT's controller-owned discovery surface with bounded HTTP/DNS/TLS/API
+discovery tools. Tools are **registered Tool Broker capabilities, not AI agents**: the model selects
+only a registered profile id; it never authors raw shell, argv, URLs, wordlists, headers, concurrency,
+timeout, redirect policy or target overrides. SQLMap is deliberately absent here — it belongs to
+INJECTION_AGENT (2.8-B).
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/recon_capabilities.py`:
+- **Six controller-owned typed profiles** across six capabilities (`aegis.recon.http_probe`,
+  `.web_crawl`, `.content_discovery`, `.api_discovery`, `.dns_discovery`, `.tls_inspect`): HTTP
+  service/technology probing (httpx), bounded same-scope crawling (katana), controller-wordlist
+  content discovery (ffuf), documented API/schema discovery (httpx), bounded DNS discovery (dnsx),
+  TLS certificate/parameter inspection (tlsx).
+- **Model-blind selection contract** (`ReconDiscoveryPlan`, strict `extra="forbid"`): only a
+  registered `capability_id`/`profile_id` + inventory `target_ref` (+ optional controller-approved
+  seed route/param). Raw URL/wordlist/header/concurrency/timeout/redirect/argv/target overrides are
+  structurally unrepresentable.
+- **Enforcement (all fail-closed):** controller-owned inventory resolution; exact authorized
+  origin/scope (the scope host must appear in the argv, nothing else may); redirect + target-escape
+  denied (`redirect_policy=DENY`, `-disable-redirects`); environment-tier policy (synthetic range
+  needs no lease; any higher tier needs a signed target-bound lease; unclassified →
+  `PRODUCTION_PROHIBITED`); lease and per-capability request budget; concurrency + request ceilings;
+  output-size limits; **deterministic argv rendering** with a defence-in-depth denylist (no output
+  files, proxies, redirect-follow, header/body injection, shell metacharacters); **tool/version/image
+  provenance** (`ToolProvenance`, recorded in the job + manifest); **normalized observations**
+  (reference-only, never a verdict/severity/payload); **untrusted-output sanitation** (size-bounded,
+  control-char stripped, secret-token redacted); per-run **artifact manifest** + cleanup status.
+- **Real Recon→Injection delegation**: `build_recon_to_injection_delegation` persists an injectable
+  candidate handoff to INJECTION_AGENT on the real `DelegationQueue` (recon never confirms).
+- Registered in `registry.py` under RECON_AGENT only (not granted to any other role).
+
+**Container synthetic status — `NOT_EVALUATED`.** The tool image digests are **synthetic placeholder
+pins** (not operator-resolved RepoDigests); `assert_container_pinned` fails closed until an operator
+pins the real digest. No container was built or run this phase.
+
+**Live status — `NOT_EVALUATED`.** No tool was executed against any target; no provider call.
+
+**Tests (`tests/test_phase_2_8_a.py`, 24 offline, all green).** Registry/role boundary (incl. SQLMap
+is not a recon capability); deterministic bounded shell-free rendering for all six profiles;
+redirect-disabled argv; model-blind contract (raw overrides rejected); profile/capability mismatch;
+unknown target; registered-wordlist-only content discovery; environment-tier + lease fail-closed;
+unpinned-provenance container fail-closed; argv denylist; output sanitation (truncate/redact/strip);
+manifest provenance + cleanup; real persisted Recon→Injection delegation. `ruff` + `mypy` clean on
+changed files.
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the controller-owned Recon Capability Pack
+(bounded HTTP/DNS/TLS/API discovery profiles, model-blind selection, deterministic argv rendering);
+container and live tool execution NOT_EVALUATED."*
+
+**Exclusions.** No exploitation, no confirmation (recon never PASSes/CONFIRMs), no container/live run,
+no real digests pinned.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 
