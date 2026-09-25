@@ -1430,6 +1430,130 @@ logic and never fed substitute traffic; offline authority model unchanged.
 
 ---
 
+### Phase 2.9 — Consolidated End-to-End Synthetic Acceptance — `OFFLINE_PASS` + `CONTAINERIZED_SYNTHETIC_PASS` (live provider NOT_EVALUATED)
+**Goal.** ONE continuous, bounded, controller-governed synthetic assessment lifecycle that *composes*
+the already-accepted Phase 2.3 (remediation/retest), Phase 2.6 (REPORT_AGENT reporting) and Phase 2.7
+(assessment lifecycle) capabilities over the single authorized `aegis-ops` detection-control slice —
+proving integration, not breadth. It reuses the existing roles (`LEAD_ORCHESTRATOR`, `RECON_AGENT`,
+`REPORT_AGENT`, non-AI `INDEPENDENT_VERIFIER`) and adds no attack primitive.
+
+**Scope (all this phase claims).** *"One continuous controller-governed synthetic assessment lifecycle
+over aegis-ops: fresh assessment → Lead delegation → Recon plan → real worker execution → independent
+verifier CONFIRMED → non-authoritative remediation recommendation → controller-applied registered
+remediation + immutable patch receipt → fresh Recon retest → independent verifier PASS → real
+REPORT_AGENT job → controller-authoritative report → cleanup/reset → final COMPLETED lifecycle verdict
++ artifact manifest,"* derived from ONE campaign lineage.
+
+**Reuse (not rebuilt).** The lifecycle is driven through the ACTUAL Phase 2.7 controller/adapters
+(`aegis.multi_agent.lifecycle_adapters.OpsDetectionControlLifecycle`), which invoke the real persisted
+Lead/agent queue (`AdvSimTaskQueue`), the real independent verifier
+(`RangeVerifier.adjudicate_detection_control_bypass_offline`, which alone owns CONFIRMED/PASS), the
+real remediation controller + immutable patch receipt (`RemediationController`), the real Phase 2.6
+report job path + assembler (`ReportAgentQueue` + `assemble_report`), and the real cleanup ledger. The
+adapters were made campaign-id parametrizable (backward-compatible) so Phase 2.9 gets a fresh lineage.
+
+**New code.**
+- `src/aegis/multi_agent/live_safety.py` — reusable, provider-agnostic safety prerequisite: a
+  fail-closed `LiveExecutionGuard` (inert by default; arms only on explicit `--execute-live`, a
+  **non-secret** `--authorization-ref`, and the EXACT `--max-provider-calls 5` / `--max-total-tokens
+  15000` caps — else typed `LIVE_AUTHORIZATION_REQUIRED` / `INVALID_LIVE_BUDGET`; the decision reads no
+  env/filesystem/secret, so a present `.env.gateway` cannot arm) and a reserve-before-dispatch
+  `CampaignProviderBudget` (worst-case input+output reservation + one call slot before every call;
+  `BUDGET_STOP` on breach; UNKNOWN usage fails closed, never assumed zero).
+- `src/aegis/multi_agent/consolidated_campaign.py` — the campaign: a **deterministic gateway double at
+  the model/provider boundary** (`Phase29ModelDouble`, five strict non-authoritative outputs, exact
+  `deepseek-v4-pro` identity, provenance `DETERMINISTIC_GATEWAY_DOUBLE`); a swappable range backend —
+  the in-process network double or a REAL `aegis_range.ops` container on an internal no-egress network
+  (`ContainerOpsRange`); the `ConsolidatedOpsCampaign` orchestrator (5 budgeted model calls; real
+  stages; fresh persisted retest Recon job; controller-authoritative report from model prose; resume
+  idempotency proof; stale-evidence-reuse proof; cleanup on every path); and the typed
+  `build_phase_2_9_checks` / `build_typed_verdicts` / `write_campaign_artifacts`.
+- `scripts/phase_2_9_consolidated_acceptance.py` — inert-by-default runner (`--dry-run` provider-free;
+  `--execute-live` arms via the guard then stops short of a paid run).
+- `deploy/range/Dockerfile.phase-2-9` — egress-free image serving the ops detection-control surface
+  (`aegis_range.ops` made lazy-httpx so it runs without shipping httpx).
+- `tests/test_phase_2_9.py` (26 tests: guard, budget, model double, offline campaign lineage +
+  verdicts, receipt-replay, retest-ordering, artifact tamper-detection, and a real containerized run).
+
+**Authority model (unchanged, re-proven).** The model may only delegate to an allowed role, select
+registered profile ids, interpret sanitized observations, recommend one registered remediation, plan
+the retest and draft report prose (`unconfirmed=True`, `remediation_authoritative=False`,
+`authoritative=False` — all structurally fixed; a raw URL/argv/redirect/target override is
+unrepresentable). It never controls authorization, target, mode, lease, budget, the probe sequence,
+ground truth, confirmation, severity, the patch, retest eligibility, PASS/FAIL, lifecycle state or
+cleanup.
+
+**Provider-free dry run (executed).** One real containerized synthetic dry run: a genuine
+`aegis_range.ops` container on an `--internal` (no-gateway) docker network; the worker's
+baseline+alternate probe is a real HTTP round-trip from a short-lived helper container (baseline
+denied 403; alternate reaches the sentinel 200 in vulnerable mode; alternate denied 403 after the
+patch); the raw sentinel is redacted to a SHA-256 digest at the source and never leaves. Result:
+lifecycle `COMPLETED`; verifier CONFIRMED → PASS; controller-owned patch (mode flip + sentinel
+rotation, pre≠post state digest) minted an immutable single-use receipt consumed exactly once; a fresh
+retest Recon job (QUEUED→CLAIMED→CLOSED); a real REPORT_AGENT job + controller-authoritative report;
+egress blocked; **zero** leftover containers/volumes/networks. **5** provider(-double) calls / **697**
+tokens (≤ 5 / ≤ 15,000). Every required Phase 2.9 check was evaluated **True** (nothing NOT_EVALUATED)
+in the containerized run.
+
+**Typed verdicts (from the SAME single campaign — one execution, multiple contracts, not multiple
+runs).**
+- **Phase 2.3:** initial finding verifier-confirmed ✓; controller remediation applied ✓; fresh retest
+  verifier-passed ✓; cleanup complete ✓.
+- **Phase 2.6:** real REPORT_AGENT job executed ✓; projection sanitized ✓; model prose non-authoritative
+  ✓; controller report truth preserved ✓; report artifacts persisted ✓.
+- **Phase 2.7:** actual lifecycle adapters executed ✓; stages+lineage persisted ✓; idempotency/resume
+  preserved ✓; cumulative budget enforced ✓; final assessment verdict controller-owned ✓.
+- **Phase 2.9:** all component verdicts satisfied ✓; one continuous campaign lineage ✓; cleanup complete
+  ✓; no unresolved critical UNKNOWN ✓.
+
+**Statuses (separate, honest).**
+- `phase_2_9_implementation_status = OFFLINE_PASS`
+- `phase_2_9_containerized_status = CONTAINERIZED_SYNTHETIC_PASS` (real container dry run succeeded)
+- `phase_2_9_live_provider_status = NOT_EVALUATED`
+- Phase 2.3 / 2.6 / 2.7 live statuses remain `NOT_EVALUATED`.
+
+No LIVE GO is claimed from a deterministic gateway double. `ruff` + `mypy` clean on the changed files.
+
+**Negative controls.** Phase 2.9-specific: default entry point inert; `.env.gateway` presence alone
+cannot arm; wrong call/token caps rejected (`INVALID_LIVE_BUDGET`); missing/secret-like authorization
+rejected (`LIVE_AUTHORIZATION_REQUIRED`); provider-call and token ceilings enforced (`BUDGET_STOP`);
+UNKNOWN usage fails closed (no zero assumption); model can't emit raw shell/URL/redirect/target
+override; retest-before-patch structurally blocked; patch-receipt replay blocked; stale-evidence reuse
+blocked; report truth controller-owned; artifact-manifest tamper detected. The controls owned by the
+composed phases (initial-verifier INCOMPLETE, remediation without CONFIRMED, unknown remediation
+profile, verifier substitution, crash-before/after-dispatch, outcome-unknown no-auto-retry, report
+failure → PARTIAL, cleanup failure → CLEANUP_FAILED, lease expiry) are exercised through the SAME real
+components in `test_phase_2_3.py` / `test_phase_2_6.py` / `test_phase_2_7.py` /
+`test_phase_2_7_crash.py`.
+
+**Artifacts** (local/gitignored under `artifacts/phase-2.9-consolidated-<stamp>/evidence/`):
+campaign/assessment record, agent-job export + the four ledger databases, lifecycle stage ledger,
+provider attempt records, budget reservations+usage, worker evidence (digests only), verifier
+decisions, finding, remediation recommendation, patch receipt, retest evidence, report bundle
+(JSON/Markdown/HTML), cleanup ledger + leftover proof, image/tool provenance, acceptance verdict, and
+`SHA256SUMS` (manifest re-verified after write).
+
+**Future permitted live claim (only after an explicitly authorized successful campaign).** *"LIVE GO
+for one bounded controller-authorized synthetic assessment lifecycle that produced a verifier-confirmed
+finding, applied a registered remediation, passed a fresh verifier-adjudicated retest, generated a
+controller-authoritative Report Agent report, and proved cleanup."* Explicitly EXCLUDES production
+readiness, real/staging targets, arbitrary remediation, autonomous source-code repair, general
+adversary simulation, full OWASP coverage, broad tool coverage and performance superiority.
+
+**Proposed live command (not executed here; separate explicit authorization required).**
+```
+python scripts/phase_2_9_consolidated_acceptance.py --execute-live \
+    --authorization-ref <non-secret-ref> --max-provider-calls 5 --max-total-tokens 15000
+```
+Budget: ≤ 5 provider calls, ≤ 15,000 campaign-cumulative tokens, exact `deepseek-v4-pro`, concurrency
+1, no auto-retry / schema repair / second campaign; worst-case reserved before each call (`BUDGET_STOP`
+on breach; UNKNOWN usage fails closed).
+
+**Stop condition.** Do not execute the paid campaign without separate explicit authorization; do not
+start Phase 3.0.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 
