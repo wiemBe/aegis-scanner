@@ -24,7 +24,8 @@ from aegis.container_acceptance.images import (
 )
 from aegis.container_acceptance.recon_runner import _count_json_lines
 from aegis.container_acceptance.runner import run_tool
-from aegis.container_acceptance.sqlmap_worker import parse_sqlmap_stdout
+from aegis.container_acceptance.sqlmap_traffic import normalize_sqlmap_traffic
+from aegis.container_acceptance.sqlmap_worker import parse_injectable_claim
 from aegis.multi_agent.recon_capabilities import (
     RECON_PROFILES,
     ReconCapabilityError,
@@ -41,6 +42,7 @@ from aegis.multi_agent.sqlmap_capability import (
     assert_container_pinned,
     build_sqlmap_job,
 )
+from aegis_range.verifier import RangeVerifier
 
 DOCKER = daemon_available()
 needs_docker = pytest.mark.skipif(not DOCKER, reason="docker daemon not available")
@@ -74,16 +76,103 @@ def test_api_capability_renamed_to_http_probe() -> None:
     assert "api_http_probe_v1" in RECON_PROFILES
 
 
-def test_sqlmap_injectable_claim_excluded_from_verifier_input() -> None:
-    # SQLMap's own "injectable" claim is audit-only; it is never in the verifier's input dict.
-    parsed = parse_sqlmap_stdout(
+def test_sqlmap_injectable_claim_is_audit_only() -> None:
+    # SQLMap's own "injectable" claim is parsed for audit only; it is never a verifier input.
+    injectable, total = parse_injectable_claim(
         "sqlmap identified the following injection point(s) with a total of 207 HTTP(s) requests:\n"
-        "    Type: boolean-based blind\n"
     )
-    injectable, total, types = parsed
-    assert injectable is True and total == 207 and types
-    not_inj = parse_sqlmap_stdout("all tested parameters do not appear to be injectable")
-    assert not_inj[0] is False
+    assert injectable is True and total == 207
+    assert parse_injectable_claim("all tested parameters do not appear to be injectable")[0] is False  # noqa: E501
+
+
+_TRAFFIC_VULN = (
+    "HTTP request [#1]:\nGET /api/products?q=Notebook HTTP/1.1\n\n"
+    "HTTP response [Time]:\nHTTP/1.1 200 OK\n\n"
+    '{"products":[{"product_id":"PRD-100"}]}\n'
+    "HTTP request [#2]:\nGET /api/products?q=Notebook%27%20AND%201%3D1--%20a HTTP/1.1\n\n"
+    "HTTP response [Time]:\nHTTP/1.1 200 OK\n\n"
+    '{"products":[{"product_id":"PRD-100"}]}\n'
+    "HTTP request [#3]:\nGET /api/products?q=Notebook%27%20AND%201%3D2--%20a HTTP/1.1\n\n"
+    "HTTP response [Time]:\nHTTP/1.1 200 OK\n\n"
+    '{"products":[]}\n'
+)
+_TRAFFIC_PATCHED = (
+    "HTTP request [#1]:\nGET /api/products?q=Notebook HTTP/1.1\n\n"
+    "HTTP response [Time]:\nHTTP/1.1 200 OK\n\n"
+    '{"products":[{"product_id":"PRD-100"}]}\n'
+    "HTTP request [#2]:\nGET /api/products?q=Notebook%27%20OR%201%3D1--%20a HTTP/1.1\n\n"
+    "HTTP response [Time]:\nHTTP/1.1 200 OK\n\n"
+    '{"products":[]}\n'
+)
+
+
+def _normalize(traffic: str) -> object:
+    return normalize_sqlmap_traffic(
+        traffic, job_id="sqlmj-" + "a" * 16, process_exec_id="sqlx-" + "b" * 16,
+        tool_version="1.10.9", image_id="sha256:" + "c" * 64,
+        target_operation="aegis-shop:8102/api/products", parameter="q", seed_value="Notebook",
+        started_at="2026-09-25T00:00:00+00:00", finished_at="2026-09-25T00:00:01+00:00",
+    )
+
+
+def test_sqlmap_traffic_normalizer_derives_differential_from_sqlmap_requests() -> None:
+    ev = _normalize(_TRAFFIC_VULN)
+    # Baseline preserved (1), injected span 0..1 -> a real boolean-blind differential.
+    assert ev.control_row_count == 1  # type: ignore[attr-defined]
+    assert ev.injected_max_row_count == 1 and ev.injected_min_row_count == 0  # type: ignore[attr-defined]
+    assert ev.injected_request_count == 2  # type: ignore[attr-defined]
+    assert ev.image_id == "sha256:" + "c" * 64  # type: ignore[attr-defined]
+    assert len(ev.observations) == 3  # type: ignore[attr-defined]
+
+
+def test_verifier_confirms_from_sqlmap_traffic_and_sends_no_traffic() -> None:
+    verifier = RangeVerifier()
+    vuln = verifier.adjudicate_sqli_from_sqlmap_traffic(
+        "aegis-shop", _normalize(_TRAFFIC_VULN).as_verifier_input(),  # type: ignore[attr-defined]
+        seeded_total=3, control_selective_count=1,
+    )
+    assert vuln.status.value == "CONFIRMED"
+    assert vuln.facts["verifier_generated_injection_traffic"] is False
+    patched = verifier.adjudicate_sqli_from_sqlmap_traffic(
+        "aegis-shop", _normalize(_TRAFFIC_PATCHED).as_verifier_input(),  # type: ignore[attr-defined]
+        seeded_total=3, control_selective_count=1,
+    )
+    assert patched.status.value == "PASS"
+
+
+def test_build_sqlmap_job_capture_and_seed() -> None:
+    from aegis.multi_agent.sqlmap_capability import SQLMAP_CAPABILITY_ID, build_sqlmap_job
+
+    pinned = SqlmapToolImage(
+        tool="sqlmap", image="aegis-sqlmap-runner", tag="2.8.0", version="1.10.9",
+        image_digest=_SQLMAP_TAG_ID, digest_pinned=True,
+    )
+    job = build_sqlmap_job(
+        SqlmapPlan(
+            capability_id=SQLMAP_CAPABILITY_ID, profile_id="sqlmap_sqli_detect_boolean_v1",
+            target_ref="range-shop", route="/api/products", parameter="q",
+        ),
+        image=pinned, seed_value="Notebook", capture_dir="/out",
+    )
+    assert "?q=Notebook" in job.target_url
+    assert "-t" in job.argv and "/out/traffic.txt" in job.argv and "--output-dir" in job.argv
+    # Still shell-free and no forbidden action tokens.
+    assert not ({";", "|", "&", "`", ">", "<"} & set("".join(job.argv)))
+    assert "--dump" not in job.argv and "--os-shell" not in job.argv
+
+
+def test_httpx_render_has_no_unsupported_flags() -> None:
+    from aegis.multi_agent.recon_capabilities import ReconDiscoveryPlan, build_discovery_job
+
+    job = build_discovery_job(
+        ReconDiscoveryPlan(
+            capability_id="aegis.recon.http_probe", profile_id="http_probe_discovery_v1",
+            target_ref="range-shop",
+        )
+    )
+    assert "-max-response-size" not in job.argv  # not a real httpx v1.6.9 flag
+    assert "-disable-redirects" not in job.argv  # not a real httpx v1.6.9 flag
+    assert job.argv[0] == "httpx" and "-json" in job.argv
 
 
 def test_container_argv_override_pins_sqlmap_image() -> None:
@@ -129,8 +218,9 @@ def test_negative_cross_origin_redirect_denied_by_render() -> None:
         )
     )
     assert job.redirect_policy == "DENY"
-    assert "-disable-redirects" in job.argv
-    assert "-fr" not in job.argv and "-L" not in job.argv and "--location" not in job.argv
+    # httpx does not follow redirects unless an opt-in flag is passed; the render passes none.
+    for follow in ("-fr", "-follow-redirects", "-follow-host-redirects", "-L", "-location"):
+        assert follow not in job.argv
 
 
 # --------------------------------------------------------------------------- negative (3) profile

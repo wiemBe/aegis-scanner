@@ -369,11 +369,15 @@ def _render_argv(
     conc = str(profile.max_concurrency)
     if profile.tool == "httpx":
         target = origin + plan.seed_route if plan.seed_route else origin
+        # Redirect safety is structural: httpx does NOT follow redirects unless an opt-in flag
+        # (-fr/-follow-redirects) is passed, which this render never does — no redirect is followed.
+        # The pinned httpx has no fetched-response-size flag; the bounded response-size boundary is
+        # enforced by the broker/runner's bounded capture (max_output_bytes) with truncation
+        # recorded (see aegis.container_acceptance.runner) rather than silently dropped.
         return [
             "httpx", "-u", target, "-silent", "-no-color", "-json",
             "-timeout", timeout_s, "-rate-limit", rate, "-threads", conc,
-            "-max-response-size", str(profile.max_output_bytes),
-            "-no-fallback", "-disable-redirects",
+            "-no-fallback",
         ]
     if profile.tool == "katana":
         return [

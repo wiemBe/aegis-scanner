@@ -29,6 +29,9 @@ class ToolAcceptanceStatus(StrEnum):
     """Per-tool container-acceptance status recorded in the report and in deploy/PHASES.md."""
 
     CONTAINERIZED_SYNTHETIC_PASS = "CONTAINERIZED_SYNTHETIC_PASS"  # noqa: S105 - label, not a secret
+    # A tool container executed but did not yield functional tool-originated evidence sufficient to
+    # confirm the capability (e.g. a helper/control probe cannot substitute for the tool itself).
+    CONTAINER_EXECUTED_INCONCLUSIVE = "CONTAINER_EXECUTED_INCONCLUSIVE"
     NOT_EVALUATED = "NOT_EVALUATED"
 
 
@@ -92,24 +95,79 @@ def assert_arms_fresh(arm_run_labels: list[str], current_run_label: str) -> None
             raise ContainerAcceptanceError(f"STALE_EVIDENCE_REUSE:{label}")
 
 
+class SqlmapTrafficObservation(_Strict):
+    """One normalized SQLMap-originated request/response record. No raw payload — digests only."""
+
+    sequence: int = Field(ge=0)
+    modified: bool  # True when SQLMap altered the parameter from the controller baseline seed
+    status_code: int = Field(ge=100, le=599)
+    row_count: int = Field(ge=0)
+    request_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    response_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class SqlmapTrafficEvidence(_Strict):
+    """Normalized differential evidence derived from SQLMap's OWN captured traffic + correlation.
+
+    Correlation binds every observation to the run: job id, process execution id, timestamps,
+    per-request/response digests, target + parameter, tool version and immutable image id. The
+    differential (baseline vs the max/min rows across SQLMap's injected requests) is what the
+    independent verifier adjudicates; SQLMap's textual claim is not represented here."""
+
+    job_id: str
+    process_exec_id: str = Field(min_length=1, max_length=64)
+    tool_version: str = Field(min_length=1, max_length=60)
+    image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    target_operation: str = Field(min_length=1, max_length=200)
+    parameter: str = Field(min_length=1, max_length=64)
+    started_at: str = Field(min_length=1, max_length=40)
+    finished_at: str = Field(min_length=1, max_length=40)
+    request_count: int = Field(ge=0)
+    control_row_count: int = Field(ge=-1)
+    injected_request_count: int = Field(ge=0)
+    injected_max_row_count: int = Field(ge=-1)
+    injected_min_row_count: int = Field(ge=-1)
+    evidence_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observations: list[SqlmapTrafficObservation] = Field(default_factory=list, max_length=32)
+
+    def as_verifier_input(self) -> dict[str, int]:
+        """The reference-only differential the verifier adjudicates (no tool verdict/payload)."""
+
+        return {
+            "control_row_count": self.control_row_count,
+            "injected_request_count": self.injected_request_count,
+            "injected_max_row_count": self.injected_max_row_count,
+            "injected_min_row_count": self.injected_min_row_count,
+        }
+
+
 class SqlmapArmResult(_Strict):
     """One SQLMap arm's result (vulnerable or patched); verdict from the independent verifier."""
 
     arm: str
     run_label: str = Field(default="", max_length=64)
     job_id: str
+    process_exec_id: str = Field(default="", max_length=64)
     argv_sha256: str
     image_reference: str
+    image_id: str = Field(default="", max_length=80)
     digest_pinned: bool
     sqlmap_run: ContainerRunResult
-    total_http_requests: int = Field(ge=0)
-    tool_reported_injectable: bool  # SQLMap's own claim — audit-only, never a verdict input
-    control_count: int
-    boolean_true_count: int
-    boolean_false_count: int
-    verifier_status: str  # CONFIRMED | PASS | INCOMPLETE
+    # SQLMap's own textual claim — audit-only, never a verdict input.
+    tool_reported_injectable: bool
+    # Differential derived from SQLMap-originated traffic (the functional evidence).
+    sqlmap_requests_observed: int = Field(ge=0)
+    control_row_count: int
+    injected_max_row_count: int
+    injected_min_row_count: int
+    verifier_status: str  # CONFIRMED | PASS | INCOMPLETE (over SQLMap-originated evidence)
     verifier_sent_injection_traffic: bool
+    verifier_used_sqlmap_worker_evidence: bool
     normalized_evidence_sha256: str
+    # Controller OR-style probe kept ONLY as a separate scenario control (not a SQLMap functional
+    # input); records that the fixture itself is genuinely vulnerable/patched.
+    control_scenario_status: str
+    control_probe_is_separate: bool = True
 
 
 class ToolAcceptanceRecord(_Strict):

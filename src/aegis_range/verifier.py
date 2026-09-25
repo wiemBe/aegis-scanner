@@ -487,6 +487,87 @@ class RangeVerifier:
             },
         )
 
+    def adjudicate_sqli_from_sqlmap_traffic(
+        self,
+        application_id: str,
+        sqlmap_evidence: dict[str, Any],
+        *,
+        seeded_total: int,
+        control_selective_count: int,
+    ) -> VerificationResult:
+        """Adjudicate a SQLi verdict from **SQLMap-originated** traffic + controller ground truth.
+
+        Unlike :meth:`adjudicate_sqli_offline` (which consumes an OR-style control/TRUE/FALSE helper
+        probe), this consumes the differential the injection worker derived from **SQLMap's own
+        captured request/response traffic**: the unmodified baseline row count, and the max/min row
+        counts observed across the requests SQLMap itself injected into the parameter. The verifier
+        sends NO SQL injection traffic of its own, and SQLMap's textual ``injectable`` claim is not
+        an input — only the observed result-set differential is.
+
+        CONFIRMED requires the unmodified baseline selective (== ``control_selective_count``) while
+        SQLMap's injected payloads BOTH preserve a non-empty result (max ≥ the baseline, up to the
+        seeded population) AND suppress it to empty (min == 0) — the defining boolean-blind toggle.
+        PASS requires the baseline selective while SQLMap's injected payloads can never reproduce a
+        non-empty result (max < the baseline: every payload treated as an inert literal). Otherwise
+        INCOMPLETE — a pinned SQLMap that cannot honestly exercise the fixture is never forced to a
+        verdict."""
+
+        if application_id not in RANGE_TARGETS:
+            raise ValueError("TARGET_NOT_IN_RANGE_INVENTORY")
+        target = RANGE_TARGETS[application_id]
+        scenario_id = "shop-catalog-query-v1"
+
+        def _int(key: str, default: int = -1) -> int:
+            value = sqlmap_evidence.get(key, default)
+            return value if isinstance(value, int) else default
+
+        control_count = _int("control_row_count")
+        injected_max = _int("injected_max_row_count")
+        injected_min = _int("injected_min_row_count")
+        injected_requests = _int("injected_request_count", 0)
+
+        control_ok = control_count == control_selective_count
+        has_injected = injected_requests > 0 and injected_max >= 0 and injected_min >= 0
+        confirmed = (
+            control_ok
+            and has_injected
+            and injected_min == 0
+            and control_selective_count <= injected_max <= seeded_total
+            and injected_max != injected_min
+        )
+        patched = control_ok and has_injected and injected_max < control_selective_count
+        evidence = json.dumps(
+            {
+                "ground_truth": {
+                    "seeded_total": seeded_total,
+                    "control_selective_count": control_selective_count,
+                },
+                "sqlmap_evidence": {
+                    "control_row_count": control_count,
+                    "injected_max_row_count": injected_max,
+                    "injected_min_row_count": injected_min,
+                    "injected_request_count": injected_requests,
+                },
+            },
+            sort_keys=True,
+        ).encode()
+        return self._binary(
+            target,
+            scenario_id,
+            confirmed,
+            patched,
+            evidence,
+            {
+                "control_row_count": control_count,
+                "injected_max_row_count": injected_max,
+                "injected_min_row_count": injected_min,
+                "injected_request_count": injected_requests,
+                "sqlmap_originated_differential_present": confirmed,
+                "verifier_probe_requests": 0,
+                "verifier_generated_injection_traffic": False,
+            },
+        )
+
     def _decide_detection_control_bypass(
         self,
         application_id: str,

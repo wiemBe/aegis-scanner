@@ -43,14 +43,21 @@ def run_tool(
     label: str,
     output_limit_bytes: int,
     timeout_seconds: int,
+    volumes: tuple[tuple[str, str], ...] = (),
 ) -> RawRun:
-    """Run ``argv`` (tool name stripped) in a hardened container on ``network``; capture output."""
+    """Run ``argv`` (tool name stripped) in a hardened container on ``network``; capture output.
+
+    ``volumes`` mounts controller-owned named volumes as ``(name, container_path)`` pairs — used to
+    persist a tool's own traffic/evidence file past the ``--rm`` container for normalization."""
 
     image = require_pinned(image_reference)
     tool_args = list(argv[1:])  # the image entrypoint supplies argv[0]
+    mount_args: list[str] = []
+    for name, path in volumes:
+        mount_args += ["-v", f"{name}:{path}"]
     started = monotonic()
     result = docker(
-        "run", "--rm", "--network", network, "--label", label, *_HARDENING,
+        "run", "--rm", "--network", network, "--label", label, *_HARDENING, *mount_args,
         image, *tool_args, timeout=float(timeout_seconds),
     )
     duration_ms = round((monotonic() - started) * 1000)

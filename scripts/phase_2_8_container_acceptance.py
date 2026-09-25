@@ -31,8 +31,9 @@ def main() -> int:
         print(json.dumps({"phase": "2.8", "error": str(exc), "passed": False}, indent=2))
         return 2
 
-    sqlmap_ok = report["sqlmap_pair"]["containerized_synthetic_pass"]
-    passed = bool(sqlmap_ok and report["cleanup_clean"])
+    sqlmap = report["sqlmap"]
+    functional = sqlmap["sqlmap_functional_detection_proven"]
+    passed = bool(functional and report["cleanup_clean"])
     report["passed"] = passed
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -40,7 +41,10 @@ def main() -> int:
         print(json.dumps(
             {
                 "phase": report["phase"],
-                "sqlmap_containerized_synthetic_pass": sqlmap_ok,
+                "sqlmap_status": sqlmap["status"],
+                "synthetic_sqli_scenario_confirmed": sqlmap["synthetic_sqli_scenario_confirmed"],
+                "sqlmap_functional_detection_proven": functional,
+                "sqlmap_checks": sqlmap["checks"],
                 "cleanup_clean": report["cleanup_clean"],
                 "tools": {t["capability_id"]: t["status"] for t in report["tools"]},
                 "not_evaluated": report["not_evaluated"],

@@ -40,6 +40,7 @@ class InternalRange:
     label: str = field(default_factory=lambda: f"aegis.phase28={uuid4().hex[:12]}")
     _network: str = ""
     _shop: str = ""
+    _volumes: list[str] = field(default_factory=list)
 
     @property
     def network(self) -> str:
@@ -174,9 +175,41 @@ class InternalRange:
         _rc, out = self._helper_python(code, timeout=20)
         return out.strip()[:120] or "EGRESS_PROOF_UNAVAILABLE"
 
+    def create_output_volume(self, suffix: str) -> str:
+        """Create a labelled named volume, world-writable by the command uid, for tool output."""
+
+        name = f"aegis-p28-{self._run_id()}-{suffix}"
+        created = docker("volume", "create", "--label", self.label, name, timeout=30)
+        if created.returncode != 0:
+            raise ContainerAcceptanceError(f"VOLUME_CREATE_FAILED:{created.stderr.strip()[:80]}")
+        # Fresh volumes are root-owned; a one-shot, network-isolated init makes the dir writable by
+        # the unprivileged command uid so the tool container itself stays non-root.
+        init = docker(
+            "run", "--rm", "--network", "none", "-v", f"{name}:/out", "--user", "0:0",
+            self.range_image_ref, "chown", "65532:65532", "/out", timeout=30,
+        )
+        if init.returncode != 0:
+            raise ContainerAcceptanceError(f"VOLUME_INIT_FAILED:{init.stderr.strip()[:80]}")
+        self._volumes.append(name)
+        return name
+
+    def read_volume_file(self, volume: str, path: str, *, max_bytes: int = 4_194_304) -> str:
+        """Read a bounded text file from a named volume via a network-isolated helper."""
+
+        result = docker(
+            "run", "--rm", "--network", "none", "-v", f"{volume}:/out", *_HARDENING,
+            self.range_image_ref, "python", "-c",
+            f"import sys;sys.stdout.write(open({path!r},encoding='utf-8',errors='replace')"
+            f".read({max_bytes}))",
+            timeout=40,
+        )
+        return result.stdout if result.returncode == 0 else ""
+
     def cleanup(self) -> None:
         if self._shop:
             docker("rm", "-f", self._shop, timeout=30)
+        for volume in self._volumes:
+            docker("volume", "rm", "-f", volume, timeout=30)
         if self._network:
             docker("network", "rm", self._network, timeout=30)
 

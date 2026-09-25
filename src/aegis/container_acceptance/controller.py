@@ -33,7 +33,7 @@ from aegis.container_acceptance.docker_cli import daemon_available, docker, imag
 from aegis.container_acceptance.images import PINNED_IMAGES, PinnedImage, resolve_local_build
 from aegis.container_acceptance.network import InternalRange
 from aegis.container_acceptance.recon_runner import run_recon_smoke
-from aegis.container_acceptance.sqlmap_worker import SqlmapContainerWorker
+from aegis.container_acceptance.sqlmap_worker import SQLMAP_SEED_VALUE, SqlmapContainerWorker
 from aegis.multi_agent.recon_capabilities import (
     ReconDiscoveryPlan,
     ToolProvenance,
@@ -146,24 +146,49 @@ class Phase28Controller:
         )
         plan = SqlmapPlan(
             capability_id=SQLMAP_CAPABILITY_ID,
-            profile_id="sqlmap_sqli_confirm_bounded_v1",
+            profile_id="sqlmap_sqli_detect_boolean_v1",
             target_ref="range-shop",
             route="/api/products",
             parameter="q",
         )
-        job = build_sqlmap_job(plan, image=self._sqlmap_image)
+        job = build_sqlmap_job(
+            plan, image=self._sqlmap_image, seed_value=SQLMAP_SEED_VALUE, capture_dir="/out"
+        )
         worker = SqlmapContainerWorker(job, range_)
-        evidence, run_result, _types = worker.run()
+        output = worker.run()
+        evidence = output.traffic_evidence
 
-        # Independent verifier: normalized worker evidence + controller ground truth, zero SQLi.
         verifier = RangeVerifier()
-        conclusion = verifier.adjudicate_sqli_offline(
+        # Functional verdict: adjudicate SQLMap-ORIGINATED differential + controller ground truth.
+        functional = verifier.adjudicate_sqli_from_sqlmap_traffic(
             job.application_id,
             evidence.as_verifier_input(),
             seeded_total=ground_truth.seeded_total,
             control_selective_count=ground_truth.control_selective_count,
         )
-        verifier_sent = bool(conclusion.facts.get("verifier_generated_injection_traffic", True))
+        # Separate scenario control: the OR-style probe just corroborates the fixture's own state.
+        control = verifier.adjudicate_sqli_offline(
+            job.application_id,
+            {
+                "control": {
+                    "status_code": output.control_counts["control"][0],
+                    "result_count": output.control_counts["control"][1],
+                },
+                "boolean_true": {
+                    "status_code": output.control_counts["boolean_true"][0],
+                    "result_count": output.control_counts["boolean_true"][1],
+                },
+                "boolean_false": {
+                    "status_code": output.control_counts["boolean_false"][0],
+                    "result_count": output.control_counts["boolean_false"][1],
+                },
+            },
+            seeded_total=ground_truth.seeded_total,
+            control_selective_count=ground_truth.control_selective_count,
+        )
+        verifier_sent = bool(
+            functional.facts.get("verifier_generated_injection_traffic", True)
+        ) or bool(control.facts.get("verifier_generated_injection_traffic", True))
         normalized_sha = hashlib.sha256(
             json.dumps(evidence.model_dump(), sort_keys=True).encode()
         ).hexdigest()
@@ -171,20 +196,23 @@ class Phase28Controller:
             arm=arm,
             run_label=range_.label,
             job_id=job.job_id,
-            argv_sha256=run_result.argv_sha256,
-            image_reference=run_result.image_reference,
+            process_exec_id=evidence.process_exec_id,
+            argv_sha256=output.run_result.argv_sha256,
+            image_reference=output.run_result.image_reference,
+            image_id=job.image_digest,
             digest_pinned=job.digest_pinned,
-            sqlmap_run=run_result,
-            total_http_requests=0
-            if not evidence.sanitized_note
-            else _requests_from_note(evidence.sanitized_note),
-            tool_reported_injectable=evidence.tool_reported_injectable,
-            control_count=evidence.control.result_count,
-            boolean_true_count=evidence.boolean_true.result_count,
-            boolean_false_count=evidence.boolean_false.result_count,
-            verifier_status=conclusion.status.value,
+            sqlmap_run=output.run_result,
+            tool_reported_injectable=output.tool_reported_injectable,
+            sqlmap_requests_observed=evidence.request_count,
+            control_row_count=evidence.control_row_count,
+            injected_max_row_count=evidence.injected_max_row_count,
+            injected_min_row_count=evidence.injected_min_row_count,
+            verifier_status=functional.status.value,
             verifier_sent_injection_traffic=verifier_sent,
+            verifier_used_sqlmap_worker_evidence=True,
             normalized_evidence_sha256=normalized_sha,
+            control_scenario_status=control.status.value,
+            control_probe_is_separate=True,
         )
 
     # ---- recon smokes -------------------------------------------------------------------------- #
@@ -278,30 +306,39 @@ class Phase28Controller:
         by_arm = {a.arm: a for a in arms}
         vuln = by_arm.get("vulnerable")
         patched = by_arm.get("patched")
-        sqlmap_pass = (
-            vuln is not None
-            and patched is not None
-            and vuln.verifier_status == "CONFIRMED"
-            and patched.verifier_status == "PASS"
-            and not vuln.verifier_sent_injection_traffic
-            and not patched.verifier_sent_injection_traffic
-            and vuln.digest_pinned
-            and patched.digest_pinned
+        checks = self._sqlmap_checks(vuln, patched)
+        # Functional detection is proven only from SQLMap-originated evidence on both arms.
+        functional_proven = (
+            checks["vulnerable_sqlmap_functional_detection_proven"]
+            and checks["patched_sqlmap_false_positive_absent"]
+            and checks["sqlmap_process_executed"]
+            and checks["sqlmap_requests_observed"]
+            and checks["sqlmap_request_evidence_correlated"]
+            and checks["controller_controls_separate_from_sqlmap_evidence"]
+            and checks["verifier_used_sqlmap_worker_evidence"]
+            and checks["verifier_sent_no_injection_traffic"]
+            and bool(vuln and patched and vuln.digest_pinned and patched.digest_pinned)
         )
+        if functional_proven:
+            status = ToolAcceptanceStatus.CONTAINERIZED_SYNTHETIC_PASS
+            category = EvidenceCategory.CONTAINERIZED_SYNTHETIC_PASS
+            reason = "SQLMap-originated differential: vulnerable CONFIRMED / patched none"
+        elif checks["sqlmap_process_executed"]:
+            status = ToolAcceptanceStatus.CONTAINER_EXECUTED_INCONCLUSIVE
+            category = EvidenceCategory.NOT_EVALUATED
+            reason = "SQLMap executed but functional SQLMap-originated detection not proven"
+        else:
+            status = ToolAcceptanceStatus.NOT_EVALUATED
+            category = EvidenceCategory.NOT_EVALUATED
+            reason = "SQLMap did not execute"
         sqlmap_record = ToolAcceptanceRecord(
             capability_id=SQLMAP_CAPABILITY_ID,
             tool="sqlmap",
-            status=ToolAcceptanceStatus.CONTAINERIZED_SYNTHETIC_PASS
-            if sqlmap_pass
-            else ToolAcceptanceStatus.NOT_EVALUATED,
-            evidence_category=EvidenceCategory.CONTAINERIZED_SYNTHETIC_PASS
-            if sqlmap_pass
-            else EvidenceCategory.NOT_EVALUATED,
+            status=status,
+            evidence_category=category,
             image_reference=vuln.image_reference if vuln else "",
             digest_pinned=bool(vuln and vuln.digest_pinned),
-            reason="vulnerable=CONFIRMED patched=PASS"
-            if sqlmap_pass
-            else "arm verdicts incomplete",
+            reason=reason,
         )
         tools = [sqlmap_record, *recon]
         return {
@@ -310,10 +347,14 @@ class Phase28Controller:
             "run_label": label,
             "cleanup_clean": cleanup.clean,
             "cleanup": cleanup.model_dump(),
-            "sqlmap_pair": {
+            "sqlmap": {
+                "status": status.value,
+                "synthetic_sqli_scenario_confirmed": checks["synthetic_sqli_scenario_confirmed"],
+                "sqlmap_functional_detection_proven": functional_proven,
+                "checks": checks,
+                "image_id": vuln.image_id if vuln else "",
                 "vulnerable": vuln.model_dump() if vuln else None,
                 "patched": patched.model_dump() if patched else None,
-                "containerized_synthetic_pass": sqlmap_pass,
             },
             "tools": [t.model_dump() for t in tools],
             "live_provider_status": EvidenceCategory.NOT_EVALUATED.value,
@@ -324,16 +365,43 @@ class Phase28Controller:
             ],
         }
 
-
-def _requests_from_note(note: str) -> int:
-    marker = "requests="
-    if marker not in note:
-        return 0
-    tail = note.split(marker, 1)[1]
-    digits = ""
-    for ch in tail:
-        if ch.isdigit():
-            digits += ch
-        else:
-            break
-    return int(digits) if digits else 0
+    @staticmethod
+    def _sqlmap_checks(
+        vuln: SqlmapArmResult | None, patched: SqlmapArmResult | None
+    ) -> dict[str, bool]:
+        both = [a for a in (vuln, patched) if a is not None]
+        executed = len(both) == 2 and all(a.sqlmap_run.exit_code is not None for a in both)
+        requests_observed = bool(both) and all(a.sqlmap_requests_observed > 0 for a in both)
+        correlated = bool(both) and all(
+            a.process_exec_id
+            and a.image_id.startswith("sha256:")
+            and a.normalized_evidence_sha256
+            for a in both
+        )
+        controls_separate = bool(both) and all(a.control_probe_is_separate for a in both)
+        used_sqlmap_evidence = bool(both) and all(
+            a.verifier_used_sqlmap_worker_evidence for a in both
+        )
+        no_injection_traffic = bool(both) and all(
+            not a.verifier_sent_injection_traffic for a in both
+        )
+        # The scenario itself (via the SEPARATE OR-style control probe) is genuinely vuln/patched.
+        scenario_confirmed = (
+            vuln is not None
+            and patched is not None
+            and vuln.control_scenario_status == "CONFIRMED"
+            and patched.control_scenario_status == "PASS"
+        )
+        return {
+            "sqlmap_process_executed": executed,
+            "sqlmap_requests_observed": requests_observed,
+            "sqlmap_request_evidence_correlated": correlated,
+            "controller_controls_separate_from_sqlmap_evidence": controls_separate,
+            "verifier_used_sqlmap_worker_evidence": used_sqlmap_evidence,
+            "verifier_sent_no_injection_traffic": no_injection_traffic,
+            "vulnerable_sqlmap_functional_detection_proven": vuln is not None
+            and vuln.verifier_status == "CONFIRMED",
+            "patched_sqlmap_false_positive_absent": patched is not None
+            and patched.verifier_status != "CONFIRMED",
+            "synthetic_sqli_scenario_confirmed": scenario_confirmed,
+        }
