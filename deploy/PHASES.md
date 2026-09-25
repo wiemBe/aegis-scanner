@@ -1611,3 +1611,94 @@ close = cleanup proof + full audit export.
 The order above (1.7-D → 3.0) is the default, not a contract. If incoming evidence makes a
 different order more sensible, propose the change **with justification** rather than
 silently reordering.
+---
+
+## 8. Local completion & hardening sprint — 2026-09-25 (`codex/local-completion-sprint`)
+
+A bounded, **offline/containerized-synthetic-only** hardening pass. **Zero provider calls; no
+`.env.gateway` loaded; no `--execute-live` campaign; no push/merge.** Branch based on `4f53da9`
+(reviewed Phase 2.9 evidence-semantics successor, which contains Phase 2.8-C `ce17468`). Status is
+kept separate by evidence type; no historical PARTIAL artifact was rewritten.
+
+**Toolchain / provenance.** Canonical Python `3.12` (mypy `python_version=3.12`, ruff `target
+py312`); local runtime `3.14.7` (only interpreter available — a documented environment difference,
+not a code target change). ruff `0.12.9`, mypy `1.17.1`, pytest `8.4.1`. Docker `29.8.0`
+(server arm64/linux). Synthetic range image `aegis-range-phase29:2.9.0` from
+`python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`,
+egress-free `--no-index` build over locally-vendored, gitignored wheels
+(`make vendor-range-wheels`).
+
+**Repository-wide gates (this sprint).** `ruff` clean; `mypy` clean (182 source files); full
+offline suite **1635 passed, 4 skipped, 0 failed**; artifact-empty `git archive` export **1629
+passed, 4 skipped, 0 failed**; container acceptance (2.8 + 2.9) **51 + 31 passed, 2 skipped**
+(the 2 skips need the `aegis-sqlmap-runner` tool image, not built); `make cleanup-check` reports no
+container/network leftovers.
+
+**WS1 — Phase 2.9 evidence semantics.** `OFFLINE_PASS` (no change needed). The 4f53da9 correction is
+correct: `gateway_mode=DETERMINISTIC_DOUBLE`, `simulated_model_calls`/`simulated_usage_tokens`,
+`provider_calls=0`, and `provider_usage_tokens` / `exact_model_identity` /
+`live_provider_budget_enforced` all `NOT_EVALUATED`; canonical `agentjob://` addresses for
+LEAD_ORCHESTRATOR / RECON_AGENT / fresh-retest RECON_AGENT / REPORT_AGENT with persisted
+QUEUED→CLAIMED→CLOSED lifecycle (the `rptjob-` id is secondary metadata). 30 focused offline tests
+pass; deterministic artifact generated in-process, schema/lineage correct. The 2.9 **containerized**
+dry-run now runs (range image built) — real container, cleanup verified.
+
+**WS2 — Ruff/mypy backlog.** `STATIC` fixed at source (no broad `Any`, no blanket ignores, no
+strictness/exclusion weakening): `target_inventory.py` gains a `NormalizedScope` TypedDict removing
+15 stale `# type: ignore`s; `console_catalog.py` extracts `_project_capability` + a typed sort key;
+`main.py` guards `supported_profile_ids` with `isinstance(list)` (fails closed to 409). 8 ruff + 10
+mypy findings resolved.
+
+**WS3 — Portable test artifacts.** `UNIT`/`OFFLINE_INTEGRATION`. Deterministic checked-in
+`TEST_FIXTURE` evidence replaces the private `artifacts/` dependency for the Phase 1.8 report tests
+and the Phase 0.7/0.8 byte-identity contract; production artifacts stay gitignored; the production
+byte-identity check **skips** (never fails) when absent, and the portable contract always runs.
+Generators are byte-reproducible (asserted).
+
+**WS4 — Container capabilities.**
+- *Strict SQLMap request cap:* `OFFLINE_INTEGRATION`. New controller-owned inline `CountingForwardProxy`
+  rejects request N+1 **before** it reaches the target (vs the reactive watchdog), denies CONNECT,
+  rejects out-of-scope upstreams, and keeps only safe metadata (no bodies/headers/query). Ceiling is
+  controller-owned; the model-facing plan cannot widen it. Budget-stopped evidence already cannot
+  yield CONFIRMED/PASS.
+- *FFUF / DNSX / TLSX content/DNS/TLS discovery:* `NOT_EVALUATED` (independent per tool). Blocker:
+  each needs an operator-reviewed, digest-pinned external tool image (or a local Go build with
+  network module fetch); introducing a new pinned supply-chain image is a controller/operator
+  authority decision, not an AI one, and none is present offline. No tool marked ready because
+  another passed.
+
+**WS5 — Phase 2.4 containerized benchmark dry-run.** `NOT_EVALUATED`. Offline benchmark framework
+remains `OFFLINE_PASS`; no containerized benchmark harness exists (the 2.4 module is in-process) and
+building one was out of scope for this offline sprint. No winner is declared anywhere.
+
+**WS6 — Phase 2.5 containerized authenticated progression.** `NOT_EVALUATED`. Offline staging
+framework remains `OFFLINE_PASS`; `AUTHORIZED_STAGING = DEPLOYMENT_DISABLED`, live staging
+`NOT_EVALUATED`. No containerized authenticated-progression harness was built this sprint.
+
+**WS7 — Operator console integration.** Backend: added
+`GET /api/console/reports/{id}/v/{version}/download.{ext}` (JSON/Markdown/HTML attachment with safe
+filename + Content-Disposition; PDF/other → 404). The other requested surfaces (Runs lifecycle,
+Findings provenance, Reports status/provenance, Targets onboarding-vs-readiness, Benchmark raw
+metrics, Audit) already have controller-owned read-only `/api/console` endpoints. **Frontend
+build/UI: `NOT_EVALUATED`** — `console/node_modules` absent and installing would download packages
+(out of scope); no UI source changed unverified.
+
+**WS8 — Reporting export hardening.** `OFFLINE_INTEGRATION`. Deterministic render-sink truncation
+(defense-in-depth over already-bounded fields), `safe_report_filename` / `content_disposition`
+(traversal + header-injection safe, always `attachment`), stable media types (PDF unsupported →
+`NOT_EVALUATED`), and `verify_report_bundle` (fail-closed on tamper / missing manifest).
+
+**WS9 — Security fix.** `UNIT`. Fixed a concrete scope-exclusion bypass in
+`authorize_url_against_target`: the path check re-split the raw (possibly scheme-less) URL instead of
+the normalized parse, letting `host/admin` evade an `/admin` exclusion that `https://host/admin` is
+rejected by. Now enforced from the same normalized parse; regression tests added.
+
+**WS10 — Reproducible workflow.** `Makefile` with separated OFFLINE / CONTAINER / UTILITY targets
+(no LIVE group; no target loads `.env.gateway` or arms a campaign), including `test-artifact-empty`,
+`docker-check`, `vendor-range-wheels`, `range-image`, `container-acceptance`, `cleanup-check`. The
+2.9 container test now **skips** gracefully in a wheel-empty checkout.
+
+**Remaining `NOT_EVALUATED` (this sprint):** live-provider identity/usage/budget (all phases);
+FFUF/DNSX/TLSX container acceptance; Phase 2.4 & 2.5 containerized runs; console frontend build;
+PDF report export; the two SQLMap-runner-image container tests. **Pre-existing tech debt:** the
+`test_phase_1_5` signature-tampering test can flake under full-suite ordering (passes isolated).
