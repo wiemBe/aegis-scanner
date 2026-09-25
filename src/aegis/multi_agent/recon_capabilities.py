@@ -11,7 +11,10 @@ Families covered (all bounded, read-only HTTP/DNS/TLS discovery — never exploi
 * ``aegis.recon.http_probe``       — HTTP service/technology probing (httpx).
 * ``aegis.recon.web_crawl``        — bounded same-scope crawling (katana).
 * ``aegis.recon.content_discovery``— controller-wordlist content discovery (ffuf).
-* ``aegis.recon.api_discovery``    — documented API/schema discovery (httpx over documented paths).
+* ``aegis.recon.api_http_probe``   — bounded HTTP probe of a documented API path (httpx). Phase 2.8
+  container acceptance confirmed this renders the SAME httpx probe argv as ``http_probe`` and does
+  NOT fetch or parse an OpenAPI/Swagger/GraphQL schema, so it is named for what it does (an HTTP
+  probe over a documented path), not for schema discovery it does not perform.
 * ``aegis.recon.dns_discovery``    — bounded DNS record discovery (dnsx).
 * ``aegis.recon.tls_inspect``      — TLS certificate/parameter inspection (tlsx).
 
@@ -153,7 +156,7 @@ ReconCapabilityId = Literal[
     "aegis.recon.http_probe",
     "aegis.recon.web_crawl",
     "aegis.recon.content_discovery",
-    "aegis.recon.api_discovery",
+    "aegis.recon.api_http_probe",
     "aegis.recon.dns_discovery",
     "aegis.recon.tls_inspect",
 ]
@@ -162,7 +165,7 @@ ReconProfileId = Literal[
     "http_probe_discovery_v1",
     "web_crawl_bounded_v1",
     "content_discovery_bounded_v1",
-    "api_schema_discovery_v1",
+    "api_http_probe_v1",
     "dns_discovery_bounded_v1",
     "tls_inspect_v1",
 ]
@@ -232,8 +235,8 @@ RECON_PROFILES: dict[str, ReconProfile] = {
         max_requests=32, max_concurrency=4, per_request_timeout_ms=5_000, max_output_bytes=131_072,
         wordlist_id="bounded_api_paths_v1",
     ),
-    "api_schema_discovery_v1": _p(
-        "api_schema_discovery_v1", "aegis.recon.api_discovery", "httpx",
+    "api_http_probe_v1": _p(
+        "api_http_probe_v1", "aegis.recon.api_http_probe", "httpx",
         max_requests=6, max_concurrency=2, per_request_timeout_ms=5_000, max_output_bytes=262_144,
     ),
     "dns_discovery_bounded_v1": _p(
@@ -410,12 +413,19 @@ def _job_id(plan: ReconDiscoveryPlan, origin: str) -> str:
 
 
 def build_discovery_job(
-    plan: ReconDiscoveryPlan, *, lease: ReconLease | None = None
+    plan: ReconDiscoveryPlan,
+    *,
+    lease: ReconLease | None = None,
+    image: ToolProvenance | None = None,
 ) -> ReconDiscoveryJob:
     """Validate a typed plan and render a fully-bounded, shell-free discovery job, or fail closed.
 
     Every rejection happens BEFORE any argv is rendered, so a rejected plan yields zero commands and
     zero target traffic.
+
+    ``image`` optionally overrides the tool image provenance (defaults to the unpinned placeholder
+    in ``TOOL_PROVENANCE``). The Phase 2.8 container-acceptance harness passes an operator-reviewed,
+    digest-pinned image so a real container run is admitted.
     """
 
     profile = RECON_PROFILES.get(plan.profile_id)
@@ -439,7 +449,7 @@ def build_discovery_job(
         raise ReconCapabilityError("RECON_NON_RANGE_INVENTORY_UNAVAILABLE")
 
     host, _port = _host_port(origin)
-    prov = TOOL_PROVENANCE[profile.tool]
+    prov = image or TOOL_PROVENANCE[profile.tool]
     argv = _assert_argv_safe(_render_argv(profile, origin, host, plan))
 
     # Scope enforcement: the origin/host must appear in the rendered argv and no other host may.

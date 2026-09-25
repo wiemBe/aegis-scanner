@@ -40,7 +40,7 @@ _ALL = [
     ("aegis.recon.http_probe", "http_probe_discovery_v1", "httpx"),
     ("aegis.recon.web_crawl", "web_crawl_bounded_v1", "katana"),
     ("aegis.recon.content_discovery", "content_discovery_bounded_v1", "ffuf"),
-    ("aegis.recon.api_discovery", "api_schema_discovery_v1", "httpx"),
+    ("aegis.recon.api_http_probe", "api_http_probe_v1", "httpx"),
     ("aegis.recon.dns_discovery", "dns_discovery_bounded_v1", "dnsx"),
     ("aegis.recon.tls_inspect", "tls_inspect_v1", "tlsx"),
 ]

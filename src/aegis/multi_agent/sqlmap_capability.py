@@ -331,12 +331,24 @@ def _job_id(target_url: str, parameter: str, profile_id: str) -> str:
     return "sqlmj-" + hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
-def build_sqlmap_job(plan: SqlmapPlan, *, lease: SqlmapLease | None = None) -> SqlmapInjectionJob:
+def build_sqlmap_job(
+    plan: SqlmapPlan,
+    *,
+    lease: SqlmapLease | None = None,
+    image: SqlmapToolImage | None = None,
+) -> SqlmapInjectionJob:
     """Validate a typed plan and render a fully-bounded, shell-free SQLMap job, or fail closed.
 
     Every rejection happens BEFORE any argv is rendered, so a rejected plan yields zero commands and
     zero target traffic.
+
+    ``image`` optionally overrides the tool image provenance. It defaults to the module
+    ``SQLMAP_PROVENANCE`` (an unpinned placeholder that keeps the offline path ``NOT_EVALUATED``);
+    the Phase 2.8 container-acceptance harness passes an operator-reviewed, digest-pinned image so
+    an actual container run is admitted (see :func:`assert_container_pinned`).
     """
+
+    provenance = image or SQLMAP_PROVENANCE
 
     if plan.capability_id != SQLMAP_CAPABILITY_ID:
         raise SqlmapCapabilityError("SQLMAP_CAPABILITY_MISMATCH")
@@ -392,10 +404,10 @@ def build_sqlmap_job(plan: SqlmapPlan, *, lease: SqlmapLease | None = None) -> S
         per_request_timeout_ms=profile.per_request_timeout_ms,
         environment_tier=profile.environment,
         allows_canary_read=profile.canary_read,
-        image_ref=SQLMAP_PROVENANCE.image_ref,
-        image_digest=SQLMAP_PROVENANCE.image_digest,
-        tool_version=SQLMAP_PROVENANCE.version,
-        digest_pinned=SQLMAP_PROVENANCE.digest_pinned,
+        image_ref=provenance.image_ref,
+        image_digest=provenance.image_digest,
+        tool_version=provenance.version,
+        digest_pinned=provenance.digest_pinned,
     )
 
 

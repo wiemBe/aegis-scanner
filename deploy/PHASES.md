@@ -1255,6 +1255,105 @@ synthetic canary, no verdict from SQLMap output alone.
 
 ---
 
+### Phase 2.8-C — Containerized Synthetic Capability Acceptance — `CONTAINERIZED_SYNTHETIC_PASS (SQLMap pair + katana; other recon NOT_EVALUATED; live NOT_EVALUATED)`
+**Goal.** Take the Phase 2.8-A recon pack and the Phase 2.8-B SQLMap injection capability — both
+`OFFLINE_PASS` with **placeholder** image digests and `container/live NOT_EVALUATED` — and actually
+execute them in **real, digest-pinned, bounded containers** on an **internal, no-egress** synthetic
+range, routing real tool evidence through the preserved production normalizer and the independent
+verifier. No AI provider is called, no `.env.gateway` is loaded, and the offline authority model is
+unchanged: a tool's own claim is audit-only; only the independent verifier promotes.
+
+New package `src/aegis/container_acceptance/` (`images`, `docker_cli`, `network`, `runner`,
+`sqlmap_worker`, `recon_runner`, `controller`, `contracts`), runner
+`scripts/phase_2_8_container_acceptance.py`, tests `tests/test_phase_2_8_container_acceptance.py`.
+
+**1 — Operator-reviewed immutable image digests (placeholders replaced for executed tools).** Every
+container the harness runs is referenced only by an immutable pin (`require_pinned` rejects any
+floating tag or `latest` fail-closed); the offline packs keep their placeholder pins precisely
+because they do not execute a container. Recorded supply chain:
+- **Base:** `python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`
+  (`python:3.12-slim`, official Docker Hub, resolved 2026-09-25 linux/amd64).
+- **SQLMap worker:** locally built `aegis-sqlmap-runner` (`deploy/sqlmap-runner/Dockerfile`) — **sqlmap
+  1.10.9** wheel (`sha256:75aa0c244c687f82a7b3f4583d0655a352a443f835ec75fc83fe4d5f44a206b8`, acquired
+  host-side through the audited proxy, installed `--no-index` → **zero build egress**), baked into the
+  pinned base; run by its resolved content-addressed image id; entrypoint = the sqlmap binary (no
+  shell). This **replaces** the 2.8-B placeholder for the executed run (passed via a new
+  `build_sqlmap_job(image=…)` override; the offline default stays the unpinned placeholder).
+- **Range target:** locally built `aegis-range-phase28` (`deploy/range/Dockerfile.phase-2-8`) — the
+  first-party `aegis_range.shop` on a host-fetched cp312 wheelhouse, installed `--no-index`.
+- **httpx** `projectdiscovery/httpx@sha256:c8eaaf8be57df7e8c9dc573aeebe5a52192dbc822e3415d0c20f014f89957af5`
+  (v1.6.9); **katana** `projectdiscovery/katana@sha256:a045fd0428e64456ee299cab48d0a3db48c7c4d481fb21f74bc672839a9fc9e3`
+  (v1.1.2), both real RepoDigests resolved 2026-09-25.
+
+**2 — Internal no-egress network + cleanup proof.** The range runs on a docker network created with
+`--internal` (`Internal: true`, no gateway/NAT/published port). No-egress is proven from inside: a
+helper's TCP connect to TEST-NET-1 `192.0.2.1:443` (RFC 5737, routes nowhere real) returns
+`EGRESS_BLOCKED:OSError`. Teardown proves **0 stack containers / 0 volumes / 0 networks** remaining
+by run label.
+
+**4 — `api_discovery` renamed → `api_http_probe`.** Container acceptance confirmed
+`aegis.recon.api_discovery` renders the **same httpx probe argv** as `http_probe` and does **not**
+fetch or parse any OpenAPI/Swagger/GraphQL schema, so it is renamed to the accurate narrower
+`aegis.recon.api_http_probe` (`api_http_probe_v1`) across the capability pack, registry and tests.
+
+**5 — Real containerized SQLMap vulnerable/patched pair — `CONTAINERIZED_SYNTHETIC_PASS`.** Against
+the controller-owned `shop-catalog-query-v1` (`aegis-shop:8102 /api/products`, parameter `q`),
+`sqlmap_sqli_confirm_bounded_v1` (technique BE, level 2, risk 1, **`--threads 1`**, no OS shell / file
+ops / unrestricted dump / persistence). Each arm runs the **real** sqlmap binary (real stdout/stderr +
+request observations, routed through the preserved `sanitize_sqlmap_output` normalizer) and the
+worker's real boolean control/TRUE/FALSE probes on the internal network. The independent verifier
+(`RangeVerifier.adjudicate_sqli_offline`) adjudicates the **normalized worker evidence** against
+**controller ground truth** and sends **zero** substitute SQLi traffic. SQLMap's own "injectable"
+claim is parsed for **audit only** and excluded from the verifier input.
+- **Vulnerable arm** (fresh run): control=1, boolean-TRUE=3, boolean-FALSE=0 → verifier **CONFIRMED**.
+- **Patched arm** (fresh run): control=1, boolean-TRUE=0, boolean-FALSE=0 → verifier **PASS**.
+- Verifier injection traffic on both arms: **none**. Digest pinned: **yes**.
+
+**3 / 7 / 9 — Per-recon-capability container status (one run never marks the whole pack ready).**
+
+| Capability | Tool | Status | Basis |
+| --- | --- | --- | --- |
+| `aegis.injection.sqlmap` | sqlmap 1.10.9 | **CONTAINERIZED_SYNTHETIC_PASS** | real pinned run; vuln CONFIRMED / patched PASS |
+| `aegis.recon.web_crawl` | katana v1.1.2 | **CONTAINERIZED_SYNTHETIC_PASS** | real bounded crawl of the shop fixture, parseable JSONL |
+| `aegis.recon.http_probe` | httpx v1.6.9 | **NOT_EVALUATED** | `CONTAINER_ARGV_INCOMPATIBLE`: rendered argv `-max-response-size` is not a flag in pinned httpx v1.6.9 |
+| `aegis.recon.api_http_probe` | httpx v1.6.9 | **NOT_EVALUATED** | same rendered-argv incompatibility as `http_probe` |
+| `aegis.recon.content_discovery` | ffuf | **NOT_EVALUATED** | no acquirable image (`ffuf/ffuf` absent on the registry); no operator pin |
+| `aegis.recon.dns_discovery` | dnsx | **NOT_EVALUATED** | no honest DNS-zone fixture in the synthetic range |
+| `aegis.recon.tls_inspect` | tlsx | **NOT_EVALUATED** | no honest TLS endpoint (the shop serves plain HTTP) |
+
+**6 — Negative container tests (9, all green).** target escape (out-of-scope `target_ref`),
+cross-origin redirect (rendered `redirect_policy=DENY`, no follow flag), unknown profile, forbidden
+argv (denylist), output-size limit (truncation), timeout (enforced kill), cleanup failure
+(leftover → not clean), unpinned image (`require_pinned`/`assert_container_pinned` fail closed), stale
+evidence reuse (per-run nonce mismatch rejected).
+
+**7 — Evidence categories kept separate.** The 2.8-A/2.8-B unit/offline results remain `OFFLINE_PASS`;
+only `aegis.injection.sqlmap` and `aegis.recon.web_crawl` became `CONTAINERIZED_SYNTHETIC_PASS`;
+unexecuted recon tools remain `NOT_EVALUATED`; **`LIVE_PROVIDER` remains `NOT_EVALUATED`** (no provider
+call anywhere in this phase).
+
+**8 — Focused checks.** `tests/test_phase_2_8_container_acceptance.py` (15, incl. the 9 negatives),
+2.8-A/2.8-B/1.7c regression green (rename), `ruff` + `mypy` clean on changed files. No unrelated phase
+acceptance and no paid campaign were re-run.
+
+**Exact commands.** `python scripts/phase_2_8_container_acceptance.py --json` (build-if-missing);
+SQLMap arm argv (rendered, per arm):
+`sqlmap -u http://aegis-shop:8102/api/products?q=1 -p q --batch --disable-coloring --flush-session
+--fresh-queries --technique BE --level 2 --risk 1 --threads 1 --timeout 8 --retries 1 --banner`.
+
+**Exact bounded claim (earned):** *"CONTAINERIZED_SYNTHETIC_PASS for the controller-owned bounded
+SQLMap injection pair (real pinned sqlmap 1.10.9 container, vulnerable→CONFIRMED / patched→PASS by an
+independent verifier over normalized worker evidence + controller ground truth, zero verifier SQLi
+traffic) and for the katana web-crawl recon capability, on an internal no-egress range with proven
+cleanup. Other recon tools (httpx http_probe/api_http_probe, ffuf, dnsx, tlsx) remain NOT_EVALUATED
+for the reasons tabled above; LIVE_PROVIDER remains NOT_EVALUATED."*
+
+**Exclusions.** No provider/model call; no `.env.gateway`; no public/company target; httpx/ffuf/dnsx/
+tlsx recon capabilities not container-accepted; no verdict from any tool's own output alone; offline
+authority model unchanged.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 

@@ -90,3 +90,5 @@ Thumbs.db
 .vscode/
 *.code-workspace
 .claude/
+deploy/sqlmap-runner/*.whl
+deploy/range/wheels/
