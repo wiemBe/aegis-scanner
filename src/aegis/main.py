@@ -29,7 +29,14 @@ from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
 from aegis.multi_agent.benchmark import BenchmarkResultStore
 from aegis.multi_agent.lifecycle import LifecycleLedger
-from aegis.multi_agent.report_agent import ReportAgentQueue
+from aegis.multi_agent.report_agent import (
+    ReportAgentQueue,
+    content_disposition,
+    export_media_type,
+    render_report_html,
+    render_report_markdown,
+    report_json,
+)
 from aegis.multi_agent.runtime import console_projection as multi_agent_projection
 from aegis.multi_agent.staging import (
     EnvironmentTier,
@@ -428,6 +435,37 @@ async def console_report(report_id: str, version: int) -> dict[str, object]:
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return report.model_dump(mode="json")
+
+
+@app.get("/api/console/reports/{report_id}/v/{version}/download.{extension}")
+async def console_report_download(report_id: str, version: int, extension: str) -> Response:
+    """Download a controller-authoritative report export (json/md/html) as a safe attachment.
+
+    The report content is controller-owned and deterministic; the filename is sanitized and the
+    Content-Disposition is always ``attachment`` so a hostile campaign id cannot traverse paths or
+    inject headers. PDF is intentionally unsupported (NOT_EVALUATED) and fails closed as 404.
+    """
+
+    if not re.fullmatch(r"rpt-[a-f0-9]{16}", report_id) or version < 1:
+        raise HTTPException(status_code=404, detail="Report not found")
+    try:
+        media_type = export_media_type(extension)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Unsupported export format") from exc
+    report = report_agent_queue.get_report(report_id, version)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    renderers = {
+        "json": report_json,
+        "md": render_report_markdown,
+        "html": render_report_html,
+    }
+    body = renderers[extension.lower().lstrip(".")](report)
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": content_disposition(report, extension)},
+    )
 
 
 @app.get("/api/console/assessments/{assessment_id}/lifecycle")
