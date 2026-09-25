@@ -72,7 +72,14 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
         "Select a registered injection capability and payload class for a controller-approved "
         "parameter. Never author raw payloads, targets, or verdicts.",
         frozenset({ObservationType.RECON_INVENTORY, ObservationType.INJECTION_PROBE}),
-        frozenset({"aegis.injection.xss_reflected", "aegis.injection.sql_boolean"}),
+        # Phase 2.8-B adds the controller-owned bounded SQLMap capability (INJECTION_AGENT only).
+        frozenset(
+            {
+                "aegis.injection.xss_reflected",
+                "aegis.injection.sql_boolean",
+                "aegis.injection.sqlmap",
+            }
+        ),
         "InjectionAgentOutput",
     ),
     AgentRole.RECON_AGENT: RolePolicy(
@@ -273,6 +280,16 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
     ),
     "aegis.recon.tls_inspect": CapabilityPolicy(
         "aegis.recon.tls_inspect", frozenset({AgentRole.RECON_AGENT}), 2, True
+    ),
+    # Phase 2.8-B controller-owned bounded SQLMap capability (INJECTION_AGENT only; never recon).
+    # The model selects only a registered profile id; the controller renders a deterministic,
+    # shell-free argv. Default profiles exclude file access, OS shell, unrestricted dumping,
+    # persistence and out-of-scope crawling; the canary-impact profile permits only a bounded single
+    # -row synthetic read in the synthetic range. It is not read-only (it exercises the param)
+    # and it never confirms, PASSes or sets severity — the independent verifier adjudicates worker
+    # evidence against controller ground truth. Container/live execution is NOT_EVALUATED.
+    "aegis.injection.sqlmap": CapabilityPolicy(
+        "aegis.injection.sqlmap", frozenset({AgentRole.INJECTION_AGENT}), 160, False
     ),
 }
 

@@ -1187,6 +1187,74 @@ no real digests pinned.
 
 ---
 
+### Phase 2.8-B — Injection Capability Pack (SQLMap) — `OFFLINE_PASS (container/live NOT_EVALUATED)`
+**Goal.** Give INJECTION_AGENT a controller-owned bounded SQL-injection testing capability. SQLMap is
+a **registered Tool Broker capability, not an AI agent**, and belongs to INJECTION_AGENT — never
+RECON_AGENT. The model selects only a registered profile id; it never authors raw shell, argv, URLs,
+SQLMap options, payloads, headers, concurrency, risk/level, technique, timeout or target overrides.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/sqlmap_capability.py`:
+- **Three controller-owned typed profiles** under `aegis.injection.sqlmap`:
+  `sqlmap_sqli_detect_v1` (boolean detection, level 1/risk 1), `sqlmap_sqli_confirm_bounded_v1`
+  (bounded confirmation + DBMS banner, level 2/risk 1), `sqlmap_sqli_canary_impact_v1` (a bounded
+  single-row/single-column seeded-canary read, **synthetic range only**).
+- **Default exclusions** — structurally (the typed profile cannot express them) and via a
+  defence-in-depth argv denylist: no OS shell (`--os-shell`/`--os-cmd`/…), no arbitrary file access
+  (`--file-read`/`--file-write`/…), no unrestricted dumping (`--dump-all`/`--dbs`/`--passwords`), no
+  persistence (`--udf-inject`/`--reg-add`), no out-of-scope crawling (`--crawl`/`--forms`), no
+  proxying/tamper/eval/request-file/arbitrary-SQL. The canary profile permits only a bounded
+  `--dump -T products -C name --where … --start 1 --stop 1`.
+- **Model-blind `SqlmapPlan`** (strict `extra="forbid"`): only capability/profile ids + inventory
+  target + a controller-approved route/parameter; raw overrides are structurally unrepresentable.
+- **Enforcement (fail-closed):** controller inventory; exact origin/scope (host must appear in the
+  argv, the target-url must be the exact controller-composed one); environment-tier policy (canary is
+  synthetic-range-only; any non-range tier needs a signed target-bound lease; unclassified →
+  `PRODUCTION_PROHIBITED`); request budget + ceilings; concurrency `--threads 1`; output-size limits;
+  **deterministic argv rendering**; **tool/version/image provenance** (recorded, unpinned → container
+  fails closed); untrusted-output sanitation; per-run artifact manifest + cleanup.
+- **Independent verification** — added `RangeVerifier.adjudicate_sqli_offline` (the SQLi analogue of
+  the 2.2 detection-control offline adjudication): it adjudicates the **worker's** boolean-differential
+  evidence against controller-owned seeded ground truth and sends **no SQL injection traffic of its
+  own**. **SQLMap output alone never sets CONFIRMED/PASS** — the tool's own "injectable" claim is
+  recorded for audit but is never a verdict input (`SqlmapWorkerEvidence.as_verifier_input()` excludes
+  it).
+- Registered in `registry.py` under INJECTION_AGENT only (rejected for RECON/AUTHORIZATION/CHAIN).
+
+**Offline scenario (`scripts/phase_2_8_b_sqli.py`).** The full chain, offline, against the existing
+synthetic vulnerable/patched `shop-catalog-query-v1` (aegis-shop `/api/products?q`): RECON candidate
+discovery → persisted Recon→Injection delegation (real `DelegationQueue`) → INJECTION_AGENT job
+pickup (resolve by address) → controller-rendered SQLMap job → offline worker **double** issues the
+boolean control/TRUE/FALSE probes SQLMap would drive (in-process `httpx.ASGITransport`, no socket) →
+normalized worker evidence → independent verifier → **vulnerable CONFIRMED, patched PASS** → range
+reset + manifest.
+
+**Container synthetic status — `NOT_EVALUATED`.** The SQLMap binary/image was not built or run; the
+image digest is a synthetic placeholder pin (`assert_container_pinned` fails closed until pinned). The
+offline worker double reproduces the exact result-set differential a boolean-based SQLMap run
+surfaces, so the verifier logic is exercised on real HTTP evidence without running SQLMap itself.
+
+**Live status — `NOT_EVALUATED`.** No SQLMap execution against any target; no provider call.
+
+**Tests (`tests/test_phase_2_8_b.py`, 21 offline, all green).** Registry/role boundary (INJECTION only,
+never recon); bounded shell-free rendering for all three profiles + the default exclusions;
+detect/confirm/canary specifics (canary reads one bounded row, never `--dump-all`); model-blind
+contract; capability/profile/target fail-closed; canary synthetic-range-only + non-range lease
+fail-closed; argv denylist; provenance unpinned → container fail-closed; output sanitation; manifest
+(container NOT_EVALUATED); verifier CONFIRMED/PASS/INCOMPLETE adjudication; **SQLMap-verdict-alone-never
+-confirms**; verifier sends no traffic; and the full vulnerable→CONFIRMED / patched→PASS scenario.
+`ruff` + `mypy` clean on changed files.
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the controller-owned bounded SQLMap injection
+capability (three profiles, model-blind selection, deterministic argv rendering, default-safe
+exclusions) and a bounded synthetic vulnerable→CONFIRMED / patched→PASS SQLi scenario adjudicated by an
+independent verifier over worker evidence; container and live SQLMap execution NOT_EVALUATED."*
+
+**Exclusions.** No live/container SQLMap run, no real digest pin, no exploitation beyond the bounded
+synthetic canary, no verdict from SQLMap output alone.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 
