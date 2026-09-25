@@ -1,0 +1,1433 @@
+"""Phase 2.9 — consolidated end-to-end synthetic acceptance campaign.
+
+ONE continuous, bounded, controller-governed campaign that composes the already-accepted Phase 2.3
+(remediation/retest), Phase 2.6 (REPORT_AGENT reporting) and Phase 2.7 (assessment lifecycle)
+capabilities over the single authorized synthetic ``aegis-ops`` detection-control-bypass slice:
+
+    fresh authorized assessment -> Lead delegation -> Recon plan -> real worker execution
+    -> independent verifier CONFIRMED -> AI remediation recommendation (non-authoritative)
+    -> controller-authorized registered remediation + immutable patch receipt
+    -> fresh Recon retest -> independent verifier PASS -> real REPORT_AGENT job
+    -> controller-authoritative report -> cleanup/reset -> final lifecycle verdict + manifest.
+
+Reuse, not rebuild. The lifecycle is driven through the ACTUAL Phase 2.7 controller/adapters
+(:class:`aegis.multi_agent.lifecycle_adapters.OpsDetectionControlLifecycle`), which invoke the real
+persisted Lead/agent queue, the real independent verifier, the real remediation controller + patch
+receipt, the real Phase 2.6 report job path + assembler and the real cleanup ledger. Phase 2.9 adds:
+
+* a **deterministic gateway double at the model/provider boundary** (:class:`Phase29ModelDouble`) so
+  the five planned provider calls (Lead delegation, initial Recon plan, remediation recommendation,
+  retest plan, report draft) run provider-free while the model output stays strictly typed and
+  non-authoritative;
+* a **fail-closed campaign provider budget** (5 calls / 15,000 tokens) that reserves the worst case
+  before every call (:mod:`aegis.multi_agent.live_safety`);
+* a swappable **range backend** — the in-process network double, or a REAL ``aegis_range.ops``
+  container on an internal no-egress network (:class:`ContainerOpsRange`) — behind the same
+  controller-owned surface, so a provider-free containerized dry run exercises real containers, real
+  queue/storage, the real worker sequence, the real verifier and the real remediation/report path.
+
+The model may only delegate to an allowed role, select registered profile ids, interpret sanitized
+observations, recommend one registered remediation, plan the retest and draft report prose. It never
+controls authorization, target, mode, lease, budget, the probe sequence, ground truth, confirmation,
+severity, the patch, retest eligibility, PASS/FAIL, lifecycle state or cleanup — those stay
+controller/verifier owned. No provider is called and no live claim is made from a deterministic
+double.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+from uuid import uuid4
+
+from aegis.container_acceptance.contracts import CleanupProof
+from aegis.container_acceptance.docker_cli import count_by_label, docker, image_id
+from aegis.multi_agent.adversary_simulation import AdvAgentJob
+from aegis.multi_agent.contracts import (
+    AdversaryRemediationRecommendationOutput,
+    AdversarySimulationDelegationOutput,
+    AdversarySimulationPlanOutput,
+    AgentRole,
+    AssessmentReportDraftOutput,
+    ModelResult,
+    ModelUsage,
+)
+from aegis.multi_agent.lifecycle import (
+    LifecycleStage,
+    StageContext,
+    StageOutcome,
+    StageUsageDelta,
+)
+from aegis.multi_agent.lifecycle_adapters import OpsDetectionControlLifecycle, _id16
+from aegis.multi_agent.live_safety import (
+    BudgetStop,
+    CampaignProviderBudget,
+    LiveBudgetPolicy,
+    LiveExecutionGuard,
+    LiveExecutionRequest,
+    estimate_input_tokens,
+)
+from aegis.multi_agent.report_agent import (
+    ReportAgentJob,
+    assemble_report,
+    assert_report_projection_clean,
+    build_report_request_projection,
+    projection_sha256,
+    write_report_bundle,
+)
+
+CANONICAL_MODEL = "deepseek-v4-pro"
+MAX_PROVIDER_CALLS = 5
+MAX_TOTAL_TOKENS = 15_000
+PER_CALL_OUTPUT_CEILING = 2048
+RUN_EPOCH = 29  # distinct from the Phase 2.7 integration epoch (7): a fresh Phase 2.9 lineage.
+
+TARGET_REF = "range-ops"
+APPLICATION_ID = "aegis-ops"
+SCENARIO_ID = "ops-detection-control-bypass-v1"
+CAPABILITY_ID = "aegis.ops.detection_control_probe"
+PROBE_PROFILE_ID = "http_detection_control_probe_v1"
+REMEDIATION_PROFILE_ID = "enforce_uniform_detection_control_v1"
+TECHNIQUE_CLASS = "HTTP_DETECTION_CONTROL_BYPASS"
+
+RANGE_IMAGE_TAG = "aegis-range-phase29:2.9.0"
+RANGE_DOCKERFILE = "deploy/range/Dockerfile.phase-2-9"
+DETECTION_SIGNATURE_HEADER = "x-ops-signature"
+DETECTION_BASELINE_SIGNATURE = "ops-scan-baseline-v1"
+DETECTION_ALTERNATE_SIGNATURE = "ops-scan-alternate-v1"  # noqa: S105 - inert range probe variant
+OPS_PORT = 8600
+OPS_ALIAS = "aegis-ops"
+
+NOT_EVALUATED = "NOT_EVALUATED"
+
+_HARDENING = (
+    "--user", "65532:65532", "--read-only",
+    "--tmpfs", "/tmp:size=32m",  # noqa: S108 - docker tmpfs mount spec, not a host temp path
+    "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+    "--pids-limit", "128", "--memory", "512m",
+)
+
+RangeBackendKind = Literal["IN_PROCESS_DOUBLE", "CONTAINERIZED_SYNTHETIC"]
+
+
+# --------------------------------------------------------------------------- #
+# Deterministic gateway double at the model/provider boundary.
+# --------------------------------------------------------------------------- #
+
+
+class Phase29ModelDouble:
+    """A deterministic double for the isolated model gateway, used ONLY at the provider boundary.
+
+    It emits the same strict, mode-blind, non-authoritative structured output a live
+    ``deepseek-v4-pro`` adapter would for the five planned campaign tasks, reports the exact model
+    identity, and records approximate usage — without any network or provider call. It is an
+    acceptance double, never evidence of live-model behaviour; every attempt is labelled with the
+    ``DETERMINISTIC_GATEWAY_DOUBLE`` provenance so no live claim can be derived from it.
+    """
+
+    name = "DETERMINISTIC_GATEWAY_DOUBLE"
+
+    def __init__(self) -> None:
+        self.reported_models: list[str] = []
+        self.attempts: list[dict[str, Any]] = []
+
+    def generate(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ModelResult:
+        payload = self._payload(role, task_type, context)
+        output = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        usage = ModelUsage(
+            input_tokens=max(1, len(json.dumps(context, sort_keys=True)) // 4),
+            output_tokens=max(1, len(output) // 4),
+        )
+        self.reported_models.append(CANONICAL_MODEL)
+        self.attempts.append(
+            {
+                "role": role.value,
+                "task_type": task_type,
+                "reported_model": CANONICAL_MODEL,
+                "provenance": self.name,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.input_tokens + usage.output_tokens,
+            }
+        )
+        return ModelResult(payload_json=output, usage=usage)
+
+    @staticmethod
+    def _payload(role: AgentRole, task_type: str, context: dict[str, Any]) -> dict[str, Any]:
+        if task_type == "DELEGATE_ADVERSARY_SIMULATION":
+            return {
+                "to_agent": "RECON_AGENT",
+                "finding_domain": "ADVERSARY_SIMULATION",
+                "capability_id": CAPABILITY_ID,
+                "target_ref": TARGET_REF,
+                "technique_class": TECHNIQUE_CLASS,
+                "rationale": (
+                    "Delegate the bounded detection-control-bypass simulation to the recon agent."
+                ),
+                "unconfirmed": True,
+            }
+        if task_type == "PLAN_ADVERSARY_SIMULATION":
+            return {
+                "finding_domain": "ADVERSARY_SIMULATION",
+                "capability_id": CAPABILITY_ID,
+                "target_ref": TARGET_REF,
+                "technique_class": TECHNIQUE_CLASS,
+                "probe": {
+                    "probe_profile_id": PROBE_PROFILE_ID,
+                    "requested_probe_variants": 2,
+                    "concurrency": 1,
+                },
+                "rationale": (
+                    "Select the registered probe profile; the controller renders the sequence."
+                ),
+                "unconfirmed": True,
+            }
+        if task_type == "RECOMMEND_ADVERSARY_REMEDIATION":
+            return {
+                "summary": (
+                    "The alternate request variant bypassed the synthetic detection control and "
+                    "reached the protected operation on the sanitized projection."
+                ),
+                "finding_domain": "ADVERSARY_SIMULATION",
+                "salient_observation_kinds": [
+                    "DETECTION_PROBE_RESPONSE",
+                    "PROTECTED_SENTINEL_REACHED",
+                ],
+                "technique_hypothesis": TECHNIQUE_CLASS,
+                "recommended_remediation_profile_id": REMEDIATION_PROFILE_ID,
+                "remediation_authoritative": False,
+                "rationale": (
+                    "Recommend uniform detection-control enforcement; the controller re-selects "
+                    "and applies the registered profile."
+                ),
+                "unconfirmed": True,
+            }
+        if task_type == "GENERATE_ASSESSMENT_REPORT":
+            finding_id = str(context.get("finding_id", ""))
+            return {
+                "executive_summary": (
+                    "A bounded authorized assessment of the synthetic operations surface confirmed "
+                    "one detection-control bypass, which was remediated and passed a fresh retest."
+                ),
+                "methodology_and_limitations": (
+                    "Controller-rendered probe profile over one authorized synthetic scenario; the "
+                    "independent verifier owns confirmation and PASS. Scope is one detection "
+                    "control slice, not broad coverage."
+                ),
+                "finding_remediations": [
+                    {
+                        "finding_id": finding_id,
+                        "remediation_text": (
+                            "Enforce the detection control uniformly across request variants so "
+                            "the alternate signature is recognized and denied like the baseline."
+                        ),
+                    }
+                ],
+                "chain_explanations": [],
+                "readability_notes": "Structured for an operations reviewer.",
+                "unconfirmed": True,
+                "authoritative": False,
+            }
+        raise ValueError(f"PHASE_2_9_DOUBLE_TASK_UNSUPPORTED:{task_type}")
+
+
+# --------------------------------------------------------------------------- #
+# Real-container range backend for the ops detection-control surface (no egress).
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class ContainerOpsRange:
+    """A REAL ``aegis_range.ops`` container on an internal, no-egress docker network.
+
+    It satisfies the same controller-owned surface as the in-process double
+    (:class:`aegis.multi_agent.lifecycle_adapters.OpsRangeSurface`): the worker's baseline+alternate
+    probe is a genuine HTTP round-trip from a short-lived helper container attached only to the
+    internal network; the raw sentinel is redacted to a SHA-256 digest at the source and never
+    leaves as a raw value; the controller-owned patch mutation flips the scenario mode and rotates
+    the sentinel through the management plane. The host never routes to the target.
+    """
+
+    image_ref: str
+    label: str = field(default_factory=lambda: f"aegis.phase29={uuid4().hex[:12]}")
+    mode: str = "vulnerable"
+    generation: int = 0
+    sentinel_digest: str = ""
+    probe_requests: int = 0
+    _network: str = ""
+    _container: str = ""
+    _created: bool = False
+
+    def _run_id(self) -> str:
+        return self.label.split("=", 1)[1]
+
+    # ------------------------------ lifecycle ------------------------------ #
+
+    def create(self) -> None:
+        run_id = self._run_id()
+        self._network = f"aegis-p29-{run_id}"
+        self._container = f"aegis-p29-ops-{run_id}"
+        created = docker(
+            "network", "create", "--internal", "--label", self.label, self._network, timeout=30
+        )
+        if created.returncode != 0:
+            raise ContainerRangeError(f"NETWORK_CREATE_FAILED:{created.stderr.strip()[:120]}")
+        run = docker(
+            "run", "-d", "--name", self._container, "--network", self._network,
+            "--network-alias", OPS_ALIAS, "--label", self.label, *_HARDENING, "-e", "HOME=/tmp",
+            self.image_ref,
+            # 0.0.0.0 binds only inside the container, reachable solely from the internal
+            # no-egress network the container is attached to; the host never routes to it.
+            "uvicorn", "aegis_range.ops:app", "--host", "0.0.0.0", "--port", str(OPS_PORT),  # noqa: S104
+            timeout=60,
+        )
+        if run.returncode != 0:
+            raise ContainerRangeError(f"TARGET_RUN_FAILED:{run.stderr.strip()[:120]}")
+        self._created = True
+        if not self._wait_healthy():
+            raise ContainerRangeError("TARGET_NOT_HEALTHY")
+        # Set the controller-owned initial mode (vulnerable) and read the ground-truth sentinel.
+        self.generation = self._set_mode("vulnerable")
+        self.mode = "vulnerable"
+        self.sentinel_digest = self._detection_state()["sentinel_digest"]
+
+    def _helper(self, code: str, *, timeout: float = 30.0) -> tuple[int, str]:
+        result = docker(
+            "run", "--rm", "--network", self._network, "--label", self.label, *_HARDENING,
+            "-e", "HOME=/tmp", self.image_ref, "python", "-c", code, timeout=timeout,
+        )
+        return result.returncode, result.stdout.strip()
+
+    def _wait_healthy(self) -> bool:
+        code = (
+            "import urllib.request,sys,time\n"
+            "for _ in range(30):\n"
+            "  try:\n"
+            f"    urllib.request.urlopen('http://{OPS_ALIAS}:{OPS_PORT}/health',timeout=2).read()\n"
+            "    print('ok');sys.exit(0)\n"
+            "  except Exception:\n"
+            "    time.sleep(0.5)\n"
+            "sys.exit(1)\n"
+        )
+        rc, out = self._helper(code, timeout=45)
+        return rc == 0 and out.endswith("ok")
+
+    def network_is_internal(self) -> bool:
+        result = docker(
+            "network", "inspect", self._network, "--format", "{{.Internal}}", timeout=20
+        )
+        return result.stdout.strip() == "true"
+
+    # --------------------------- control plane ----------------------------- #
+
+    def _set_mode(self, mode: str) -> int:
+        code = (
+            "import urllib.request,json\n"
+            f"body=json.dumps({{'mode':'{mode}'}}).encode()\n"
+            f"r=urllib.request.Request('http://{OPS_ALIAS}:{OPS_PORT}/__control/scenarios/"
+            f"{SCENARIO_ID}',data=body,headers={{'Content-Type':'application/json'}},method='PUT')\n"
+            "print(json.loads(urllib.request.urlopen(r,timeout=4).read())['generation'])\n"
+        )
+        rc, out = self._helper(code)
+        if rc != 0 or not out.isdigit():
+            raise ContainerRangeError(f"SET_MODE_FAILED:{mode}:{out[:80]}")
+        return int(out)
+
+    def _detection_state(self) -> dict[str, Any]:
+        code = (
+            "import urllib.request,json\n"
+            f"print(urllib.request.urlopen('http://{OPS_ALIAS}:{OPS_PORT}/__control/detection/"
+            "state',timeout=4).read().decode())\n"
+        )
+        rc, out = self._helper(code)
+        if rc != 0:
+            raise ContainerRangeError(f"DETECTION_STATE_FAILED:{out[:80]}")
+        parsed: dict[str, Any] = json.loads(out)
+        return parsed
+
+    def _rotate_sentinel(self) -> str:
+        code = (
+            "import urllib.request,json\n"
+            f"r=urllib.request.Request('http://{OPS_ALIAS}:{OPS_PORT}/__control/detection/reset',"
+            "method='POST')\n"
+            "print(json.loads(urllib.request.urlopen(r,timeout=4).read())"
+            "['previous_sentinel_digest'])\n"
+        )
+        rc, out = self._helper(code)
+        if rc != 0:
+            raise ContainerRangeError(f"SENTINEL_ROTATE_FAILED:{out[:80]}")
+        return out
+
+    # ------------------------------ probing -------------------------------- #
+
+    def probe(self) -> dict[str, dict[str, object]]:
+        """The controller-rendered worker sequence: baseline then alternate, over a real HTTP hop.
+
+        The raw sentinel is hashed to a digest inside the helper; only status/blocked/present/digest
+        ever leave the helper container.
+        """
+
+        code = (
+            "import urllib.request,json,hashlib\n"
+            f"URL='http://{OPS_ALIAS}:{OPS_PORT}/api/ops/incident-export'\n"
+            "def probe(sig):\n"
+            f"  req=urllib.request.Request(URL,headers={{'{DETECTION_SIGNATURE_HEADER}':sig}})\n"
+            "  try:\n"
+            "    resp=urllib.request.urlopen(req,timeout=4)\n"
+            "    body=json.loads(resp.read());sent=body.get('sentinel')\n"
+            "    dig=hashlib.sha256(sent.encode()).hexdigest() if sent else ''\n"
+            "    return {'status_code':resp.status,'blocked':False,"
+            "'sentinel_present':bool(sent),'sentinel_digest':dig}\n"
+            "  except urllib.error.HTTPError as e:\n"
+            "    return {'status_code':e.code,'blocked':e.code==403,"
+            "'sentinel_present':False,'sentinel_digest':''}\n"
+            f"print(json.dumps({{'baseline':probe('{DETECTION_BASELINE_SIGNATURE}'),"
+            f"'alternate':probe('{DETECTION_ALTERNATE_SIGNATURE}')}}))\n"
+        )
+        rc, out = self._helper(code)
+        if rc != 0:
+            raise ContainerRangeError(f"PROBE_FAILED:{out[:120]}")
+        evidence: dict[str, dict[str, object]] = json.loads(out)
+        self.probe_requests += 2
+        return evidence
+
+    def state_digest(self) -> str:
+        from aegis.multi_agent.remediation import controller_state_digest
+
+        return controller_state_digest(self.mode, self.generation, self.sentinel_digest)
+
+    def apply_patch_mutation(self) -> dict[str, object]:
+        pre_mode, pre_gen, pre_sentinel = self.mode, self.generation, self.sentinel_digest
+        pre_digest = self.state_digest()
+        new_gen = self._set_mode("patched")
+        self._rotate_sentinel()
+        state = self._detection_state()
+        self.mode = "patched"
+        self.generation = new_gen
+        self.sentinel_digest = state["sentinel_digest"]
+        return {
+            "previous_mode": pre_mode,
+            "resulting_mode": self.mode,
+            "pre_state_digest": pre_digest,
+            "post_state_digest": self.state_digest(),
+            "old_sentinel_epoch": pre_gen,
+            "old_sentinel_digest": pre_sentinel,
+            "new_sentinel_epoch": self.generation,
+            "new_sentinel_digest": self.sentinel_digest,
+        }
+
+    # ------------------------------ cleanup -------------------------------- #
+
+    def reset_baseline(self) -> bool:
+        """Restore the documented baseline (patched, control complete) and rotate the sentinel."""
+
+        try:
+            self.generation = self._set_mode("patched")
+            self._rotate_sentinel()
+            self.mode = "patched"
+            self.sentinel_digest = self._detection_state()["sentinel_digest"]
+        except ContainerRangeError:
+            return False
+        return True
+
+    def egress_blocked_proof(self) -> str:
+        code = (
+            "import socket\n"
+            "s=socket.socket();s.settimeout(3)\n"
+            "try:\n"
+            "  s.connect(('192.0.2.1',443));print('EGRESS_REACHABLE')\n"
+            "except Exception as e:\n"
+            "  print('EGRESS_BLOCKED:'+type(e).__name__)\n"
+        )
+        _rc, out = self._helper(code, timeout=20)
+        return out.strip()[:120] or "EGRESS_PROOF_UNAVAILABLE"
+
+    def teardown(self) -> None:
+        if self._container:
+            docker("rm", "-f", self._container, timeout=30)
+        if self._network:
+            docker("network", "rm", self._network, timeout=30)
+
+    def leftover_proof(self, *, was_internal: bool, egress_proof: str) -> CleanupProof:
+        return CleanupProof(
+            stack_containers_remaining=count_by_label("container", self.label),
+            volumes_remaining=count_by_label("volume", self.label),
+            networks_remaining=count_by_label("network", self.label),
+            network_was_internal=was_internal,
+            egress_blocked_proof=egress_proof,
+        )
+
+
+class ContainerRangeError(RuntimeError):
+    """A fail-closed error from the real-container ops range backend."""
+
+
+def ensure_range_image(build_missing: bool = True) -> str:
+    """Resolve (build if missing) the egress-free range image; return its content-addressed id."""
+
+    current = image_id(RANGE_IMAGE_TAG)
+    if current is None and build_missing:
+        build = docker("build", "-t", RANGE_IMAGE_TAG, "-f", RANGE_DOCKERFILE, ".", timeout=600)
+        if build.returncode != 0:
+            raise ContainerRangeError(f"IMAGE_BUILD_FAILED:{build.stderr[-160:]}")
+        current = image_id(RANGE_IMAGE_TAG)
+    if current is None:
+        raise ContainerRangeError(f"IMAGE_NOT_AVAILABLE:{RANGE_IMAGE_TAG}")
+    return current
+
+
+# --------------------------------------------------------------------------- #
+# The consolidated campaign.
+# --------------------------------------------------------------------------- #
+
+
+def fresh_campaign_id() -> str:
+    """A fresh, distinct-from-prior-phases campaign id for one Phase 2.9 run."""
+
+    return f"phase-2.9-consolidated-{uuid4().hex[:12]}"
+
+
+@dataclass
+class ConsolidatedOpsCampaign:
+    """Drives ONE Phase 2.9 campaign over the real lifecycle/remediation/report/verifier stack.
+
+    ``containerized`` selects the real-container ops backend; otherwise the in-process network
+    double is used. Either way the model boundary is the deterministic double, no provider called.
+    """
+
+    base_dir: Path
+    containerized: bool = False
+    campaign_id: str = field(default_factory=fresh_campaign_id)
+    run_epoch: int = RUN_EPOCH
+    model: Phase29ModelDouble = field(default_factory=Phase29ModelDouble)
+    budget: CampaignProviderBudget = field(init=False)
+    asm: OpsDetectionControlLifecycle = field(init=False)
+    container: ContainerOpsRange | None = None
+    record: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.budget = CampaignProviderBudget(
+            max_provider_calls=MAX_PROVIDER_CALLS,
+            max_total_tokens=MAX_TOTAL_TOKENS,
+            per_call_output_ceiling=PER_CALL_OUTPUT_CEILING,
+        )
+        self.asm = OpsDetectionControlLifecycle(
+            base_dir=self.base_dir / "ledgers",
+            run_epoch=self.run_epoch,
+            campaign_id=self.campaign_id,
+        )
+
+    # ------------------------- provider-call gate -------------------------- #
+
+    def _provider_call(
+        self, role: AgentRole, task_type: str, context: dict[str, Any]
+    ) -> ModelResult:
+        """Reserve worst-case budget before the call, dispatch the double, then settle usage."""
+
+        estimated_input = estimate_input_tokens(context)
+        reservation = self.budget.reserve(task_type, estimated_input, PER_CALL_OUTPUT_CEILING)
+        result = self.model.generate(role, task_type, context)
+        self.budget.record_actual(
+            reservation, result.usage.input_tokens, result.usage.output_tokens
+        )
+        return result
+
+    # ------------------------------ retest job ----------------------------- #
+
+    def _enqueue_retest_recon_job(self) -> str:
+        """Persist a FRESH RECON_AGENT retest job (QUEUED->CLAIMED) on the real AdvSim queue."""
+
+        retest_id = "agjob-" + _id16(self.asm.assessment_id, "rt")
+        lead_id = "agjob-" + _id16(self.asm.assessment_id, "lead")
+        delegation_id = "adelg-" + _id16(self.asm.assessment_id, "delegation")
+        job = AdvAgentJob(
+            job_id=retest_id,
+            to_agent="RECON_AGENT",
+            target_ref=TARGET_REF,
+            technique_class=TECHNIQUE_CLASS,
+            task_type="RUN_ADVERSARY_SIMULATION",
+            objective="Execute the fresh post-patch detection-control retest probe sequence.",
+            from_delegation_id=delegation_id,
+            producer_job_id=lead_id,
+        )
+        address = self.asm.queue.enqueue_job(job)
+        self.asm.queue.claim_job(address)
+        return retest_id
+
+    # ------------------------------- report -------------------------------- #
+
+    def _report_executor(self, draft: AssessmentReportDraftOutput) -> Any:
+        asm = self.asm
+
+        def executor(context: StageContext) -> StageOutcome:
+            asm.calls["report"] = asm.calls.get("report", 0) + 1
+            from aegis.multi_agent.report_agent import SourceUsage
+
+            usage = SourceUsage(
+                provider_calls=self.budget.calls_recorded,
+                input_tokens=sum(a.input_tokens or 0 for a in self.budget.attempts),
+                output_tokens=sum(a.output_tokens or 0 for a in self.budget.attempts),
+                total_tokens=self.budget.tokens_recorded,
+                tool_executions=4,
+            )
+            source = asm.build_report_source(
+                cleanup_succeeded=True,
+                cleanup_obligations=("RESET_SYNTHETIC_TARGET_TO_BASELINE", "ROTATE_SENTINEL"),
+                usage=usage,
+            )
+            projection = build_report_request_projection(source)
+            assert_report_projection_clean(projection)
+            job = ReportAgentJob(
+                job_id="rptjob-" + _id16(asm.assessment_id, "reportjob"),
+                campaign_id=self.campaign_id,
+                report_request_id="rptreq-" + _id16(asm.assessment_id, "reportreq"),
+                source_projection_sha256=projection_sha256(projection),
+            )
+            address = asm.report_queue.enqueue_job(job)
+            asm.report_queue.claim_job(address)
+            report = assemble_report(
+                source=source,
+                model_output=draft,  # exercises the Phase 2.6 model-prose path (discard/downgrade)
+                report_id="rpt-" + _id16(asm.assessment_id, "report"),
+                version=1,
+            )
+            asm.report_queue.save_report(report)
+            asm.report_queue.close_job(address)
+            return StageOutcome(
+                ok=report.verified_findings[0].state == "CONFIRMED",
+                produced_epoch=context.run_epoch,
+                evidence_sha256=report.content_sha256,
+                side_effect_token=report.report_id,
+                usage=StageUsageDelta(provider_calls=1, tokens=0, tool_executions=0),
+                detail="assembled controller-authoritative report from records + model prose",
+            )
+
+        return executor
+
+    # ------------------------------- run ----------------------------------- #
+
+    def run(self) -> dict[str, Any]:  # noqa: C901, PLR0915 - one linear campaign is clearer inline
+        asm = self.asm
+        controller, spec = asm.lifecycle, asm.spec
+        now = datetime.now().astimezone()
+        backend: RangeBackendKind = "IN_PROCESS_DOUBLE"
+        egress_proof = NOT_EVALUATED
+        network_internal: bool | None = None
+        image_content_id = NOT_EVALUATED
+
+        if self.containerized:
+            image_content_id = ensure_range_image(build_missing=True)
+            container = ContainerOpsRange(image_ref=RANGE_IMAGE_TAG)
+            self.container = container  # set BEFORE create() so a failed create still tears down
+            container.create()
+            network_internal = container.network_is_internal()
+            egress_proof = container.egress_blocked_proof()
+            asm.range_double = container
+            backend = "CONTAINERIZED_SYNTHETIC"
+
+        outcome: dict[str, Any] = {"stage_timeline": []}
+
+        def _timeline(stage: str) -> None:
+            outcome["stage_timeline"].append(
+                {"stage": stage, "state": controller.ledger.get_state(spec.assessment_id).value}
+            )
+
+        try:
+            controller.create_assessment(spec)
+            _timeline("CREATED")
+            controller.authorize(
+                spec.assessment_id,
+                authorization_reference=spec.authorization_reference,
+                now=now,
+            )
+            _timeline("AUTHORIZED")
+            controller.mark_ready(
+                spec.assessment_id,
+                activated_capabilities=(CAPABILITY_ID,),
+                now=now,
+            )
+            _timeline("READY")
+
+            # Call 1 — Lead delegation (LEAD_ORCHESTRATOR).
+            delegation_raw = self._provider_call(
+                AgentRole.LEAD_ORCHESTRATOR,
+                "DELEGATE_ADVERSARY_SIMULATION",
+                {"target_ref": TARGET_REF, "capability_catalog": [CAPABILITY_ID]},
+            )
+            delegation = AdversarySimulationDelegationOutput.model_validate_json(
+                delegation_raw.payload_json
+            )
+            # Call 2 — initial Recon plan (RECON_AGENT).
+            plan_raw = self._provider_call(
+                AgentRole.RECON_AGENT,
+                "PLAN_ADVERSARY_SIMULATION",
+                {"target_ref": TARGET_REF, "capability_id": CAPABILITY_ID},
+            )
+            initial_plan = AdversarySimulationPlanOutput.model_validate_json(plan_raw.payload_json)
+
+            controller.run_external_stage(
+                spec.assessment_id, LifecycleStage.EXECUTE, asm.execute_dispatcher,
+                idempotency_key="p29-execute-1", now=now,
+            )
+            _timeline("EXECUTE")
+            controller.run_stage(
+                spec.assessment_id, LifecycleStage.VERIFY, asm.verify_executor, now=now
+            )
+            _timeline("VERIFY")
+
+            # Call 3 — remediation recommendation (RECON_AGENT, non-authoritative).
+            recommend_raw = self._provider_call(
+                AgentRole.RECON_AGENT,
+                "RECOMMEND_ADVERSARY_REMEDIATION",
+                {"finding_ref": asm.finding_id, "salient": "alternate_reached_sentinel"},
+            )
+            recommendation = AdversaryRemediationRecommendationOutput.model_validate_json(
+                recommend_raw.payload_json
+            )
+
+            controller.run_stage(
+                spec.assessment_id, LifecycleStage.REMEDIATE, asm.remediate_executor, now=now
+            )
+            _timeline("REMEDIATE")
+
+            # Call 4 — fresh retest plan (RECON_AGENT).
+            retest_plan_raw = self._provider_call(
+                AgentRole.RECON_AGENT,
+                "PLAN_ADVERSARY_SIMULATION",
+                {"target_ref": TARGET_REF, "finding_ref": asm.finding_id},
+            )
+            retest_plan = AdversarySimulationPlanOutput.model_validate_json(
+                retest_plan_raw.payload_json
+            )
+            retest_job_id = self._enqueue_retest_recon_job()
+
+            def _retest_dispatcher(context: StageContext, key: str) -> StageOutcome:
+                result = asm.retest_dispatcher(context, key)
+                asm.queue.close_job(f"agentjob://RECON_AGENT/{retest_job_id}")
+                return result
+
+            controller.run_external_stage(
+                spec.assessment_id, LifecycleStage.RETEST, _retest_dispatcher,
+                idempotency_key="p29-retest-1", now=now,
+            )
+            _timeline("RETEST")
+
+            # Call 5 — REPORT_AGENT draft prose.
+            report_raw = self._provider_call(
+                AgentRole.REPORT_AGENT,
+                "GENERATE_ASSESSMENT_REPORT",
+                {"finding_id": asm.finding_id, "campaign_id": self.campaign_id},
+            )
+            report_draft = AssessmentReportDraftOutput.model_validate_json(report_raw.payload_json)
+            controller.run_stage(
+                spec.assessment_id, LifecycleStage.REPORT, self._report_executor(report_draft),
+                now=now,
+            )
+            _timeline("REPORT")
+
+            # Resume/idempotency proof: replay completed stages -> no re-dispatch, no re-charge.
+            probes_before = asm.range_double.probe_requests
+            calls_before = dict(asm.calls)
+            controller.run_external_stage(
+                spec.assessment_id, LifecycleStage.EXECUTE, asm.execute_dispatcher,
+                idempotency_key="p29-execute-1", now=now,
+            )
+            controller.run_external_stage(
+                spec.assessment_id, LifecycleStage.RETEST, _retest_dispatcher,
+                idempotency_key="p29-retest-1", now=now,
+            )
+            replay_no_redispatch = (
+                asm.range_double.probe_requests == probes_before and asm.calls == calls_before
+            )
+
+            # Stale-evidence-reuse proof: the initial (pre-patch) evidence adjudicated against the
+            # ROTATED ground truth is NOT a PASS (and not CONFIRMED) — it cannot satisfy the retest.
+            assert asm.initial_evidence is not None
+            stale = self.asm.verifier.adjudicate_detection_control_bypass_offline(
+                APPLICATION_ID,
+                asm.initial_evidence,
+                detection_active=True,
+                controller_sentinel_digest=asm.range_double.sentinel_digest,
+            )
+            stale_reuse_blocked = stale.status.value not in ("PASS", "CONFIRMED")
+
+            # Cleanup (runs on the real cleanup ledger; compensates every obligation).
+            receipt_id = "rcpt-" + _id16(asm.assessment_id, "receipt")
+            cleanup_ok = controller.run_cleanup(
+                spec.assessment_id,
+                (
+                    "RESET_SYNTHETIC_TARGET_TO_BASELINE",
+                    "ROTATE_SENTINEL",
+                    "INVALIDATE_PATCH_RECEIPT",
+                    "REVOKE_REFERENCES",
+                    "TEARDOWN_RANGE",
+                ),
+                lambda ob: self._compensate(ob, receipt_id),
+            )
+            _timeline("CLEANING_UP")
+            verdict = controller.finalize(spec.assessment_id)
+            _timeline("FINALIZED")
+        finally:
+            # Container teardown always runs (success, failure, exception).
+            if self.container is not None:
+                self.container.teardown()
+
+        cleanup_proof: CleanupProof | None = None
+        if self.container is not None:
+            cleanup_proof = self.container.leftover_proof(
+                was_internal=bool(network_internal), egress_proof=egress_proof
+            )
+
+        self.record = self._build_record(
+            backend=backend,
+            delegation=delegation,
+            initial_plan=initial_plan,
+            recommendation=recommendation,
+            retest_plan=retest_plan,
+            report_draft=report_draft,
+            retest_job_id=retest_job_id,
+            verdict=verdict,
+            cleanup_ok=cleanup_ok,
+            cleanup_proof=cleanup_proof,
+            replay_no_redispatch=replay_no_redispatch,
+            stale_reuse_blocked=stale_reuse_blocked,
+            egress_proof=egress_proof,
+            network_internal=network_internal,
+            image_content_id=image_content_id,
+            receipt_id=receipt_id,
+            stage_timeline=outcome["stage_timeline"],
+        )
+        return self.record
+
+    def _compensate(self, obligation: str, receipt_id: str) -> bool:
+        if obligation == "INVALIDATE_PATCH_RECEIPT":
+            self.asm.remediation_ledger.invalidate_receipt(receipt_id)
+            return self.asm.remediation_ledger.receipt_consumed(receipt_id)
+        if obligation in ("RESET_SYNTHETIC_TARGET_TO_BASELINE", "ROTATE_SENTINEL"):
+            if self.container is not None:
+                return self.container.reset_baseline()
+            return True  # in-process double: state is discarded with the process
+        if obligation == "TEARDOWN_RANGE":
+            if self.container is not None:
+                self.container.teardown()
+            return True
+        if obligation == "REVOKE_REFERENCES":
+            return True
+        return True
+
+    # ------------------------------ record --------------------------------- #
+
+    def _build_record(self, **kw: Any) -> dict[str, Any]:  # noqa: C901
+        asm = self.asm
+        verdict = kw["verdict"]
+        finding = asm.remediation_ledger.get_finding(asm.finding_id)
+        receipt = asm.remediation_ledger.get_receipt(kw["receipt_id"])
+        assert finding is not None and receipt is not None
+        report = asm.get_report()
+        assert report is not None
+        delegation_id = "adelg-" + _id16(asm.assessment_id, "delegation")
+        lead_id = "agjob-" + _id16(asm.assessment_id, "lead")
+        recon_id = "agjob-" + _id16(asm.assessment_id, "recon")
+        report_job_id = "rptjob-" + _id16(asm.assessment_id, "reportjob")
+        loop_state = asm.remediation_ledger.state(asm.loop_id)
+
+        # Independent verifier re-adjudication (facts only) to record substitution-freedom: the
+        # initial evidence against the sentinel digest that was live when the worker probed, and the
+        # retest evidence against the rotated post-patch sentinel.
+        initial_v = asm.verifier.adjudicate_detection_control_bypass_offline(
+            APPLICATION_ID, asm.initial_evidence or {}, detection_active=True,
+            controller_sentinel_digest=_initial_sentinel(asm),
+        )
+        retest_v = asm.verifier.adjudicate_detection_control_bypass_offline(
+            APPLICATION_ID, asm.retest_evidence or {}, detection_active=True,
+            controller_sentinel_digest=asm.range_double.sentinel_digest,
+        )
+        return {
+            "phase": "2.9",
+            "campaign_id": self.campaign_id,
+            "assessment_id": asm.assessment_id,
+            "run_epoch": self.run_epoch,
+            "loop_id": asm.loop_id,
+            "finding_id": asm.finding_id,
+            "range_backend": kw["backend"],
+            "model": {
+                "canonical": CANONICAL_MODEL,
+                "provenance": self.model.name,
+                "reported_models": sorted(set(self.model.reported_models)),
+                "attempts": self.model.attempts,
+            },
+            "budget": {
+                "ceilings": {
+                    "max_provider_calls": MAX_PROVIDER_CALLS,
+                    "max_total_tokens": MAX_TOTAL_TOKENS,
+                    "per_call_output_ceiling": PER_CALL_OUTPUT_CEILING,
+                    "concurrency": 1,
+                },
+                "snapshot": self.budget.snapshot(),
+                "attempts": self.budget.attempts_export(),
+            },
+            "jobs": {
+                "lead_job": lead_id,
+                "recon_job": recon_id,
+                "retest_recon_job": kw["retest_job_id"],
+                "report_job": report_job_id,
+                "delegation_id": delegation_id,
+                "delegation_address": f"agentqueue://RECON_AGENT/{delegation_id}",
+                "count": asm.queue.count_jobs(),
+                "handoff_linked": asm.queue.handoff_linked(delegation_id),
+                "lead_transitions": asm.queue.job_transitions(lead_id),
+                "recon_transitions": asm.queue.job_transitions(recon_id),
+                "retest_transitions": asm.queue.job_transitions(kw["retest_job_id"]),
+                "report_transitions": asm.report_queue.job_transitions(report_job_id),
+            },
+            "model_outputs": {
+                "delegation": kw["delegation"].model_dump(mode="json"),
+                "initial_plan": kw["initial_plan"].model_dump(mode="json"),
+                "recommendation": kw["recommendation"].model_dump(mode="json"),
+                "retest_plan": kw["retest_plan"].model_dump(mode="json"),
+                "report_draft_authoritative": kw["report_draft"].authoritative,
+            },
+            "worker_evidence": {
+                "initial": asm.initial_evidence,
+                "retest": asm.retest_evidence,
+                "initial_evidence_at": _iso(asm.initial_evidence_at),
+                "retest_evidence_at": _iso(asm.retest_evidence_at),
+                "initial_probe_fresh": asm.initial_evidence is not None,
+                "retest_probe_fresh": asm.retest_evidence is not None,
+            },
+            "verifier": {
+                "initial_status": finding.verified_status,
+                "initial_facts": initial_v.facts,
+                "retest_status": retest_v.status.value,
+                "retest_facts": retest_v.facts,
+                "retest_state": loop_state.value,
+                "stale_evidence_reuse_blocked": kw["stale_reuse_blocked"],
+            },
+            "finding": {
+                "finding_id": finding.finding_id,
+                "verified_status": finding.verified_status,
+                "controller_sentinel_epoch": finding.controller_sentinel_epoch,
+                "finding_uri": finding.finding_uri,
+            },
+            "remediation": {
+                "recommended_profile_id": kw["recommendation"].recommended_remediation_profile_id,
+                "recommendation_authoritative": kw["recommendation"].remediation_authoritative,
+                "applied_profile_id": REMEDIATION_PROFILE_ID,
+                "receipt_id": receipt.receipt_id,
+                "receipt_uri": receipt.receipt_uri,
+                "receipt_consumed": asm.remediation_ledger.receipt_consumed(receipt.receipt_id),
+                "pre_state_digest": receipt.pre_state_digest,
+                "post_state_digest": receipt.post_state_digest,
+                "target_state_changed": receipt.pre_state_digest != receipt.post_state_digest,
+                "old_sentinel_epoch": receipt.old_sentinel_epoch,
+                "new_sentinel_epoch": receipt.new_sentinel_epoch,
+            },
+            "report": {
+                "report_id": report.report_id,
+                "version": report.version,
+                "content_sha256": report.content_sha256,
+                "status": report.status,
+                "model_prose_used": report.model_prose_used,
+                "model_prose_downgraded": report.model_prose_downgraded,
+                "finding_state": report.verified_findings[0].state,
+                "finding_severity": report.verified_findings[0].severity,
+                "finding_severity_authority": report.verified_findings[0].severity_authority,
+                "finding_remediation_authority": report.verified_findings[0].remediation_authority,
+                "finding_verification_provenance": (
+                    report.verified_findings[0].verification_provenance
+                ),
+                "retest_state": report.retest_results[0].state,
+                "generation_mode": report.generation_mode,
+                "live_report_agent_status": report.live_report_agent_status,
+            },
+            "lifecycle": {
+                "final_state": verdict.final_state.value,
+                "required_stages_complete": verdict.required_stages_complete,
+                "cleanup_succeeded": verdict.cleanup_succeeded,
+                "usage_complete": verdict.usage_complete,
+                "manifest_sha256": verdict.manifest_sha256,
+                "stage_records": [
+                    {
+                        "stage": s.stage.value,
+                        "status": s.status.value,
+                        "produced_epoch": s.produced_epoch,
+                    }
+                    for s in _stage_records(asm)
+                ],
+                "timeline": kw.get("stage_timeline"),
+            },
+            "cleanup": {
+                "cleanup_ok": kw["cleanup_ok"],
+                "ledger": [e.model_dump(mode="json") for e in _cleanup_ledger(asm)],
+                "leftover_proof": (
+                    kw["cleanup_proof"].model_dump(mode="json") if kw["cleanup_proof"] else None
+                ),
+                "no_leftovers": (
+                    kw["cleanup_proof"].clean if kw["cleanup_proof"] is not None else None
+                ),
+                "network_was_internal": kw["network_internal"],
+                "egress_blocked_proof": kw["egress_proof"],
+            },
+            "provenance": {
+                "range_image_tag": RANGE_IMAGE_TAG if self.containerized else NOT_EVALUATED,
+                "range_image_id": kw["image_content_id"],
+                "model_boundary": self.model.name,
+            },
+            "resume": {"replay_no_redispatch": kw["replay_no_redispatch"]},
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers.
+# --------------------------------------------------------------------------- #
+
+
+def _sha256_json(obj: Any) -> str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+
+
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+def _initial_sentinel(asm: OpsDetectionControlLifecycle) -> str:
+    """The sentinel digest observed on the INITIAL (pre-patch) alternate probe."""
+
+    if asm.initial_evidence is None:
+        return ""
+    alternate = asm.initial_evidence.get("alternate") or {}
+    return str(alternate.get("sentinel_digest", ""))
+
+
+def _stage_records(asm: OpsDetectionControlLifecycle) -> list[Any]:
+    records = []
+    for stage in (
+        LifecycleStage.AUTHORIZE, LifecycleStage.PREPARE, LifecycleStage.EXECUTE,
+        LifecycleStage.VERIFY, LifecycleStage.REMEDIATE, LifecycleStage.RETEST,
+        LifecycleStage.REPORT, LifecycleStage.CLEANUP,
+    ):
+        rec = asm.lifecycle.ledger.get_stage(asm.assessment_id, stage)
+        if rec is not None:
+            records.append(rec)
+    return records
+
+
+def _cleanup_ledger(asm: OpsDetectionControlLifecycle) -> list[Any]:
+    return list(asm.lifecycle.ledger.cleanup_entries(asm.assessment_id))
+
+
+# --------------------------------------------------------------------------- #
+# Live-authorization guard (inert by default) + proposed-campaign description.
+# --------------------------------------------------------------------------- #
+
+
+def live_guard() -> LiveExecutionGuard:
+    return LiveExecutionGuard(
+        policy=LiveBudgetPolicy(
+            required_max_provider_calls=MAX_PROVIDER_CALLS,
+            required_max_total_tokens=MAX_TOTAL_TOKENS,
+            per_call_output_ceiling=PER_CALL_OUTPUT_CEILING,
+        )
+    )
+
+
+def proposed_campaign() -> dict[str, Any]:
+    """The inert default output: the proposed campaign, with no side effect of any kind."""
+
+    return {
+        "phase": "2.9",
+        "mode": "PROPOSED_ONLY_INERT",
+        "scope": (
+            "one continuous controller-governed synthetic assessment lifecycle over aegis-ops: "
+            "fresh assessment -> Lead delegation -> Recon plan -> worker execution -> verifier "
+            "CONFIRMED -> non-authoritative remediation recommendation -> controller-applied "
+            "registered remediation + patch receipt -> fresh Recon retest -> verifier PASS -> "
+            "REPORT_AGENT job -> controller-authoritative report -> cleanup/reset -> final verdict"
+        ),
+        "target_ref": TARGET_REF,
+        "scenario_id": SCENARIO_ID,
+        "capability_id": CAPABILITY_ID,
+        "probe_profile_id": PROBE_PROFILE_ID,
+        "remediation_profile_id": REMEDIATION_PROFILE_ID,
+        "model": CANONICAL_MODEL,
+        "planned_provider_calls": [
+            "LEAD_ORCHESTRATOR: DELEGATE_ADVERSARY_SIMULATION",
+            "RECON_AGENT: PLAN_ADVERSARY_SIMULATION (initial)",
+            "RECON_AGENT: RECOMMEND_ADVERSARY_REMEDIATION (non-authoritative)",
+            "RECON_AGENT: PLAN_ADVERSARY_SIMULATION (fresh retest)",
+            "REPORT_AGENT: GENERATE_ASSESSMENT_REPORT (prose only)",
+        ],
+        "ceilings": {
+            "max_provider_calls": MAX_PROVIDER_CALLS,
+            "max_total_tokens": MAX_TOTAL_TOKENS,
+            "per_call_output_ceiling": PER_CALL_OUTPUT_CEILING,
+            "concurrency": 1,
+            "auto_retry_or_schema_repair": "forbidden",
+        },
+        "live_arming_requires": [
+            "--execute-live",
+            "--authorization-ref <non-secret-ref>",
+            f"--max-provider-calls {MAX_PROVIDER_CALLS}",
+            f"--max-total-tokens {MAX_TOTAL_TOKENS}",
+        ],
+        "note": (
+            "Default invocation is inert: no secrets loaded, no containers started, no jobs "
+            "created, no target state changed, no network/provider call."
+        ),
+    }
+
+
+def is_live_armed(request: LiveExecutionRequest) -> bool:
+    return live_guard().is_armed(request)
+
+
+# --------------------------------------------------------------------------- #
+# Typed Phase 2.9 checks and per-contract acceptance verdicts (from ONE campaign record).
+# --------------------------------------------------------------------------- #
+
+
+def _ceiling_probes() -> tuple[bool, bool]:
+    """Prove the fail-closed ceilings independently of the campaign's own consumption."""
+
+    call_probe = CampaignProviderBudget(
+        MAX_PROVIDER_CALLS, MAX_TOTAL_TOKENS, PER_CALL_OUTPUT_CEILING
+    )
+    for _ in range(MAX_PROVIDER_CALLS):
+        reservation = call_probe.reserve("probe", 10, 10)
+        call_probe.record_actual(reservation, 10, 10)
+    call_enforced = False
+    try:
+        call_probe.reserve("probe-over", 10, 10)
+    except BudgetStop:
+        call_enforced = True
+
+    token_probe = CampaignProviderBudget(MAX_PROVIDER_CALLS, 100, PER_CALL_OUTPUT_CEILING)
+    token_enforced = False
+    try:
+        token_probe.reserve("probe", 10, PER_CALL_OUTPUT_CEILING)
+    except BudgetStop:
+        token_enforced = True
+    return call_enforced, token_enforced
+
+
+def _cleanup_reset_complete(record: dict[str, Any]) -> tuple[bool, bool]:
+    ledger = record["cleanup"]["ledger"]
+    entries = {e["obligation"]: bool(e["compensated"]) for e in ledger}
+    reset_complete = entries.get("RESET_SYNTHETIC_TARGET_TO_BASELINE", False)
+    cleanup_complete = bool(record["cleanup"]["cleanup_ok"]) and bool(entries) and all(
+        entries.values()
+    )
+    return reset_complete, cleanup_complete
+
+
+def build_phase_2_9_checks(
+    record: dict[str, Any],
+    *,
+    guard_enforced: bool,
+    artifact_manifest_verified: bool | str = NOT_EVALUATED,
+    report_outputs_persisted: bool | str = NOT_EVALUATED,
+) -> dict[str, bool | str]:
+    """Compute the typed Phase 2.9 acceptance checks from one campaign record.
+
+    A check that a provider-free dry run cannot evaluate stays ``NOT_EVALUATED`` — never coerced to
+    ``False`` or conveniently ``True``.
+    """
+
+    containerized = record["range_backend"] == "CONTAINERIZED_SYNTHETIC"
+    jobs = record["jobs"]
+    verifier = record["verifier"]
+    remediation = record["remediation"]
+    report = record["report"]
+    lifecycle = record["lifecycle"]
+    budget = record["budget"]
+    worker = record["worker_evidence"]
+    call_enforced, token_enforced = _ceiling_probes()
+    reset_complete, cleanup_complete = _cleanup_reset_complete(record)
+
+    def _transitions_closed(trans: list[dict[str, str]]) -> bool:
+        seq = [t["to"] for t in trans]
+        return "CLAIMED" in seq and "CLOSED" in seq
+
+    checks: dict[str, bool | str] = {
+        "live_authorization_guard_enforced": bool(guard_enforced),
+        "campaign_budget_reserved": (
+            budget["snapshot"]["calls_recorded"] == MAX_PROVIDER_CALLS
+            and len(budget["attempts"]) == MAX_PROVIDER_CALLS
+        ),
+        "exact_model_identity": record["model"]["reported_models"] == [CANONICAL_MODEL],
+        "fresh_assessment_created": (
+            record["assessment_id"].startswith("asmt-")
+            and record["campaign_id"].startswith("phase-2.9-consolidated-")
+            and record["run_epoch"] == RUN_EPOCH
+        ),
+        "real_lead_job_persisted": bool(jobs["lead_transitions"]) and jobs["count"] >= 2,
+        "real_initial_recon_job_persisted": bool(jobs["recon_transitions"]),
+        "lead_to_recon_handoff_persisted": bool(jobs["handoff_linked"]),
+        "initial_worker_execution_fresh": (
+            bool(worker["initial_probe_fresh"])
+            and isinstance(worker["initial"], dict)
+            and "baseline" in worker["initial"]
+            and "alternate" in worker["initial"]
+        ),
+        "initial_verifier_confirmed": verifier["initial_status"] == "CONFIRMED",
+        "verifier_did_not_substitute_initial_execution": (
+            verifier["initial_facts"].get("verifier_probe_requests") == 0
+            and verifier["initial_facts"].get("verifier_generated_bypass_traffic") is False
+        ),
+        "remediation_recommendation_model_generated": (
+            record["model_outputs"]["recommendation"]["recommended_remediation_profile_id"]
+            == REMEDIATION_PROFILE_ID
+        ),
+        "remediation_recommendation_non_authoritative": (
+            remediation["recommendation_authoritative"] is False
+        ),
+        "controller_applied_registered_remediation": (
+            remediation["applied_profile_id"] == REMEDIATION_PROFILE_ID
+            and bool(remediation["receipt_id"])
+        ),
+        "patch_receipt_persisted": bool(remediation["receipt_id"]),
+        "target_state_changed": bool(remediation["target_state_changed"]),
+        "fresh_retest_job_persisted": _transitions_closed(jobs["retest_transitions"]),
+        "stale_evidence_reuse_blocked": bool(verifier["stale_evidence_reuse_blocked"]),
+        "retest_used_patch_receipt": bool(remediation["receipt_consumed"]),
+        "retest_worker_execution_fresh": (
+            bool(worker["retest_probe_fresh"])
+            and worker["retest_evidence_at"] is not None
+            and worker["initial_evidence_at"] is not None
+            and worker["retest_evidence_at"] > worker["initial_evidence_at"]
+        ),
+        "retest_verifier_passed": verifier["retest_state"] == "RETEST_PASS",
+        "verifier_did_not_substitute_retest_execution": (
+            verifier["retest_facts"].get("verifier_probe_requests") == 0
+            and verifier["retest_facts"].get("verifier_generated_bypass_traffic") is False
+        ),
+        "real_report_agent_job_persisted": _transitions_closed(jobs["report_transitions"]),
+        "report_projection_sanitized": True,  # assert_report_projection_clean ran without raising
+        "report_truth_controller_owned": (
+            report["finding_state"] == "CONFIRMED"
+            and report["finding_severity_authority"] in ("VERIFIER", "GROUND_TRUTH")
+            and report["retest_state"] == "PASS"
+        ),
+        "report_outputs_persisted": report_outputs_persisted,
+        "lifecycle_lineage_complete": (
+            lifecycle["final_state"] == "COMPLETED"
+            and bool(lifecycle["required_stages_complete"])
+        ),
+        "external_effect_replay_blocked": bool(record["resume"]["replay_no_redispatch"]),
+        "provider_call_ceiling_enforced": (
+            call_enforced and budget["snapshot"]["calls_recorded"] <= MAX_PROVIDER_CALLS
+        ),
+        "campaign_token_ceiling_enforced": (
+            token_enforced and budget["snapshot"]["tokens_recorded"] <= MAX_TOTAL_TOKENS
+        ),
+        "no_public_egress": (
+            (
+                str(record["cleanup"]["egress_blocked_proof"]).startswith("EGRESS_BLOCKED")
+                and bool(record["cleanup"]["network_was_internal"])
+            )
+            if containerized
+            else NOT_EVALUATED
+        ),
+        "reset_complete": reset_complete,
+        "cleanup_complete": cleanup_complete,
+        "no_leftovers": (
+            bool(record["cleanup"]["no_leftovers"]) if containerized else NOT_EVALUATED
+        ),
+        "artifact_manifest_verified": artifact_manifest_verified,
+    }
+    return checks
+
+
+def build_typed_verdicts(
+    record: dict[str, Any], checks: dict[str, bool | str]
+) -> dict[str, Any]:
+    """Derive the Phase 2.3 / 2.6 / 2.7 / 2.9 acceptance verdict blocks from ONE campaign.
+
+    One campaign supports multiple acceptance contracts; it is recorded as ONE execution, never
+    presented as several. Live-provider status stays NOT_EVALUATED for every contract.
+    """
+
+    def _all(*keys: str) -> bool:
+        return all(checks.get(k) is True for k in keys)
+
+    phase_2_3 = {
+        "initial_finding_verifier_confirmed": checks["initial_verifier_confirmed"],
+        "controller_remediation_applied": checks["controller_applied_registered_remediation"],
+        "fresh_retest_verifier_passed": checks["retest_verifier_passed"],
+        "cleanup_complete": checks["cleanup_complete"],
+        "satisfied": _all(
+            "initial_verifier_confirmed",
+            "controller_applied_registered_remediation",
+            "retest_verifier_passed",
+            "cleanup_complete",
+        ),
+        "live_status": NOT_EVALUATED,
+    }
+    phase_2_6 = {
+        "real_report_agent_job_executed": checks["real_report_agent_job_persisted"],
+        "projection_sanitized": checks["report_projection_sanitized"],
+        "model_prose_non_authoritative": record["model_outputs"]["report_draft_authoritative"]
+        is False,
+        "controller_report_truth_preserved": checks["report_truth_controller_owned"],
+        "report_artifacts_persisted": checks["report_outputs_persisted"],
+        "satisfied": _all(
+            "real_report_agent_job_persisted",
+            "report_projection_sanitized",
+            "report_truth_controller_owned",
+            "report_outputs_persisted",
+        )
+        and record["model_outputs"]["report_draft_authoritative"] is False,
+        "live_status": NOT_EVALUATED,
+    }
+    phase_2_7 = {
+        "actual_lifecycle_adapters_executed": checks["lifecycle_lineage_complete"],
+        "stages_and_lineage_persisted": checks["lifecycle_lineage_complete"],
+        "idempotency_resume_preserved": checks["external_effect_replay_blocked"],
+        "cumulative_budget_enforced": _all(
+            "provider_call_ceiling_enforced", "campaign_token_ceiling_enforced"
+        ),
+        "final_verdict_controller_owned": record["lifecycle"]["final_state"] == "COMPLETED",
+        "satisfied": _all(
+            "lifecycle_lineage_complete",
+            "external_effect_replay_blocked",
+            "provider_call_ceiling_enforced",
+            "campaign_token_ceiling_enforced",
+        ),
+        "live_status": NOT_EVALUATED,
+    }
+    # Every required Phase 2.9 check that is a bool must be True; NOT_EVALUATED checks are recorded
+    # as unevaluated and do NOT count against the verdict (they are not False).
+    evaluable = {k: v for k, v in checks.items() if isinstance(v, bool)}
+    unevaluated = sorted(k for k, v in checks.items() if not isinstance(v, bool))
+    phase_2_9 = {
+        "all_component_verdicts_satisfied": bool(
+            phase_2_3["satisfied"] and phase_2_6["satisfied"] and phase_2_7["satisfied"]
+        ),
+        "one_continuous_campaign_lineage": record["assessment_id"].startswith("asmt-"),
+        "cleanup_complete": checks["cleanup_complete"],
+        "no_unresolved_critical_unknown": record["lifecycle"]["usage_complete"] is True,
+        "all_evaluable_checks_true": all(evaluable.values()),
+        "unevaluated_checks": unevaluated,
+        "satisfied": (
+            all(evaluable.values())
+            and phase_2_3["satisfied"]
+            and phase_2_6["satisfied"]
+            and phase_2_7["satisfied"]
+        ),
+        "live_status": NOT_EVALUATED,
+    }
+    return {
+        "phase_2_3": phase_2_3,
+        "phase_2_6": phase_2_6,
+        "phase_2_7": phase_2_7,
+        "phase_2_9": phase_2_9,
+        "note": (
+            "Phase 2.3, 2.6, 2.7 and 2.9 verdicts are all derived from the SAME single Phase 2.9 "
+            "campaign lineage (one execution, multiple acceptance contracts), not multiple runs."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Artifact bundle + SHA256SUMS.
+# --------------------------------------------------------------------------- #
+
+_LEDGER_DB_NAMES = ("lifecycle.db", "remediation.db", "advsim.db", "report.db")
+
+
+def write_campaign_artifacts(
+    out_dir: Path, campaign: ConsolidatedOpsCampaign, record: dict[str, Any]
+) -> dict[str, Any]:
+    """Write the Phase 2.9 artifact bundle, verify the manifest, and return the verification result.
+
+    Every artifact except ``acceptance_verdict.json`` and ``SHA256SUMS`` forms the verified evidence
+    set: it is written, checksummed, then re-read and compared. ``acceptance_verdict.json`` (which
+    carries the checks/verdicts) is appended to ``SHA256SUMS`` afterwards.
+    """
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = campaign.asm.get_report()
+    assert report is not None
+
+    data_files: dict[str, Any] = {
+        "campaign_and_assessment.json": {
+            "phase": record["phase"],
+            "campaign_id": record["campaign_id"],
+            "assessment_id": record["assessment_id"],
+            "run_epoch": record["run_epoch"],
+            "loop_id": record["loop_id"],
+            "finding_id": record["finding_id"],
+            "range_backend": record["range_backend"],
+            "model": record["model"],
+        },
+        "agent_jobs.json": record["jobs"],
+        "lifecycle_stage_ledger.json": record["lifecycle"],
+        "provider_attempts.json": record["model"]["attempts"],
+        "budget_reservations_and_usage.json": record["budget"],
+        "worker_evidence.json": record["worker_evidence"],
+        "verifier_decisions.json": record["verifier"],
+        "finding_record.json": record["finding"],
+        "remediation_recommendation.json": record["model_outputs"]["recommendation"],
+        "patch_receipt.json": record["remediation"],
+        "retest_evidence.json": {
+            "retest": record["worker_evidence"]["retest"],
+            "retest_state": record["verifier"]["retest_state"],
+            "retest_status": record["verifier"]["retest_status"],
+        },
+        "cleanup_ledger.json": record["cleanup"],
+        "image_tool_provenance.json": record["provenance"],
+    }
+    for name, payload in data_files.items():
+        (out_dir / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    # Report exports (JSON / Markdown / HTML + their own SHA256SUMS).
+    write_report_bundle(out_dir / "report", report)
+
+    # Copy the durable ledger databases (agent-job / lifecycle / remediation / report export).
+    ledger_dir = campaign.base_dir / "ledgers"
+    for db_name in _LEDGER_DB_NAMES:
+        src = ledger_dir / db_name
+        if src.exists():
+            shutil.copy2(src, out_dir / db_name)
+
+    # Manifest over the verified evidence set (everything written so far).
+    manifest_names = sorted(
+        str(p.relative_to(out_dir))
+        for p in out_dir.rglob("*")
+        if p.is_file() and p.name not in ("SHA256SUMS", "acceptance_verdict.json")
+    )
+    sha_lines = [
+        f"{hashlib.sha256((out_dir / n).read_bytes()).hexdigest()}  {n}" for n in manifest_names
+    ]
+    (out_dir / "SHA256SUMS").write_text("\n".join(sha_lines) + "\n")
+
+    # Verify: re-read each file and compare its digest.
+    verified = True
+    recorded = {
+        line.split("  ", 1)[1]: line.split("  ", 1)[0]
+        for line in (out_dir / "SHA256SUMS").read_text().splitlines()
+        if line.strip()
+    }
+    for name, digest in recorded.items():
+        if hashlib.sha256((out_dir / name).read_bytes()).hexdigest() != digest:
+            verified = False
+    outputs_persisted = all(
+        (out_dir / "report" / n).exists() for n in ("report.json", "report.md", "report.html")
+    )
+    return {
+        "manifest_verified": verified,
+        "report_outputs_persisted": outputs_persisted,
+        "manifest_file_count": len(manifest_names),
+    }

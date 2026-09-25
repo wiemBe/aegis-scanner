@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import httpx
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegis_range.documents import openapi_document
 from aegis_range.runtime import Mode, ScenarioRuntime, management_router
+
+# httpx is imported lazily inside `_worker` so the detection-control surface can run in an
+# egress-free image that ships no httpx (the diagnostics/preview worker path is unused there).
+if TYPE_CHECKING:
+    import httpx
 
 SERVICE = "aegis-ops"
 SCENARIO = "ops-report-selection-v1"
@@ -119,6 +123,8 @@ def teams() -> dict[str, object]:
 
 
 async def _worker(request: Request, path: str, payload: dict[str, object]) -> dict[str, Any]:
+    import httpx  # lazy: only the diagnostics/preview worker path needs an HTTP client
+
     transport: httpx.AsyncBaseTransport | None = request.app.state.worker_transport
     async with httpx.AsyncClient(
         base_url=request.app.state.worker_origin,
