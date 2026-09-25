@@ -122,6 +122,7 @@ SqlmapProfileId = Literal[
     "sqlmap_sqli_detect_v1",
     "sqlmap_sqli_confirm_bounded_v1",
     "sqlmap_sqli_canary_impact_v1",
+    "sqlmap_sqli_detect_boolean_v1",
 ]
 
 SqlmapTechnique = Literal["B", "BE"]  # boolean / error-based only. No time/stacked/union/inline.
@@ -144,6 +145,11 @@ class SqlmapProfile:
     dbms_banner: bool = False
     canary_read: bool = False
     synthetic_range_only: bool = False
+    # Controller-owned HARD runtime ceilings for a containerized run. ``max_requests`` is the max
+    # HTTP request count the SQLMap process may emit; ``max_duration_seconds`` the wall-clock cap.
+    # Neither is representable on the model-facing ``SqlmapPlan`` (strict ``extra="forbid"``), so
+    # the model can select only a profile id and can never widen a ceiling.
+    max_duration_seconds: int = 120
 
 
 SQLMAP_PROFILES: dict[str, SqlmapProfile] = {
@@ -166,6 +172,19 @@ SQLMAP_PROFILES: dict[str, SqlmapProfile] = {
         technique="BE", level=2, risk=1, threads=1,
         per_request_timeout_ms=8_000, retries=1, max_requests=160, max_output_bytes=262_144,
         dbms_banner=True, canary_read=True, synthetic_range_only=True,
+    ),
+    # Boolean-only detection profile tuned to be *honestly compatible with the pinned SQLMap
+    # version* against the bounded `LIKE '%…%'` catalog fixture: the low-level detect/confirm
+    # profiles cannot break out of the string context, so the pinned binary never self-flags and
+    # never emits SQLMap-originated differential traffic. This raises level/risk to 3/2 (still
+    # boolean-only — no error/union/time/stacked, no dump, no banner) so a real, bounded SQLMap run
+    # generates genuine differential traffic on the vulnerable arm and none on the patched arm.
+    "sqlmap_sqli_detect_boolean_v1": SqlmapProfile(
+        profile_id="sqlmap_sqli_detect_boolean_v1",
+        environment=EnvironmentTier.SYNTHETIC_RANGE,
+        technique="B", level=3, risk=2, threads=1,
+        per_request_timeout_ms=8_000, retries=1, max_requests=800, max_output_bytes=262_144,
+        max_duration_seconds=180, synthetic_range_only=True,
     ),
 }
 
@@ -303,8 +322,19 @@ class SqlmapLease:
     environment_tier: EnvironmentTier = EnvironmentTier.SYNTHETIC_RANGE
 
 
-def render_sqlmap_argv(profile: SqlmapProfile, target_url: str, parameter: str) -> tuple[str, ...]:
-    """Render a deterministic, bounded, shell-free SQLMap argv. Fails closed on an unsafe token."""
+def render_sqlmap_argv(
+    profile: SqlmapProfile,
+    target_url: str,
+    parameter: str,
+    *,
+    capture_dir: str | None = None,
+) -> tuple[str, ...]:
+    """Render a deterministic, bounded, shell-free SQLMap argv. Fails closed on an unsafe token.
+
+    When ``capture_dir`` is given, the run also logs all SQLMap-generated HTTP traffic to
+    ``<capture_dir>/traffic.txt`` (``-t``) and writes its session under ``<capture_dir>`` so the
+    controller can normalize SQLMap-originated request/response evidence. It is a controller-owned
+    container path (never target/model-authored); the argv denylist still rejects unsafe tokens."""
 
     timeout_s = str(max(1, profile.per_request_timeout_ms // 1000))
     argv = [
@@ -315,6 +345,10 @@ def render_sqlmap_argv(profile: SqlmapProfile, target_url: str, parameter: str) 
         "--threads", str(profile.threads),
         "--timeout", timeout_s, "--retries", str(profile.retries),
     ]
+    if capture_dir is not None:
+        if not re.fullmatch(r"/[A-Za-z0-9_./-]{1,120}", capture_dir):
+            raise SqlmapCapabilityError("SQLMAP_CAPTURE_DIR_UNSAFE")
+        argv += ["-t", f"{capture_dir}/traffic.txt", "--output-dir", capture_dir]
     if profile.dbms_banner:
         argv.append("--banner")
     if profile.canary_read:
@@ -331,12 +365,32 @@ def _job_id(target_url: str, parameter: str, profile_id: str) -> str:
     return "sqlmj-" + hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
-def build_sqlmap_job(plan: SqlmapPlan, *, lease: SqlmapLease | None = None) -> SqlmapInjectionJob:
+def build_sqlmap_job(
+    plan: SqlmapPlan,
+    *,
+    lease: SqlmapLease | None = None,
+    image: SqlmapToolImage | None = None,
+    seed_value: str = "1",
+    capture_dir: str | None = None,
+) -> SqlmapInjectionJob:
     """Validate a typed plan and render a fully-bounded, shell-free SQLMap job, or fail closed.
 
     Every rejection happens BEFORE any argv is rendered, so a rejected plan yields zero commands and
     zero target traffic.
-    """
+
+    ``image`` optionally overrides the tool image provenance. It defaults to the module
+    ``SQLMAP_PROVENANCE`` (an unpinned placeholder that keeps the offline path ``NOT_EVALUATED``);
+    the Phase 2.8 container-acceptance harness passes an operator-reviewed, digest-pinned image so
+    an actual container run is admitted (see :func:`assert_container_pinned`).
+
+    ``seed_value`` is the controller-owned baseline parameter value (default ``"1"``); the container
+    harness uses a value that returns a stable non-empty baseline so the pinned SQLMap can honestly
+    exhibit a boolean-differential. ``capture_dir`` turns on SQLMap-originated traffic capture. Both
+    are controller-owned; neither is model- or target-authored."""
+
+    provenance = image or SQLMAP_PROVENANCE
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", seed_value):
+        raise SqlmapCapabilityError("SQLMAP_SEED_VALUE_UNSAFE")
 
     if plan.capability_id != SQLMAP_CAPABILITY_ID:
         raise SqlmapCapabilityError("SQLMAP_CAPABILITY_MISMATCH")
@@ -364,8 +418,8 @@ def build_sqlmap_job(plan: SqlmapPlan, *, lease: SqlmapLease | None = None) -> S
         raise SqlmapCapabilityError("CANARY_PROFILE_SYNTHETIC_RANGE_ONLY")
 
     host = _host(origin)
-    target_url = f"{origin}{plan.route}?{plan.parameter}=1"
-    argv = render_sqlmap_argv(profile, target_url, plan.parameter)
+    target_url = f"{origin}{plan.route}?{plan.parameter}={seed_value}"
+    argv = render_sqlmap_argv(profile, target_url, plan.parameter, capture_dir=capture_dir)
 
     # Scope: the authorized host must appear in the argv and the bounded target-url must match.
     # target url, and the bounded target-url must be the exact controller-composed one.
@@ -392,10 +446,10 @@ def build_sqlmap_job(plan: SqlmapPlan, *, lease: SqlmapLease | None = None) -> S
         per_request_timeout_ms=profile.per_request_timeout_ms,
         environment_tier=profile.environment,
         allows_canary_read=profile.canary_read,
-        image_ref=SQLMAP_PROVENANCE.image_ref,
-        image_digest=SQLMAP_PROVENANCE.image_digest,
-        tool_version=SQLMAP_PROVENANCE.version,
-        digest_pinned=SQLMAP_PROVENANCE.digest_pinned,
+        image_ref=provenance.image_ref,
+        image_digest=provenance.image_digest,
+        tool_version=provenance.version,
+        digest_pinned=provenance.digest_pinned,
     )
 
 

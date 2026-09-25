@@ -353,7 +353,7 @@ def test_recon_role_registers_exactly_the_four_capabilities() -> None:
             "aegis.recon.http_probe",
             "aegis.recon.web_crawl",
             "aegis.recon.content_discovery",
-            "aegis.recon.api_discovery",
+            "aegis.recon.api_http_probe",
             "aegis.recon.dns_discovery",
             "aegis.recon.tls_inspect",
         }

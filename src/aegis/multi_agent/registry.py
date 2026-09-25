@@ -109,7 +109,7 @@ ROLE_REGISTRY: dict[AgentRole, RolePolicy] = {
                 "aegis.recon.http_probe",
                 "aegis.recon.web_crawl",
                 "aegis.recon.content_discovery",
-                "aegis.recon.api_discovery",
+                "aegis.recon.api_http_probe",
                 "aegis.recon.dns_discovery",
                 "aegis.recon.tls_inspect",
             }
@@ -272,8 +272,8 @@ CAPABILITY_REGISTRY: dict[str, CapabilityPolicy] = {
     "aegis.recon.content_discovery": CapabilityPolicy(
         "aegis.recon.content_discovery", frozenset({AgentRole.RECON_AGENT}), 32, True
     ),
-    "aegis.recon.api_discovery": CapabilityPolicy(
-        "aegis.recon.api_discovery", frozenset({AgentRole.RECON_AGENT}), 6, True
+    "aegis.recon.api_http_probe": CapabilityPolicy(
+        "aegis.recon.api_http_probe", frozenset({AgentRole.RECON_AGENT}), 6, True
     ),
     "aegis.recon.dns_discovery": CapabilityPolicy(
         "aegis.recon.dns_discovery", frozenset({AgentRole.RECON_AGENT}), 8, True

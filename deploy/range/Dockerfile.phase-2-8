@@ -1,0 +1,28 @@
+# Phase 2.8 synthetic-range target image (egress-free build).
+#
+# Provenance (recorded in src/aegis/container_acceptance/images.py):
+#   * base image  : python:3.12-slim pinned by immutable RepoDigest.
+#   * runtime deps: fastapi/uvicorn/pydantic and transitive wheels acquired host-side through the
+#                   audited HTTPS proxy for the cp312 manylinux target, sha256-listed in the build
+#                   context, and installed with `--no-index` so the BUILD performs zero egress.
+#   * application : the first-party aegis_range source, mounted read-only on PYTHONPATH.
+#
+# This image serves ONLY the synthetic shop target (aegis_range.shop) used by the Phase 2.8
+# containerized SQLMap vulnerable/patched acceptance. It never reaches a public network at runtime;
+# the acceptance harness attaches it to an `--internal` docker network with no gateway.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/src
+
+RUN groupadd --gid 65532 range && useradd --uid 65532 --gid 65532 --no-create-home range
+
+COPY deploy/range/wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels \
+        fastapi==0.116.1 uvicorn==0.35.0 pydantic==2.13.5 \
+    && rm -rf /wheels
+
+COPY src /app/src
+WORKDIR /app
+
+USER 65532:65532
+CMD ["uvicorn", "aegis_range.shop:app", "--host", "0.0.0.0", "--port", "8102"]

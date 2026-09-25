@@ -40,7 +40,7 @@ _ALL = [
     ("aegis.recon.http_probe", "http_probe_discovery_v1", "httpx"),
     ("aegis.recon.web_crawl", "web_crawl_bounded_v1", "katana"),
     ("aegis.recon.content_discovery", "content_discovery_bounded_v1", "ffuf"),
-    ("aegis.recon.api_discovery", "api_schema_discovery_v1", "httpx"),
+    ("aegis.recon.api_http_probe", "api_http_probe_v1", "httpx"),
     ("aegis.recon.dns_discovery", "dns_discovery_bounded_v1", "dnsx"),
     ("aegis.recon.tls_inspect", "tls_inspect_v1", "tlsx"),
 ]
@@ -100,8 +100,12 @@ def test_each_profile_renders_bounded_shell_free_job(cid: str, pid: str, tool: s
 
 def test_http_argv_disables_redirects() -> None:
     job = build_discovery_job(_plan("aegis.recon.http_probe", "http_probe_discovery_v1"))
-    assert "-disable-redirects" in job.argv
-    assert "-fr" not in job.argv and "-L" not in job.argv
+    # Redirect safety is structural: httpx does not follow redirects unless an opt-in flag is
+    # passed, and the render passes none of them. (The `-disable-redirects` flag asserted before the
+    # Phase 2.8-C container correction is not a real httpx v1.6.9 flag.)
+    assert job.redirect_policy == "DENY"
+    for follow in ("-fr", "-follow-redirects", "-follow-host-redirects", "-L", "-location"):
+        assert follow not in job.argv
 
 
 def test_rendering_is_deterministic() -> None:

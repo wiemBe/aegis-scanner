@@ -1255,6 +1255,181 @@ synthetic canary, no verdict from SQLMap output alone.
 
 ---
 
+### Phase 2.8-C — Containerized Synthetic Capability Acceptance — `CONTAINERIZED_SYNTHETIC_PASS (SQLMap functional-detection proven from SQLMap-originated traffic; httpx http_probe/api_http_probe + katana; ffuf/dnsx/tlsx NOT_EVALUATED; live NOT_EVALUATED)`
+
+> **Correction rev C1 (SQLMap-originated evidence).** The first 2.8-C run marked SQLMap
+> `CONTAINERIZED_SYNTHETIC_PASS` on the strength of a **controller helper boolean probe**, while the
+> bounded SQLMap profile never self-detected the `LIKE` fixture — so *SQLMap functional detection was
+> not actually proven*. This revision proves it from **SQLMap's own captured traffic** and splits the
+> two facts: `synthetic_sqli_scenario_confirmed` (the fixture is genuinely vulnerable/patched, shown
+> by a *separate* control probe) vs `sqlmap_functional_detection_proven` (SQLMap's own requests
+> exhibit the differential). A generic/manual boolean probe no longer substitutes for SQLMap
+> capability execution. It also fixes the httpx render (two flags that do not exist in the pinned
+> binary) so `http_probe`/`api_http_probe` genuinely execute.
+**Goal.** Take the Phase 2.8-A recon pack and the Phase 2.8-B SQLMap injection capability — both
+`OFFLINE_PASS` with **placeholder** image digests and `container/live NOT_EVALUATED` — and actually
+execute them in **real, digest-pinned, bounded containers** on an **internal, no-egress** synthetic
+range, routing real tool evidence through the preserved production normalizer and the independent
+verifier. No AI provider is called, no `.env.gateway` is loaded, and the offline authority model is
+unchanged: a tool's own claim is audit-only; only the independent verifier promotes.
+
+New package `src/aegis/container_acceptance/` (`images`, `docker_cli`, `network`, `runner`,
+`sqlmap_worker`, `recon_runner`, `controller`, `contracts`), runner
+`scripts/phase_2_8_container_acceptance.py`, tests `tests/test_phase_2_8_container_acceptance.py`.
+
+**1 — Operator-reviewed immutable image digests (placeholders replaced for executed tools).** Every
+container the harness runs is referenced only by an immutable pin (`require_pinned` rejects any
+floating tag or `latest` fail-closed); the offline packs keep their placeholder pins precisely
+because they do not execute a container. Recorded supply chain:
+- **Base:** `python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`
+  (`python:3.12-slim`, official Docker Hub, resolved 2026-09-25 linux/amd64).
+- **SQLMap worker:** locally built `aegis-sqlmap-runner` (`deploy/sqlmap-runner/Dockerfile`) — **sqlmap
+  1.10.9** wheel (`sha256:75aa0c244c687f82a7b3f4583d0655a352a443f835ec75fc83fe4d5f44a206b8`, acquired
+  host-side through the audited proxy, installed `--no-index` → **zero build egress**), baked into the
+  pinned base; run by its resolved content-addressed image id; entrypoint = the sqlmap binary (no
+  shell). This **replaces** the 2.8-B placeholder for the executed run (passed via a new
+  `build_sqlmap_job(image=…)` override; the offline default stays the unpinned placeholder).
+- **Range target:** locally built `aegis-range-phase28` (`deploy/range/Dockerfile.phase-2-8`) — the
+  first-party `aegis_range.shop` on a host-fetched cp312 wheelhouse, installed `--no-index`.
+- **httpx** `projectdiscovery/httpx@sha256:c8eaaf8be57df7e8c9dc573aeebe5a52192dbc822e3415d0c20f014f89957af5`
+  (v1.6.9); **katana** `projectdiscovery/katana@sha256:a045fd0428e64456ee299cab48d0a3db48c7c4d481fb21f74bc672839a9fc9e3`
+  (v1.1.2), both real RepoDigests resolved 2026-09-25.
+
+**2 — Internal no-egress network + cleanup proof.** The range runs on a docker network created with
+`--internal` (`Internal: true`, no gateway/NAT/published port). No-egress is proven from inside: a
+helper's TCP connect to TEST-NET-1 `192.0.2.1:443` (RFC 5737, routes nowhere real) returns
+`EGRESS_BLOCKED:OSError`. Teardown proves **0 stack containers / 0 volumes / 0 networks** remaining
+by run label.
+
+**4 — `api_discovery` renamed → `api_http_probe`.** Container acceptance confirmed
+`aegis.recon.api_discovery` renders the **same httpx probe argv** as `http_probe` and does **not**
+fetch or parse any OpenAPI/Swagger/GraphQL schema, so it is renamed to the accurate narrower
+`aegis.recon.api_http_probe` (`api_http_probe_v1`) across the capability pack, registry and tests.
+
+**5 — SQLMap vulnerable/patched pair, proven from SQLMap-originated traffic.** Against the
+controller-owned `shop-catalog-query-v1` (`aegis-shop:8102 /api/products`, parameter `q`), a new
+bounded profile `sqlmap_sqli_detect_boolean_v1` (technique **B** only — no error/union/time/stacked,
+level 3, risk 2, **`--threads 1`**, no OS shell / file ops / dump / banner / persistence) composed
+with a controller baseline `seed_value=Notebook` (a value returning a stable non-empty baseline so
+the pinned binary can honestly break out of the `LIKE '%…%'` context). The **only** profile/scenario
+change made is the minimum needed for the pinned SQLMap to detect the fixture honestly.
+- Each arm runs the **real** sqlmap binary with `-t /out/traffic.txt` logging **SQLMap's own** HTTP
+  requests/responses to a per-run labelled volume; the production normalizer
+  (`aegis.container_acceptance.sqlmap_traffic`) parses them and derives the candidate differential
+  from **SQLMap-originated traffic** (baseline row count vs the max/min rows across the requests
+  SQLMap itself injected) — never from a helper probe. Raw payloads/bodies are not retained; only a
+  `modified` flag, row count and request/response sha256 digests are.
+- Correlation per run: job id, SQLMap process execution id, timestamps, per-request/response
+  digests, target + parameter, tool version `1.10.9`, immutable image id
+  `sha256:c542cbc0…`.
+- The independent verifier `RangeVerifier.adjudicate_sqli_from_sqlmap_traffic` adjudicates that
+  SQLMap-originated differential against controller ground truth and **sends zero** injection
+  traffic. SQLMap's textual "injectable" line is parsed **audit-only**, never a verifier input.
+- **Vulnerable arm** (fresh job/evidence, 58 SQLMap requests observed): baseline=1, SQLMap-injected
+  rows span max=1 / min=0 (the boolean-blind toggle) → verifier **CONFIRMED**.
+- **Patched arm** (fresh job/evidence, 491 SQLMap requests): baseline=1, SQLMap-injected rows all 0
+  (max=0) → no differential → verifier **PASS** (`patched_sqlmap_false_positive_absent`).
+- The OR-style controller probe is retained **only as a separate scenario control**
+  (`synthetic_sqli_scenario_confirmed`), never fed to the functional verifier.
+
+Narrow SQLMap checks (all `true`): `sqlmap_process_executed`, `sqlmap_requests_observed`,
+`sqlmap_request_evidence_correlated`, `controller_controls_separate_from_sqlmap_evidence`,
+`verifier_used_sqlmap_worker_evidence`, `verifier_sent_no_injection_traffic`,
+`sqlmap_within_request_budget`, `vulnerable_sqlmap_functional_detection_proven`,
+`patched_sqlmap_false_positive_absent`; plus `synthetic_sqli_scenario_confirmed`. Had the pinned
+SQLMap failed to detect honestly, the status would fall back to
+**`CONTAINER_EXECUTED_INCONCLUSIVE`** — the verifier is never modified and no substitute traffic is
+added to force a PASS.
+
+**SQLMap request/duration budget (hard, controller-owned).** The pinned SQLMap has no flag to cap
+its total HTTP request count, so the ceiling is enforced from outside by
+`aegis.container_acceptance.sqlmap_budget`: the SQLMap process runs in a **named, detached**
+container and a controller watchdog counts the requests SQLMap itself logs (`HTTP request [#…]` in
+its `-t` traffic file for this run's volume) and the wall-clock elapsed; on reaching either ceiling
+it **`docker kill`**s the child deterministically (`threads=1`, so the count advances one request at
+a time and the stop is prompt) and records a typed `BUDGET_STOP`.
+- Configured maximum request count: **800** (`SqlmapProfile.max_requests`).
+- Configured duration ceiling: **180 s** (`SqlmapProfile.max_duration_seconds`).
+- Vulnerable observed request count: **58**; patched observed request count: **491** — both well
+  under the ceiling, `stop_reason=COMPLETED`, `sqlmap_within_request_budget=true`.
+- Enforcement component: the controller watchdog in `sqlmap_budget.run_sqlmap_with_budget` (runtime
+  request counting tied to the SQLMap process/job via its own traffic log + `docker kill`).
+- Typed behaviour at the ceiling: `BudgetStopReason.REQUEST_CEILING` / `DURATION_CEILING`; the child
+  container is killed and removed; the arm's `verifier_status` becomes `BUDGET_STOP`, so a
+  budget-stopped run is **never** counted as CONFIRMED/PASS (functional detection is not proven).
+- The model cannot change either ceiling: both live on the frozen controller-owned `SqlmapProfile`;
+  the model-facing `SqlmapPlan` is strict `extra="forbid"` and carries no budget field (a test
+  asserts a plan with `max_http_requests` raises `ValidationError`). The container detect profile is
+  also `synthetic_range_only=True`.
+- Negative container test: an intentionally low ceiling (`max_http_requests=5`) terminates the
+  SQLMap child at `REQUEST_CEILING`, removes the container, and leaves zero leftovers.
+
+**Item C — httpx bounded response-size fix.** The 2.8-A httpx render used two flags absent from the
+pinned httpx **v1.6.9** (`-max-response-size` and `-disable-redirects`), so the tool never ran.
+Both are removed. Redirect safety is now structural: httpx does not follow redirects unless an
+opt-in (`-fr`/`-follow-redirects`) is passed, which the render never does. httpx v1.6.9 has **no**
+fetched-body-size flag, so — rather than silently dropping the boundary — the response-size limit is
+enforced by the broker/runner's **bounded capture** (`max_output_bytes`) with truncation recorded
+(`ContainerRunResult.output_truncated`). `api_http_probe` stays narrowly named (an HTTP probe of a
+documented path; no OpenAPI/GraphQL discovery claim).
+
+**3 / 7 / 9 — Per-recon-capability container status (one run never marks the whole pack ready).**
+
+| Capability | Tool | Status | Basis |
+| --- | --- | --- | --- |
+| `aegis.injection.sqlmap` | sqlmap 1.10.9 | **CONTAINERIZED_SYNTHETIC_PASS** | functional detection proven from SQLMap-originated traffic; vuln CONFIRMED / patched no-differential |
+| `aegis.recon.http_probe` | httpx v1.6.9 | **CONTAINERIZED_SYNTHETIC_PASS** | bounded probe of the shop fixture executes after the flag fix; runner-bounded capture |
+| `aegis.recon.api_http_probe` | httpx v1.6.9 | **CONTAINERIZED_SYNTHETIC_PASS** | bounded HTTP probe of a documented path (no schema-discovery claim) |
+| `aegis.recon.web_crawl` | katana v1.1.2 | **CONTAINERIZED_SYNTHETIC_PASS** | real bounded crawl of the shop fixture, parseable JSONL |
+| `aegis.recon.content_discovery` | ffuf | **NOT_EVALUATED** | no acquirable image (`ffuf/ffuf` absent on the registry); no operator pin |
+| `aegis.recon.dns_discovery` | dnsx | **NOT_EVALUATED** | no honest DNS-zone fixture in the synthetic range |
+| `aegis.recon.tls_inspect` | tlsx | **NOT_EVALUATED** | no honest TLS endpoint (the shop serves plain HTTP) |
+
+The Recon and Injection packs are **not** marked container-ready from these runs: `ffuf`, `dnsx`
+and `tlsx` remain `NOT_EVALUATED`, and only the specific capabilities above are accepted.
+
+**2 — Internal no-egress network + cleanup proof.** Range on an `--internal` network
+(`Internal: true`, no gateway/NAT/published port); no-egress proven from inside (TCP connect to
+TEST-NET-1 `192.0.2.1:443` → `EGRESS_BLOCKED:OSError`). Per-run SQLMap output volumes are labelled
+and removed on teardown; the leftover proof shows **0 stack containers / 0 volumes / 0 networks**.
+
+**6 — Negative container tests (9 + budget-stop, all green).** target escape (out-of-scope
+`target_ref`), cross-origin redirect (rendered `redirect_policy=DENY`, no follow flag), unknown
+profile, forbidden argv (denylist), output-size limit (truncation), timeout (enforced kill), cleanup
+failure (leftover → not clean), unpinned image (`require_pinned`/`assert_container_pinned` fail
+closed), stale evidence reuse (per-run nonce mismatch rejected), and **budget stop** (a low request
+ceiling terminates the SQLMap child and cleans up).
+
+**7 — Evidence categories kept separate.** The 2.8-A/2.8-B unit/offline results remain `OFFLINE_PASS`;
+`aegis.injection.sqlmap`, `aegis.recon.http_probe`, `aegis.recon.api_http_probe` and
+`aegis.recon.web_crawl` are `CONTAINERIZED_SYNTHETIC_PASS`; `ffuf`/`dnsx`/`tlsx` remain
+`NOT_EVALUATED`; **`LIVE_PROVIDER` remains `NOT_EVALUATED`** (no provider call anywhere in this phase).
+
+**8 — Focused checks.** `tests/test_phase_2_8_container_acceptance.py` (incl. the 9 negatives + the
+SQLMap-traffic normalizer/verifier + httpx-render tests), 2.8-A/2.8-B/1.7c + verifier + 2.2
+regression green, `ruff` + `mypy` clean on changed files. No unrelated phase acceptance / paid
+campaign was re-run.
+
+**Exact commands.** `python scripts/phase_2_8_container_acceptance.py --json` (build-if-missing);
+SQLMap arm argv (rendered, per arm):
+`sqlmap -u http://aegis-shop:8102/api/products?q=Notebook -p q --batch --disable-coloring
+--flush-session --fresh-queries --technique B --level 3 --risk 2 --threads 1 --timeout 8 --retries 1
+-t /out/traffic.txt --output-dir /out`.
+
+**Exact bounded claim (earned):** *"CONTAINERIZED_SYNTHETIC_PASS for the controller-owned bounded
+SQLMap injection capability with functional detection proven from **SQLMap-originated** traffic
+(vulnerable → CONFIRMED, patched → no differential, adjudicated by an independent verifier over
+SQLMap's own captured requests + controller ground truth, zero verifier SQLi traffic, tool claim
+audit-only), and for the httpx `http_probe`/`api_http_probe` and katana `web_crawl` recon
+capabilities, on an internal no-egress range with proven cleanup. `ffuf`/`dnsx`/`tlsx` remain
+NOT_EVALUATED; LIVE_PROVIDER remains NOT_EVALUATED; the packs are not marked container-ready."*
+
+**Exclusions.** No provider/model call; no `.env.gateway`; no public/company target; `ffuf`/`dnsx`/
+`tlsx` not container-accepted; no verdict from any tool's own output alone; verifier unchanged in
+logic and never fed substitute traffic; offline authority model unchanged.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 
