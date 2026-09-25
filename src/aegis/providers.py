@@ -169,6 +169,13 @@ _AGENT_TASK_DIRECTIVE: dict[str, str] = {
         "decides. Never author a shell command, source patch, container command or control "
         "request, and never confirm, PASS, set severity or change the target, mode or scope"
     ),
+    "GENERATE_ASSESSMENT_REPORT": (
+        "draft the professional assessment report prose (executive summary, methodology and "
+        "limitations, per-finding remediation and per-chain causal explanations) from the "
+        "adjudicated facts you are given. Never confirm a finding, decide PASS/FAIL, set or change "
+        "severity, invent evidence or a causal link, hide a cleanup failure, turn UNKNOWN or a "
+        "hypothesis into CONFIRMED/PASS, present offline evidence as live, or expose any credential"
+    ),
 }
 
 

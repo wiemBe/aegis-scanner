@@ -958,6 +958,70 @@ per run, fail-closed. **Stop condition.** Do not start 2.6 in the same commit.
 
 ---
 
+### Phase 2.6 — REPORT_AGENT and Professional Reporting — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** A real, persisted REPORT_AGENT job architecture on top of the existing evidence-preserving
+reporting model, where the controller stays authoritative for every adjudicated fact and the model
+only drafts prose.
+
+**Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/report_agent.py`
++ a strict gateway contract in `contracts.py`:
+- **Real persisted addressable REPORT_AGENT jobs** (`ReportAgentJob`, `agentjob://REPORT_AGENT/…`,
+  QUEUED→CLAIMED→CLOSED with a transition trail) via `ReportAgentQueue`; a new `AgentRole.REPORT_AGENT`
+  and `GENERATE_ASSESSMENT_REPORT` task type wired into the gateway (`_AGENT_OUTPUTS`/
+  `_AGENT_TASK_ROLES`) and a provider directive.
+- **Typed request/response contracts**: the controller-owned `ReportSource` (authoritative facts) and
+  the strict **prose-only** `AssessmentReportDraftOutput` (executive summary, methodology/limitations,
+  per-finding remediation, per-chain explanation, readability notes; `unconfirmed=True`,
+  `authoritative=False`). The model has NO verdict/severity/state/causal/usage/provenance/credential
+  field — those are structurally unrepresentable.
+- **Controller-created sanitized projection** (`build_report_request_projection` +
+  `assert_report_projection_clean`): ids, titles, typed states/severity as data-to-explain, scope refs
+  and evidence digests only — never raw evidence, credential values or answer keys.
+- **Deterministic controller assembly** (`assemble_report`): every adjudicated fact comes from the
+  source; model prose is used only where it maps to a controller-owned id and is token-clean —
+  otherwise it is discarded and the controller fallback (registered/gate/generic remediation, neutral
+  summary) is used (`model_prose_downgraded`). Unverified chains are never explained as verified;
+  cleanup failures are never hidden; UNKNOWN usage is preserved; provenance is copied verbatim (no
+  offline→live conversion).
+- **Stable report identity + versions** (`report_id`, `version`, `content_sha256`, immutable at
+  `(report_id, version)`), report **status** (`COMPLETE`/`PARTIAL`/`INCOMPLETE`) and provenance.
+- **Deterministic exports**: JSON, Markdown and HTML (HTML-escaped, injection-inert) +
+  `write_report_bundle` with a SHA256SUMS manifest. **PDF export: `NOT_EVALUATED`** (no PDF dependency
+  is declared — omitted rather than faked).
+- **API / service access:** read-only `GET /api/console/reports` and
+  `GET /api/console/reports/{report_id}/v/{version}`.
+- Offline harness `scripts/phase_2_6_report_agent.py` runs the full job lifecycle + assembly + exports
+  and emits the typed verdict.
+
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable; reporting is
+provider- and container-free by construction).
+
+**Live-provider status — `NOT_EVALUATED`.** No live report model was called.
+
+**Tests (`tests/test_phase_2_6.py`, 24 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Injection-shaped evidence (inert); secret/credential exclusion; status/severity immutability;
+causal-link immutability (unverified chain not confirmed); provenance + historical-artifact labelling;
+cleanup-failure visibility; partial reports; malformed model output (fallback); deterministic exports;
+stable report identity + version immutability; no false live claims; gateway wiring; job lifecycle.
+`ruff` + `mypy` clean on the changed files (the one pre-existing `main.py` E501/S608 finding is
+unrelated).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for the typed REPORT_AGENT job architecture and
+controller-authoritative professional reporting pipeline."*
+
+**Exclusions.** The report agent never confirms, decides PASS/FAIL, sets severity, invents evidence
+or causal links, hides cleanup failures, converts UNKNOWN/HYPOTHESIS→CONFIRMED/PASS, converts
+offline→live, or exposes credentials. No live report model; no PDF export this sprint.
+
+**Remaining live acceptance requirements.** One authorized live `GENERATE_ASSESSMENT_REPORT` call via
+the isolated gateway (bounded calls/tokens, exact `deepseek-v4-pro`), proving the same discard/
+downgrade guarantees over real model prose, with provider usage recorded (no `UNKNOWN`).
+
+**Budget.** Offline (zero provider calls). A future live report call declares ≤ a small call/token
+ceiling, fail-closed. **Stop condition.** Do not start 2.7 in the same commit.
+
+---
+
 ### Phase 3.0 — Operator-Governed Autonomous Campaign — `PLANNED`
 **Goal.** End-to-end, operator-controlled campaign: recon → reporting.
 

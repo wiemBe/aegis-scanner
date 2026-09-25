@@ -25,6 +25,9 @@ class AgentRole(StrEnum):
     CHAIN_AGENT = "CHAIN_AGENT"
     RECON_AGENT = "RECON_AGENT"
     CLOUD_BOUNDARY_AGENT = "CLOUD_BOUNDARY_AGENT"
+    # Phase 2.6: the Report Agent drafts prose (summary/explanation/remediation/organization) for a
+    # controller-owned sanitized report projection. It never confirms, scores or sets a verdict.
+    REPORT_AGENT = "REPORT_AGENT"
 
 
 class AgentRunState(StrEnum):
@@ -962,6 +965,61 @@ class AdversaryRemediationRecommendationOutput(StrictModel):
     unconfirmed: Literal[True] = True
 
 
+# --- Phase 2.6 controlled REPORT_AGENT gateway output contract (server-selected) -----------------
+#
+# The strict schema the gateway derives for the REPORT_AGENT ``GENERATE_ASSESSMENT_REPORT`` task.
+# It is PROSE-ONLY: the model may draft an executive summary, a methodology/limitations note, a
+# per-finding remediation and per-chain causal explanations keyed by the controller-owned ids, plus
+# optional readability notes. There is NO field through which it can emit a verdict, PASS/CONFIRMED/
+# FAIL, a severity, a state, a causal-link truth, provider/tool usage, a credential value, or "live"
+# evidence provenance — those come only from the controller. Prose keyed to an id the controller
+# does not own is discarded on assembly; a remediation the controller has a registered value for
+# overrides the draft. ``unconfirmed`` is fixed True and ``authoritative`` is fixed False so the
+# schema itself
+# restates that the report agent is never authoritative for any adjudicated fact.
+
+
+class ReportFindingRemediationDraft(StrictModel):
+    """A per-finding remediation DRAFT keyed to a controller-owned finding id. Prose only."""
+
+    finding_id: str = Field(min_length=3, max_length=120)
+    remediation_text: str = Field(min_length=3, max_length=1200)
+
+
+class ReportChainExplanationDraft(StrictModel):
+    """A per-chain causal EXPLANATION draft keyed to a controller-owned chain id. Prose only.
+
+    ``causal_link_explanation`` explains an ALREADY-verified chain; it never asserts a new causal
+    link (the controller owns causal truth) and cannot change whether the chain is verified.
+    """
+
+    chain_id: str = Field(min_length=3, max_length=120)
+    causal_link_explanation: str = Field(min_length=3, max_length=1200)
+
+
+class AssessmentReportDraftOutput(StrictModel):
+    """GENERATE_ASSESSMENT_REPORT (REPORT_AGENT): prose-only report draft, never authoritative.
+
+    The model organizes and explains adjudicated facts it is GIVEN; it cannot confirm a finding,
+    decide PASS/FAIL, change severity, invent evidence or causal links, hide cleanup failures,
+    convert UNKNOWN/HYPOTHESIS into PASS/CONFIRMED, convert offline evidence into live evidence, or
+    expose credentials — none of those are representable here. The controller re-derives every
+    authoritative fact and discards/downgrades any unsupported claim in the prose.
+    """
+
+    executive_summary: str = Field(min_length=3, max_length=2000)
+    methodology_and_limitations: str = Field(min_length=3, max_length=2000)
+    finding_remediations: list[ReportFindingRemediationDraft] = Field(
+        default_factory=list, max_length=64
+    )
+    chain_explanations: list[ReportChainExplanationDraft] = Field(
+        default_factory=list, max_length=32
+    )
+    readability_notes: str = Field(default="", max_length=1000)
+    unconfirmed: Literal[True] = True
+    authoritative: Literal[False] = False
+
+
 class ModelUsage(StrictModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
@@ -981,6 +1039,7 @@ class AgentGatewayRequest(StrictModel):
         "CHAIN_AGENT",
         "RECON_AGENT",
         "CLOUD_BOUNDARY_AGENT",
+        "REPORT_AGENT",
     ]
     task_type: Literal[
         "PLAN_SURFACE",
@@ -1010,6 +1069,8 @@ class AgentGatewayRequest(StrictModel):
         "SUBMIT_ADVERSARY_FOR_VERIFICATION",
         # Phase 2.3 controlled adaptive-retest / remediation-recommendation task type.
         "RECOMMEND_ADVERSARY_REMEDIATION",
+        # Phase 2.6 controlled REPORT_AGENT professional-report drafting task type (prose-only).
+        "GENERATE_ASSESSMENT_REPORT",
     ]
     context: dict[str, Any]
     max_output_tokens: int = Field(ge=64, le=8192)

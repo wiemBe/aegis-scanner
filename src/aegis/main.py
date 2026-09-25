@@ -28,6 +28,7 @@ from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
 from aegis.multi_agent.benchmark import BenchmarkResultStore
+from aegis.multi_agent.report_agent import ReportAgentQueue
 from aegis.multi_agent.runtime import console_projection as multi_agent_projection
 from aegis.multi_agent.staging import (
     EnvironmentTier,
@@ -92,6 +93,8 @@ multi_agent_store = MultiAgentStore(settings.database_path)
 benchmark_store = BenchmarkResultStore(settings.database_path)
 # Phase 2.5 controller-owned authenticated staging-progression ledger (read-only surface).
 staging_ledger = StagingLedger(settings.database_path)
+# Phase 2.6 controller-authoritative REPORT_AGENT job queue + report store (read-only surface).
+report_agent_queue = ReportAgentQueue(settings.database_path)
 # Controller-owned operator target inventory (Phase 1.9.5). Persists onboarded company targets;
 # the browser never holds authority over scope.
 target_store = TargetInventoryStore(settings.database_path)
@@ -139,6 +142,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     multi_agent_store.initialize()
     benchmark_store.initialize()
     staging_ledger.initialize()
+    report_agent_queue.initialize()
     target_store.initialize()
     yield
 
@@ -386,6 +390,40 @@ async def console_staging_events(campaign_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail="Staging campaign not found")
     events = staging_ledger.events(campaign_id)
     return {"items": [event.model_dump(mode="json") for event in events]}
+
+
+@app.get("/api/console/reports")
+async def console_reports(
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, object]:
+    """Read-only projection of controller-authoritative assessment reports (Phase 2.6)."""
+
+    reports = report_agent_queue.list_reports(limit)
+    return {
+        "items": [
+            {
+                "report_id": report.report_id,
+                "version": report.version,
+                "campaign_id": report.campaign_id,
+                "status": report.status,
+                "report_uri": report.report_uri,
+                "content_sha256": report.content_sha256,
+                "live_report_agent_status": report.live_report_agent_status,
+            }
+            for report in reports
+        ],
+        "live_report_agent_status": "NOT_EVALUATED",
+    }
+
+
+@app.get("/api/console/reports/{report_id}/v/{version}")
+async def console_report(report_id: str, version: int) -> dict[str, object]:
+    if not re.fullmatch(r"rpt-[a-f0-9]{16}", report_id) or version < 1:
+        raise HTTPException(status_code=404, detail="Report not found")
+    report = report_agent_queue.get_report(report_id, version)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report.model_dump(mode="json")
 
 
 class EmergencyStopRequest(BaseModel):
