@@ -42,7 +42,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 from aegis.container_acceptance.contracts import CleanupProof
@@ -113,6 +113,29 @@ _HARDENING = (
 )
 
 RangeBackendKind = Literal["IN_PROCESS_DOUBLE", "CONTAINERIZED_SYNTHETIC"]
+
+
+@runtime_checkable
+class ModelBoundary(Protocol):
+    """The synchronous model-boundary surface the campaign drives.
+
+    Both the deterministic :class:`Phase29ModelDouble` (dry run) and the isolated live gateway
+    adapter (armed ``--execute-live``) satisfy it. The campaign reads ``name`` / ``reported_models``
+    / ``attempts`` when building the record and never depends on which implementation is bound.
+    """
+
+    name: str
+    reported_models: list[str]
+    attempts: list[dict[str, Any]]
+
+    def generate(
+        self,
+        role: AgentRole,
+        task_type: str,
+        context: dict[str, Any],
+        *,
+        max_output_tokens: int | None = None,
+    ) -> ModelResult: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -511,7 +534,7 @@ class ConsolidatedOpsCampaign:
     containerized: bool = False
     campaign_id: str = field(default_factory=fresh_campaign_id)
     run_epoch: int = RUN_EPOCH
-    model: Phase29ModelDouble = field(default_factory=Phase29ModelDouble)
+    model: ModelBoundary = field(default_factory=Phase29ModelDouble)
     budget: CampaignProviderBudget = field(init=False)
     asm: OpsDetectionControlLifecycle = field(init=False)
     container: ContainerOpsRange | None = None
@@ -538,7 +561,17 @@ class ConsolidatedOpsCampaign:
 
         estimated_input = estimate_input_tokens(context)
         reservation = self.budget.reserve(task_type, estimated_input, PER_CALL_OUTPUT_CEILING)
-        result = self.model.generate(role, task_type, context)
+        try:
+            result = self.model.generate(role, task_type, context)
+        except Exception as exc:
+            # A live-gateway rejection / invalid output / identity mismatch. Settle the reserved
+            # slot with the provider-reported usage when the gateway supplied it, else UNKNOWN
+            # (input/output = None), so the budget never assumes zero. The exception then halts the
+            # campaign BEFORE the next provider call — there is no retry, repair or fallback here.
+            provider_input = getattr(exc, "provider_input", None)
+            provider_output = getattr(exc, "provider_output", None)
+            self.budget.record_actual(reservation, provider_input, provider_output)
+            raise
         self.budget.record_actual(
             reservation, result.usage.input_tokens, result.usage.output_tokens
         )
@@ -1155,14 +1188,24 @@ def build_phase_2_9_checks(
     guard_enforced: bool,
     artifact_manifest_verified: bool | str = NOT_EVALUATED,
     report_outputs_persisted: bool | str = NOT_EVALUATED,
+    live: bool = False,
 ) -> dict[str, bool | str]:
     """Compute the typed Phase 2.9 acceptance checks from one campaign record.
 
     A check that a provider-free dry run cannot evaluate stays ``NOT_EVALUATED`` — never coerced to
-    ``False`` or conveniently ``True``.
+    ``False`` or conveniently ``True``. When ``live=True`` the two provider-only checks
+    (``exact_model_identity`` / ``live_provider_budget_enforced``) become observed booleans from the
+    isolated live gateway run instead of ``NOT_EVALUATED``.
     """
 
     containerized = record["range_backend"] == "CONTAINERIZED_SYNTHETIC"
+    snap = record["budget"]["snapshot"]
+    live_identity_ok: bool | str = (
+        (record["model"]["reported_models"] == [CANONICAL_MODEL]) if live else NOT_EVALUATED
+    )
+    live_budget_ok: bool | str = (
+        bool(snap["within_ceilings"] and snap["usage_complete"]) if live else NOT_EVALUATED
+    )
     jobs = record["jobs"]
     verifier = record["verifier"]
     remediation = record["remediation"]
@@ -1189,7 +1232,7 @@ def build_phase_2_9_checks(
         "simulated_model_identity_reported": (
             record["model"]["reported_models"] == [CANONICAL_MODEL]
         ),
-        "exact_model_identity": NOT_EVALUATED,
+        "exact_model_identity": live_identity_ok,
         "fresh_assessment_created": (
             record["assessment_id"].startswith("asmt-")
             and record["campaign_id"].startswith("phase-2.9-consolidated-")
@@ -1267,7 +1310,7 @@ def build_phase_2_9_checks(
         "simulated_token_ceiling_enforced": (
             token_enforced and budget["snapshot"]["tokens_recorded"] <= MAX_TOTAL_TOKENS
         ),
-        "live_provider_budget_enforced": NOT_EVALUATED,
+        "live_provider_budget_enforced": live_budget_ok,
         "no_public_egress": (
             (
                 str(record["cleanup"]["egress_blocked_proof"]).startswith("EGRESS_BLOCKED")
@@ -1376,28 +1419,47 @@ def build_typed_verdicts(
     }
 
 
-def build_evidence_accounting(record: dict[str, Any]) -> dict[str, Any]:
+def build_evidence_accounting(record: dict[str, Any], *, live: bool = False) -> dict[str, Any]:
     """Split deterministic-gateway (simulated) accounting from provider accounting — honestly.
 
-    The five model calls and their token totals are produced by the deterministic gateway double, so
-    they are reported as *simulated* usage. No provider was called, so provider usage, the exact
+    For the default dry run the five model calls and their token totals are produced by the
+    deterministic gateway double, so they are reported as *simulated* usage; provider usage, exact
     served-model identity and the live-provider budget claim are all ``NOT_EVALUATED`` — never
     presented as provider usage and never coerced to zero-as-if-measured.
+
+    For an armed live run (``live=True``) the same budget snapshot is *provider* accounting: the
+    call/token totals are what the isolated gateway reported, the exact served-model identity is the
+    observed fact (``deepseek-v4-pro``), and the live-provider budget claim reflects whether every
+    reserved call settled within the ceilings with complete usage. It records observed evidence; it
+    is not a LIVE-GO claim.
     """
 
     snap = record["budget"]["snapshot"]
+    identity_reported = record["model"]["reported_models"] == [CANONICAL_MODEL]
+    if not live:
+        return {
+            "gateway_mode": "DETERMINISTIC_DOUBLE",
+            "model_boundary": record["provenance"]["model_boundary"],
+            "simulated_model_calls": snap["calls_recorded"],
+            "simulated_usage_tokens": snap["tokens_recorded"],
+            "simulated_model_identity_reported": identity_reported,
+            "provider_calls": 0,
+            "provider_usage_tokens": NOT_EVALUATED,
+            "exact_model_identity": NOT_EVALUATED,
+            "live_provider_budget_enforced": NOT_EVALUATED,
+        }
     return {
-        "gateway_mode": "DETERMINISTIC_DOUBLE",
+        "gateway_mode": "ISOLATED_LIVE_GATEWAY",
         "model_boundary": record["provenance"]["model_boundary"],
-        "simulated_model_calls": snap["calls_recorded"],
-        "simulated_usage_tokens": snap["tokens_recorded"],
-        "simulated_model_identity_reported": (
-            record["model"]["reported_models"] == [CANONICAL_MODEL]
+        "simulated_model_calls": 0,
+        "simulated_usage_tokens": 0,
+        "simulated_model_identity_reported": NOT_EVALUATED,
+        "provider_calls": snap["calls_recorded"],
+        "provider_usage_tokens": snap["tokens_recorded"],
+        "exact_model_identity": identity_reported,
+        "live_provider_budget_enforced": bool(
+            snap["within_ceilings"] and snap["usage_complete"]
         ),
-        "provider_calls": 0,
-        "provider_usage_tokens": NOT_EVALUATED,
-        "exact_model_identity": NOT_EVALUATED,
-        "live_provider_budget_enforced": NOT_EVALUATED,
     }
 
 

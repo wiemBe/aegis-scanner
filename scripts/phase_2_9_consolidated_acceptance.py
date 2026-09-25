@@ -17,9 +17,13 @@ Three modes:
   stays ``NOT_EVALUATED``.
 * ``--execute-live`` — the LIVE path. It arms ONLY with an explicit ``--authorization-ref`` and the
   EXACT ``--max-provider-calls 5`` / ``--max-total-tokens 15000`` caps; otherwise it returns the
-  typed ``LIVE_AUTHORIZATION_REQUIRED`` / ``INVALID_LIVE_BUDGET`` BEFORE any side effect. Even once
-  armed, this build does not execute a paid campaign: the paid run is a separate, explicitly
-  authorized invocation (this file ships the provider-free dry run and the safety guard).
+  typed ``LIVE_AUTHORIZATION_REQUIRED`` / ``INVALID_LIVE_BUDGET`` BEFORE any side effect. Once armed
+  it verifies (existence only) that ``.env.gateway`` is present, then runs ONE isolated campaign
+  via :func:`aegis.multi_agent.phase_2_9_live_gateway.run_live_campaign`: a uniquely-named DeepSeek
+  gateway stack (key confined to ``llm-gateway``), the five typed model calls executed from the
+  control-plane side over bounded stdin JSON, the same fail-closed :class:`CampaignProviderBudget`,
+  and unconditional teardown of both stacks. It observes and records the live evidence but never
+  claims LIVE GO — the top-line provider status stays ``NOT_EVALUATED`` pending human adjudication.
 """
 
 from __future__ import annotations
@@ -201,11 +205,18 @@ def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
 
 
 def _run_live(args: argparse.Namespace) -> int:
-    """The live path: arm from the exact flags BEFORE any side effect, then fail closed here.
+    """The live path: arm from the exact flags BEFORE any side effect, then run the campaign.
 
-    Arming validates intent + non-secret authorization + exact caps. This build does NOT execute a
-    paid campaign; a real run is a separate, explicitly authorized invocation that swaps the model
-    double for the isolated live gateway. Nothing below loads a secret or starts a container.
+    Ordering is strict and fail-closed:
+
+    1. The pure guard validates explicit intent + a non-secret authorization ref + the EXACT
+       5-call / 15,000-token caps. A missing/secret-shaped/different value returns the typed refusal
+       here, BEFORE ``.env.gateway`` is loaded, any Docker stack starts, any job is created, any
+       target state changes or any provider call begins.
+    2. Only once armed do we check (existence only) that the gateway configuration is present. If it
+       is missing we fail closed with a typed blocker and still start nothing.
+    3. The isolated live campaign then runs against the uniquely-named DeepSeek gateway stack, with
+       the provider key confined to ``llm-gateway`` and both stacks torn down unconditionally.
     """
 
     from aegis.multi_agent.consolidated_campaign import live_guard
@@ -221,22 +232,35 @@ def _run_live(args: argparse.Namespace) -> int:
     except LiveSafetyError as exc:
         _print({"phase": "2.9", "armed": False, "error_code": exc.code, "detail": exc.detail})
         return 2
-    _print(
-        {
-            "phase": "2.9",
-            "armed": True,
-            "authorization_ref": armed.authorization_ref,
-            "max_provider_calls": armed.max_provider_calls,
-            "max_total_tokens": armed.max_total_tokens,
-            "status": "LIVE_RUN_REQUIRES_SEPARATE_AUTHORIZED_INVOCATION",
-            "detail": (
-                "The guard armed, but this build ships the provider-free dry run only. Executing a "
-                "paid campaign is a separate, explicitly authorized step; no secret was loaded, no "
-                "container started and no provider called."
-            ),
-        }
+
+    # Existence-only gateway configuration gate (the value is never read here; compose mounts it
+    # into the llm-gateway service alone). This runs only AFTER a successful arm.
+    if not Path(".env.gateway").exists():
+        _print(
+            {
+                "phase": "2.9",
+                "armed": True,
+                "status": "LIVE_BLOCKED_MISSING_GATEWAY_CONFIGURATION",
+                "detail": (
+                    "Armed, but .env.gateway is absent in this working tree; no stack was started "
+                    "and no provider was called."
+                ),
+            }
+        )
+        return 4
+
+    # Lazy import so the inert default / dry-run paths never touch the live module or docker.
+    from aegis.multi_agent.phase_2_9_live_gateway import run_live_campaign
+
+    started = datetime.now(UTC)
+    stamp = started.strftime("%Y%m%dT%H%M%SZ")
+    out_root = Path("artifacts") / f"phase-2.9-live-{stamp}"
+    acceptance = run_live_campaign(
+        authorization_ref=armed.authorization_ref,
+        out_root=out_root,
     )
-    return 3
+    _print(acceptance)
+    return 0 if acceptance.get("status") == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION" else 5
 
 
 def main(argv: list[str] | None = None) -> int:
