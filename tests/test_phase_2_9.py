@@ -464,8 +464,31 @@ def test_no_raw_sentinel_in_worker_evidence(offline_record: dict) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _range_image_buildable() -> bool:
+    """True if the egress-free range image is already built or its vendored wheels are present.
+
+    The build installs pinned wheels with ``--no-index`` from ``deploy/range/wheels`` (gitignored,
+    populated by ``make vendor-range-wheels``). In a wheel-empty checkout (e.g. a fresh clone or a
+    ``git archive`` export) the image cannot be built, so this containerized test SKIPS rather than
+    hard-failing on an incomplete build context.
+    """
+
+    from aegis.container_acceptance.docker_cli import image_id
+    from aegis.multi_agent.consolidated_campaign import RANGE_IMAGE_TAG
+
+    if image_id(RANGE_IMAGE_TAG) is not None:
+        return True
+    wheels = Path(__file__).resolve().parent.parent / "deploy" / "range" / "wheels"
+    return wheels.is_dir() and any(wheels.glob("*.whl"))
+
+
 @pytest.mark.skipif(not daemon_available(), reason="docker daemon unavailable")
 def test_containerized_dry_run_passes_and_cleans_up(tmp_path: Path) -> None:
+    if not _range_image_buildable():
+        pytest.skip(
+            "egress-free range image not built and wheels not vendored "
+            "(run `make vendor-range-wheels && make range-image`)"
+        )
     campaign = ConsolidatedOpsCampaign(base_dir=tmp_path / "c", containerized=True)
     record = campaign.run()
     assert record["range_backend"] == "CONTAINERIZED_SYNTHETIC"
