@@ -145,6 +145,11 @@ class SqlmapProfile:
     dbms_banner: bool = False
     canary_read: bool = False
     synthetic_range_only: bool = False
+    # Controller-owned HARD runtime ceilings for a containerized run. ``max_requests`` is the max
+    # HTTP request count the SQLMap process may emit; ``max_duration_seconds`` the wall-clock cap.
+    # Neither is representable on the model-facing ``SqlmapPlan`` (strict ``extra="forbid"``), so
+    # the model can select only a profile id and can never widen a ceiling.
+    max_duration_seconds: int = 120
 
 
 SQLMAP_PROFILES: dict[str, SqlmapProfile] = {
@@ -178,7 +183,8 @@ SQLMAP_PROFILES: dict[str, SqlmapProfile] = {
         profile_id="sqlmap_sqli_detect_boolean_v1",
         environment=EnvironmentTier.SYNTHETIC_RANGE,
         technique="B", level=3, risk=2, threads=1,
-        per_request_timeout_ms=8_000, retries=1, max_requests=600, max_output_bytes=262_144,
+        per_request_timeout_ms=8_000, retries=1, max_requests=800, max_output_bytes=262_144,
+        max_duration_seconds=180, synthetic_range_only=True,
     ),
 }
 

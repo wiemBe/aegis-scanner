@@ -13,6 +13,7 @@ the SQLMap functional evidence and are never fed to the functional verifier. SQL
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,10 +22,11 @@ from uuid import uuid4
 from aegis.container_acceptance.contracts import (
     ContainerAcceptanceError,
     ContainerRunResult,
+    SqlmapBudgetOutcome,
     SqlmapTrafficEvidence,
 )
 from aegis.container_acceptance.network import InternalRange
-from aegis.container_acceptance.runner import run_tool
+from aegis.container_acceptance.sqlmap_budget import run_sqlmap_with_budget
 from aegis.container_acceptance.sqlmap_traffic import normalize_sqlmap_traffic
 from aegis.multi_agent.sqlmap_capability import SqlmapInjectionJob, sanitize_sqlmap_output
 
@@ -58,36 +60,59 @@ class SqlmapWorkerOutput:
     run_result: ContainerRunResult
     tool_reported_injectable: bool
     control_counts: dict[str, tuple[int, int]]  # name -> (status, row_count)
+    budget: SqlmapBudgetOutcome
 
 
 class SqlmapContainerWorker:
-    """Runs the controller-rendered SQLMap job in a container and normalizes its own traffic."""
+    """Runs the controller-rendered SQLMap job in a container and normalizes its own traffic.
 
-    def __init__(self, job: SqlmapInjectionJob, range_: InternalRange) -> None:
+    Execution is under the controller-owned hard request/duration budget: the SQLMap process is
+    killed deterministically if it reaches ``max_http_requests`` or ``max_duration_seconds``."""
+
+    def __init__(
+        self,
+        job: SqlmapInjectionJob,
+        range_: InternalRange,
+        *,
+        max_http_requests: int,
+        max_duration_seconds: int,
+    ) -> None:
         self._job = job
         self._range = range_
+        self._max_http_requests = max_http_requests
+        self._max_duration_seconds = max_duration_seconds
 
     def run(self) -> SqlmapWorkerOutput:
         exec_id = f"sqlx-{uuid4().hex[:16]}"
-        volume = self._range.create_output_volume(exec_id)
         started_at = datetime.now(UTC).isoformat()
-        raw = run_tool(
-            image_reference=self._job.image_ref,
+        budgeted = run_sqlmap_with_budget(
+            self._range,
+            image_ref=self._job.image_ref,
             argv=self._job.argv,
-            network=self._range.network,
-            label=self._range.label,
-            output_limit_bytes=self._job.max_output_bytes,
-            timeout_seconds=max(60, self._job.per_request_timeout_ms // 1000 * 12),
-            volumes=((volume, "/out"),),
+            exec_id=exec_id,
+            max_http_requests=self._max_http_requests,
+            max_duration_seconds=self._max_duration_seconds,
         )
         finished_at = datetime.now(UTC).isoformat()
         # Route SQLMap's real stdout through the preserved production sanitizer (bound + redact).
         sanitize_sqlmap_output(
-            raw.stdout.encode("utf-8", "replace"), max_bytes=self._job.max_output_bytes
+            budgeted.stdout.encode("utf-8", "replace"), max_bytes=self._job.max_output_bytes
         )
-        injectable, _printed = parse_injectable_claim(raw.stdout)
+        injectable, _printed = parse_injectable_claim(budgeted.stdout)
 
-        traffic_text = self._range.read_volume_file(volume, "/out/traffic.txt")
+        combined = budgeted.stdout.encode("utf-8", "replace")
+        run_result = ContainerRunResult(
+            image_reference=self._job.image_ref,
+            argv_sha256=hashlib.sha256("\x00".join(self._job.argv).encode()).hexdigest(),
+            exit_code=budgeted.exit_code,
+            timed_out=budgeted.outcome.stop_reason.value == "DURATION_CEILING",
+            duration_ms=round(budgeted.outcome.elapsed_seconds * 1000),
+            stdout_digest=hashlib.sha256(combined).hexdigest(),
+            output_bytes=len(combined),
+            output_truncated=len(combined) > self._job.max_output_bytes,
+        )
+
+        traffic_text = budgeted.traffic_text
         if not traffic_text.strip():
             raise ContainerAcceptanceError("SQLMAP_TRAFFIC_NOT_CAPTURED")
         evidence = normalize_sqlmap_traffic(
@@ -111,7 +136,8 @@ class SqlmapContainerWorker:
         }
         return SqlmapWorkerOutput(
             traffic_evidence=evidence,
-            run_result=raw.result,
+            run_result=run_result,
             tool_reported_injectable=injectable,
             control_counts=control_counts,
+            budget=budgeted.outcome,
         )

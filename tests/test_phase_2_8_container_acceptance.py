@@ -11,11 +11,13 @@ from __future__ import annotations
 import pytest
 
 from aegis.container_acceptance.contracts import (
+    BudgetStopReason,
     CleanupProof,
     ContainerAcceptanceError,
+    SqlmapBudgetOutcome,
     assert_arms_fresh,
 )
-from aegis.container_acceptance.docker_cli import daemon_available, docker
+from aegis.container_acceptance.docker_cli import daemon_available, docker, image_id
 from aegis.container_acceptance.images import (
     PINNED_IMAGES,
     UnpinnedImageError,
@@ -321,6 +323,85 @@ def test_negative_stale_evidence_reuse_rejected() -> None:
     assert_arms_fresh(["run-A", "run-A"], "run-A")  # fresh: ok
     with pytest.raises(ContainerAcceptanceError):
         assert_arms_fresh(["run-A", "run-STALE"], "run-A")
+
+
+# --------------------------------------------------------------------------- request budget
+
+
+def test_budget_outcome_typed() -> None:
+    stop = SqlmapBudgetOutcome(
+        max_http_requests=5, max_duration_seconds=60, observed_requests=6, elapsed_seconds=1.2,
+        stop_reason=BudgetStopReason.REQUEST_CEILING, container_terminated=True,
+        container_removed=True,
+    )
+    assert stop.budget_stop is True
+    ok = SqlmapBudgetOutcome(
+        max_http_requests=800, max_duration_seconds=180, observed_requests=58, elapsed_seconds=3.4,
+        stop_reason=BudgetStopReason.COMPLETED, container_terminated=False, container_removed=True,
+    )
+    assert ok.budget_stop is False
+
+
+def test_sqlmap_profile_ceilings_controller_owned_and_model_blind() -> None:
+    from pydantic import ValidationError
+
+    from aegis.multi_agent.sqlmap_capability import SQLMAP_PROFILES
+
+    profile = SQLMAP_PROFILES["sqlmap_sqli_detect_boolean_v1"]
+    assert profile.max_requests > 0 and profile.max_duration_seconds > 0
+    assert profile.synthetic_range_only is True  # container detect profile is synthetic-only
+    # The model-facing plan is strict: it cannot carry or widen a budget ceiling.
+    with pytest.raises(ValidationError):
+        SqlmapPlan(
+            capability_id=SQLMAP_CAPABILITY_ID, profile_id="sqlmap_sqli_detect_boolean_v1",
+            target_ref="range-shop", route="/api/products", parameter="q",
+            max_http_requests=999999,  # type: ignore[call-arg]
+        )
+
+
+@needs_docker
+def test_negative_budget_stop_terminates_child_and_cleans_up() -> None:
+    """An intentionally low request ceiling must terminate the SQLMap child and clean up."""
+
+    from aegis.container_acceptance.network import InternalRange
+    from aegis.container_acceptance.sqlmap_budget import run_sqlmap_with_budget
+
+    range_id = image_id("aegis-range-phase28:2.8.0")
+    sqlmap_id = image_id("aegis-sqlmap-runner:2.8.0")
+    if range_id is None or sqlmap_id is None:
+        pytest.skip("range/sqlmap images not built")
+
+    pinned = SqlmapToolImage(
+        tool="sqlmap", image="aegis-sqlmap-runner", tag="2.8.0", version="1.10.9",
+        image_digest=sqlmap_id, digest_pinned=True,
+    )
+    range_ = InternalRange(range_image_ref=range_id)
+    try:
+        range_.create()
+        range_.set_arm("vulnerable")
+        job = build_sqlmap_job(
+            SqlmapPlan(
+                capability_id=SQLMAP_CAPABILITY_ID, profile_id="sqlmap_sqli_detect_boolean_v1",
+                target_ref="range-shop", route="/api/products", parameter="q",
+            ),
+            image=pinned, seed_value="Notebook", capture_dir="/out",
+        )
+        budgeted = run_sqlmap_with_budget(
+            range_, image_ref=job.image_ref, argv=job.argv, exec_id="sqlx-budgettest01",
+            max_http_requests=5, max_duration_seconds=60,
+        )
+        assert budgeted.outcome.stop_reason is BudgetStopReason.REQUEST_CEILING
+        assert budgeted.outcome.budget_stop is True
+        assert budgeted.outcome.observed_requests >= 5
+        assert budgeted.outcome.container_terminated is True
+        assert budgeted.outcome.container_removed is True
+        # The child container is gone immediately after the budgeted run.
+        ps = docker("ps", "-aq", "--filter", "name=aegis-p28-sqlmap-sqlx-budgettest01", timeout=20)
+        assert ps.stdout.strip() == ""
+    finally:
+        range_.cleanup()
+    proof = range_.leftover_proof(was_internal=True)
+    assert proof.clean is True  # zero leftover containers, volumes and networks
 
 
 # --------------------------------------------------------------------------- helper coverage

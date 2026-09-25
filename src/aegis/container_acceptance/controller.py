@@ -41,7 +41,9 @@ from aegis.multi_agent.recon_capabilities import (
 )
 from aegis.multi_agent.sqlmap_capability import (
     SQLMAP_CAPABILITY_ID,
+    SQLMAP_PROFILES,
     SqlmapPlan,
+    SqlmapProfileId,
     SqlmapToolImage,
     assert_container_pinned,
     build_sqlmap_job,
@@ -51,6 +53,7 @@ from aegis_range.verifier import RangeVerifier
 # The shop's fixed synthetic ground truth (controller-owned, not read back from the tool).
 SEEDED_TOTAL = 3
 CONTROL_SELECTIVE_COUNT = 1
+SQLMAP_PROFILE_ID: SqlmapProfileId = "sqlmap_sqli_detect_boolean_v1"
 
 RANGE_TAG = "aegis-range-phase28:2.8.0"
 SQLMAP_TAG = "aegis-sqlmap-runner:2.8.0"
@@ -144,9 +147,10 @@ class Phase28Controller:
             control_selective_count=CONTROL_SELECTIVE_COUNT,
             expected_injectable=(arm == "vulnerable"),
         )
+        profile = SQLMAP_PROFILES[SQLMAP_PROFILE_ID]
         plan = SqlmapPlan(
             capability_id=SQLMAP_CAPABILITY_ID,
-            profile_id="sqlmap_sqli_detect_boolean_v1",
+            profile_id=SQLMAP_PROFILE_ID,
             target_ref="range-shop",
             route="/api/products",
             parameter="q",
@@ -154,7 +158,11 @@ class Phase28Controller:
         job = build_sqlmap_job(
             plan, image=self._sqlmap_image, seed_value=SQLMAP_SEED_VALUE, capture_dir="/out"
         )
-        worker = SqlmapContainerWorker(job, range_)
+        worker = SqlmapContainerWorker(
+            job, range_,
+            max_http_requests=profile.max_requests,
+            max_duration_seconds=profile.max_duration_seconds,
+        )
         output = worker.run()
         evidence = output.traffic_evidence
 
@@ -165,6 +173,11 @@ class Phase28Controller:
             evidence.as_verifier_input(),
             seeded_total=ground_truth.seeded_total,
             control_selective_count=ground_truth.control_selective_count,
+        )
+        # A budget stop means the run was terminated before it could produce sufficient evidence:
+        # the functional verdict is neither CONFIRMED nor PASS.
+        functional_status = (
+            "BUDGET_STOP" if output.budget.budget_stop else functional.status.value
         )
         # Separate scenario control: the OR-style probe just corroborates the fixture's own state.
         control = verifier.adjudicate_sqli_offline(
@@ -207,12 +220,13 @@ class Phase28Controller:
             control_row_count=evidence.control_row_count,
             injected_max_row_count=evidence.injected_max_row_count,
             injected_min_row_count=evidence.injected_min_row_count,
-            verifier_status=functional.status.value,
+            verifier_status=functional_status,
             verifier_sent_injection_traffic=verifier_sent,
             verifier_used_sqlmap_worker_evidence=True,
             normalized_evidence_sha256=normalized_sha,
             control_scenario_status=control.status.value,
             control_probe_is_separate=True,
+            budget=output.budget,
         )
 
     # ---- recon smokes -------------------------------------------------------------------------- #
@@ -317,6 +331,7 @@ class Phase28Controller:
             and checks["controller_controls_separate_from_sqlmap_evidence"]
             and checks["verifier_used_sqlmap_worker_evidence"]
             and checks["verifier_sent_no_injection_traffic"]
+            and checks["sqlmap_within_request_budget"]
             and bool(vuln and patched and vuln.digest_pinned and patched.digest_pinned)
         )
         if functional_proven:
@@ -385,6 +400,12 @@ class Phase28Controller:
         no_injection_traffic = bool(both) and all(
             not a.verifier_sent_injection_traffic for a in both
         )
+        # Both arms ran within their controller-owned hard ceilings (no BUDGET_STOP), and the
+        # observed request count never exceeded the ceiling.
+        within_budget = bool(both) and all(
+            not a.budget.budget_stop and a.budget.observed_requests <= a.budget.max_http_requests
+            for a in both
+        )
         # The scenario itself (via the SEPARATE OR-style control probe) is genuinely vuln/patched.
         scenario_confirmed = (
             vuln is not None
@@ -399,9 +420,10 @@ class Phase28Controller:
             "controller_controls_separate_from_sqlmap_evidence": controls_separate,
             "verifier_used_sqlmap_worker_evidence": used_sqlmap_evidence,
             "verifier_sent_no_injection_traffic": no_injection_traffic,
+            "sqlmap_within_request_budget": within_budget,
             "vulnerable_sqlmap_functional_detection_proven": vuln is not None
             and vuln.verifier_status == "CONFIRMED",
             "patched_sqlmap_false_positive_absent": patched is not None
-            and patched.verifier_status != "CONFIRMED",
+            and patched.verifier_status not in ("CONFIRMED", "BUDGET_STOP"),
             "synthetic_sqli_scenario_confirmed": scenario_confirmed,
         }

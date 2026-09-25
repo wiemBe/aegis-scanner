@@ -1335,10 +1335,34 @@ change made is the minimum needed for the pinned SQLMap to detect the fixture ho
 Narrow SQLMap checks (all `true`): `sqlmap_process_executed`, `sqlmap_requests_observed`,
 `sqlmap_request_evidence_correlated`, `controller_controls_separate_from_sqlmap_evidence`,
 `verifier_used_sqlmap_worker_evidence`, `verifier_sent_no_injection_traffic`,
-`vulnerable_sqlmap_functional_detection_proven`, `patched_sqlmap_false_positive_absent`; plus
-`synthetic_sqli_scenario_confirmed`. Had the pinned SQLMap failed to detect honestly, the status
-would fall back to **`CONTAINER_EXECUTED_INCONCLUSIVE`** — the verifier is never modified and no
-substitute traffic is added to force a PASS.
+`sqlmap_within_request_budget`, `vulnerable_sqlmap_functional_detection_proven`,
+`patched_sqlmap_false_positive_absent`; plus `synthetic_sqli_scenario_confirmed`. Had the pinned
+SQLMap failed to detect honestly, the status would fall back to
+**`CONTAINER_EXECUTED_INCONCLUSIVE`** — the verifier is never modified and no substitute traffic is
+added to force a PASS.
+
+**SQLMap request/duration budget (hard, controller-owned).** The pinned SQLMap has no flag to cap
+its total HTTP request count, so the ceiling is enforced from outside by
+`aegis.container_acceptance.sqlmap_budget`: the SQLMap process runs in a **named, detached**
+container and a controller watchdog counts the requests SQLMap itself logs (`HTTP request [#…]` in
+its `-t` traffic file for this run's volume) and the wall-clock elapsed; on reaching either ceiling
+it **`docker kill`**s the child deterministically (`threads=1`, so the count advances one request at
+a time and the stop is prompt) and records a typed `BUDGET_STOP`.
+- Configured maximum request count: **800** (`SqlmapProfile.max_requests`).
+- Configured duration ceiling: **180 s** (`SqlmapProfile.max_duration_seconds`).
+- Vulnerable observed request count: **58**; patched observed request count: **491** — both well
+  under the ceiling, `stop_reason=COMPLETED`, `sqlmap_within_request_budget=true`.
+- Enforcement component: the controller watchdog in `sqlmap_budget.run_sqlmap_with_budget` (runtime
+  request counting tied to the SQLMap process/job via its own traffic log + `docker kill`).
+- Typed behaviour at the ceiling: `BudgetStopReason.REQUEST_CEILING` / `DURATION_CEILING`; the child
+  container is killed and removed; the arm's `verifier_status` becomes `BUDGET_STOP`, so a
+  budget-stopped run is **never** counted as CONFIRMED/PASS (functional detection is not proven).
+- The model cannot change either ceiling: both live on the frozen controller-owned `SqlmapProfile`;
+  the model-facing `SqlmapPlan` is strict `extra="forbid"` and carries no budget field (a test
+  asserts a plan with `max_http_requests` raises `ValidationError`). The container detect profile is
+  also `synthetic_range_only=True`.
+- Negative container test: an intentionally low ceiling (`max_http_requests=5`) terminates the
+  SQLMap child at `REQUEST_CEILING`, removes the container, and leaves zero leftovers.
 
 **Item C — httpx bounded response-size fix.** The 2.8-A httpx render used two flags absent from the
 pinned httpx **v1.6.9** (`-max-response-size` and `-disable-redirects`), so the tool never ran.
@@ -1369,11 +1393,12 @@ and `tlsx` remain `NOT_EVALUATED`, and only the specific capabilities above are 
 TEST-NET-1 `192.0.2.1:443` → `EGRESS_BLOCKED:OSError`). Per-run SQLMap output volumes are labelled
 and removed on teardown; the leftover proof shows **0 stack containers / 0 volumes / 0 networks**.
 
-**6 — Negative container tests (9, all green).** target escape (out-of-scope `target_ref`),
-cross-origin redirect (rendered `redirect_policy=DENY`, no follow flag), unknown profile, forbidden
-argv (denylist), output-size limit (truncation), timeout (enforced kill), cleanup failure
-(leftover → not clean), unpinned image (`require_pinned`/`assert_container_pinned` fail closed), stale
-evidence reuse (per-run nonce mismatch rejected).
+**6 — Negative container tests (9 + budget-stop, all green).** target escape (out-of-scope
+`target_ref`), cross-origin redirect (rendered `redirect_policy=DENY`, no follow flag), unknown
+profile, forbidden argv (denylist), output-size limit (truncation), timeout (enforced kill), cleanup
+failure (leftover → not clean), unpinned image (`require_pinned`/`assert_container_pinned` fail
+closed), stale evidence reuse (per-run nonce mismatch rejected), and **budget stop** (a low request
+ceiling terminates the SQLMap child and cleans up).
 
 **7 — Evidence categories kept separate.** The 2.8-A/2.8-B unit/offline results remain `OFFLINE_PASS`;
 `aegis.injection.sqlmap`, `aegis.recon.http_probe`, `aegis.recon.api_http_probe` and

@@ -35,8 +35,32 @@ class ToolAcceptanceStatus(StrEnum):
     NOT_EVALUATED = "NOT_EVALUATED"
 
 
+class BudgetStopReason(StrEnum):
+    """Typed outcome of the controller-owned SQLMap request/duration budget enforcement."""
+
+    COMPLETED = "COMPLETED"  # tool finished within both ceilings
+    REQUEST_CEILING = "REQUEST_CEILING"  # BUDGET_STOP: HTTP-request ceiling reached, process killed
+    DURATION_CEILING = "DURATION_CEILING"  # BUDGET_STOP: wall-clock ceiling reached, process killed
+
+
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class SqlmapBudgetOutcome(_Strict):
+    """The result of a budgeted SQLMap container run under hard controller-owned ceilings."""
+
+    max_http_requests: int = Field(ge=1)
+    max_duration_seconds: int = Field(ge=1)
+    observed_requests: int = Field(ge=0)
+    elapsed_seconds: float = Field(ge=0)
+    stop_reason: BudgetStopReason
+    container_terminated: bool
+    container_removed: bool
+
+    @property
+    def budget_stop(self) -> bool:
+        return self.stop_reason is not BudgetStopReason.COMPLETED
 
 
 class GroundTruth(_Strict):
@@ -160,10 +184,12 @@ class SqlmapArmResult(_Strict):
     control_row_count: int
     injected_max_row_count: int
     injected_min_row_count: int
-    verifier_status: str  # CONFIRMED | PASS | INCOMPLETE (over SQLMap-originated evidence)
+    verifier_status: str  # CONFIRMED | PASS | INCOMPLETE | BUDGET_STOP
     verifier_sent_injection_traffic: bool
     verifier_used_sqlmap_worker_evidence: bool
     normalized_evidence_sha256: str
+    # Controller-owned hard budget enforcement for this arm's SQLMap run.
+    budget: SqlmapBudgetOutcome
     # Controller OR-style probe kept ONLY as a separate scenario control (not a SQLMap functional
     # input); records that the fixture itself is genuinely vulnerable/patched.
     control_scenario_status: str
