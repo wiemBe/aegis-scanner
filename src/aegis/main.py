@@ -33,6 +33,7 @@ from aegis.beast.store import BeastStore
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
+from aegis.multi_agent.benchmark import BenchmarkResultStore
 from aegis.multi_agent.runtime import console_projection as multi_agent_projection
 from aegis.multi_agent.store import MultiAgentStore
 from aegis.operator import (
@@ -80,6 +81,8 @@ templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
 beast_store = BeastStore(settings.database_path)
 multi_agent_store = MultiAgentStore(settings.database_path)
+# Phase 2.4 controller-owned single-agent vs multi-agent benchmark result store (read-only surface).
+benchmark_store = BenchmarkResultStore(settings.database_path)
 # Controller-owned operator target inventory (Phase 1.9.5). Persists onboarded company targets;
 # the browser never holds authority over scope.
 target_store = TargetInventoryStore(settings.database_path)
@@ -125,6 +128,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     store.initialize()
     beast_store.initialize()
     multi_agent_store.initialize()
+    benchmark_store.initialize()
     target_store.initialize()
     yield
 
@@ -305,6 +309,40 @@ async def console_multi_agent_run(run_id: str) -> dict[str, object]:
     if item is None:
         raise HTTPException(status_code=404, detail="Agent run not found")
     return multi_agent_projection(item)
+
+
+@app.get("/api/console/benchmarks")
+async def console_benchmarks(
+    limit: int = Query(default=25, ge=1, le=100),
+) -> dict[str, object]:
+    """Read-only projection of controller-owned single-agent vs multi-agent benchmark pairs.
+
+    Offline sprint: the live single-vs-multi comparison is NOT_EVALUATED, so no architecture is
+    declared superior here. Only raw, controller-owned run-pair references are surfaced.
+    """
+
+    return {
+        "items": [pair.model_dump(mode="json") for pair in benchmark_store.list_pairs(limit)],
+        "live_single_vs_multi_benchmark_status": "NOT_EVALUATED",
+        "superiority_declared": False,
+    }
+
+
+@app.get("/api/console/benchmarks/{pair_id}")
+async def console_benchmark(pair_id: str) -> dict[str, object]:
+    if not re.fullmatch(r"rpair-[a-f0-9]{16}", pair_id):
+        raise HTTPException(status_code=404, detail="Benchmark pair not found")
+    pair = benchmark_store.get_pair(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="Benchmark pair not found")
+    comparison = benchmark_store.get_comparison(pair_id)
+    return {
+        "pair": pair.model_dump(mode="json"),
+        "comparison": comparison.model_dump(mode="json") if comparison else None,
+        "superiority_declared": (
+            bool(comparison.superiority_claim_supported) if comparison else False
+        ),
+    }
 
 
 class EmergencyStopRequest(BaseModel):

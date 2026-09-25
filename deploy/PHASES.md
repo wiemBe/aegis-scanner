@@ -828,18 +828,71 @@ NO-GO.
 
 ---
 
-### Phase 2.4 — Single vs Multi-Agent Benchmark — `PLANNED`
-**Goal.** Measure whether the multi-agent architecture actually helps.
+### Phase 2.4 — Single-Agent vs Multi-Agent Benchmark — `OFFLINE_PASS (live NOT_EVALUATED)`
+**Goal.** A fair, deterministic, controller-owned framework that lines a bounded single-agent run up
+against the existing multi-agent architecture over identical conditions — WITHOUT a fake composite
+"winner" score and WITHOUT declaring one architecture superior absent live comparable runs.
 
-**Acceptance checks (same scenarios, both configs):**
-- Success rate compared.
-- Provider **calls / tokens** compared.
-- Wall-clock **duration** compared.
-- **False-positive rate** and **coverage** compared.
-- A written conclusion stating whether multi-agent is justified by the data.
+**Implemented / offline status — `OFFLINE_PASS`.** New module
+`src/aegis/multi_agent/benchmark.py`:
+- Typed benchmark **modes** `SINGLE_AGENT_BASELINE` / `MULTI_AGENT_DELEGATED`.
+- Immutable, digest-stable **benchmark specification** (`BenchmarkSpec`, `spec_sha256`) fixing the
+  shared fairness contract: same target/application/scenario, same immutable inventory snapshot
+  digest, same registered capabilities, same tool profiles, same ground truth, equivalent budget,
+  same verifier authority, same cleanup requirement.
+- Immutable **run-pair identifier** (`RunPairId`, `benchmarkpair://…`) freezing the spec digest and
+  both run refs at pairing time.
+- **Fairness validator** (`FairnessValidator`) + typed **comparable-run rejection reasons**
+  (`ComparabilityRejection`): scope/application/scenario/inventory/capability/tool-profile/
+  ground-truth/budget/verifier/cleanup mismatch, mode collision, wrong-mode-for-slot, missing run,
+  and the **mode-integrity** rules (a role label is not agent execution): the single-agent baseline
+  must carry **no** downstream delegation hand-off; the multi-agent mode must carry **real persisted
+  delegation** (`agent_jobs ≥ 2` and `handoffs ≥ 1`); both must use the Tool Broker and the
+  independent verifier.
+- Raw, controller-owned **metrics** (`BenchmarkRunMetrics`): verified findings, false/unsupported
+  findings, hypotheses, tool executions, successful/failed tool actions, provider calls,
+  input/output/total tokens, wall-clock, agent jobs, hand-offs, verifier confirmed/pass/incomplete,
+  causal chains, cleanup success, budget violations — every unmeasured value stays `UNKNOWN`, never
+  coerced to `0`, and is listed in `incomplete_measurements`.
+- Deterministic **comparison** (`compare_runs`): a side-by-side per-metric table whose `direction`
+  reports only which side is *lower* (never a winner); `superiority_claim_supported` is fixed
+  **False** offline (and even for a live comparable pair this framework reports evidence
+  sufficiency rather than crowning a winner).
+- Durable **result store** (`BenchmarkResultStore`, SQLite): immutable specs/pairs, per-run
+  conditions+metrics, comparison documents.
+- Deterministic **comparison report** (`render_comparison_markdown`).
+- **API / service access:** read-only `GET /api/console/benchmarks` and
+  `GET /api/console/benchmarks/{pair_id}` (both surface `NOT_EVALUATED` / `superiority_declared=false`).
+- Offline harness `scripts/phase_2_4_benchmark.py` emits the typed verdict
+  (`benchmark_framework_status=OFFLINE_PASS`, `live_single_vs_multi_benchmark_status=NOT_EVALUATED`).
 
-**Budget.** Benchmark-scoped; declare and enforce a combined ceiling before running.
-**Stop condition.** Do not start 2.5.
+**Containerized synthetic status — `NOT_EVALUATED`** (Docker present-but-unusable this sprint; the
+framework is provider- and container-free by construction).
+
+**Live-provider status — `NOT_EVALUATED`.** No paid single-vs-multi campaign was run.
+
+**Tests (`tests/test_phase_2_4.py`, 26 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
+Identical scope/profile enforcement; unequal-budget rejection; different inventory / ground-truth
+rejection; missing usage kept `UNKNOWN`; partial runs; verifier-disagreement comparison; cleanup
+failure surfaced (not hidden); single-vs-multi mode integrity; no superiority declared without live
+comparable runs; offline/live provenance; deterministic report; store round-trip + immutability.
+`ruff` + `mypy` clean on the changed files (the two pre-existing `main.py` ruff/mypy findings are
+unrelated and untouched).
+
+**Exact bounded claim (earned):** *"OFFLINE PASS for a deterministic controller-owned single-agent
+versus multi-agent benchmark framework."*
+
+**Exclusions.** Does **not** claim that either architecture performs better (that requires live
+comparable runs), nor any live/containerized measurement, nor a composite score.
+
+**Remaining live acceptance requirements.** One authorized live single-vs-multi campaign over the
+synthetic range: two comparable runs at `LIVE_PROVIDER` provenance under one immutable spec, real
+provider usage recorded (calls/tokens, no `UNKNOWN`), both runs cleaned up, and a human reviewer
+reading the raw side-by-side rows.
+
+**Budget.** Framework work is offline (zero provider calls). A future live campaign must declare and
+enforce a combined per-run ceiling equal on both sides before running.
+**Stop condition.** Do not start 2.5 in the same commit.
 
 ---
 
