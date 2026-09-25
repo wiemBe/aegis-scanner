@@ -36,6 +36,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import httpx
 
@@ -93,6 +94,28 @@ def _id16(assessment_id: str, label: str) -> str:
 # --------------------------------------------------------------------------- #
 # Deterministic offline network double for the synthetic ops detection-control surface.
 # --------------------------------------------------------------------------- #
+
+
+@runtime_checkable
+class OpsRangeSurface(Protocol):
+    """The controller-owned synthetic-ops surface the lifecycle adapters drive.
+
+    Implemented by the in-process :class:`OpsRangeDouble` (network boundary doubled) and by the
+    Phase 2.9 real-container backend (a genuine ``aegis_range.ops`` container on a no-egress
+    network). Both expose the same controller-owned probe / state / patch-mutation surface so the
+    same real remediation/verifier/report components drive either one without change.
+    """
+
+    mode: str
+    generation: int
+    sentinel_digest: str
+    probe_requests: int
+
+    def probe(self) -> dict[str, dict[str, object]]: ...
+
+    def state_digest(self) -> str: ...
+
+    def apply_patch_mutation(self) -> dict[str, object]: ...
 
 
 @dataclass
@@ -192,13 +215,14 @@ class OpsDetectionControlLifecycle:
 
     base_dir: Path
     run_epoch: int = 7
+    campaign_id: str = CAMPAIGN_ID
     lifecycle: AssessmentLifecycleController = field(init=False)
     remediation: RemediationController = field(init=False)
     remediation_ledger: RemediationLedger = field(init=False)
     queue: AdvSimTaskQueue = field(init=False)
     report_queue: ReportAgentQueue = field(init=False)
     verifier: RangeVerifier = field(init=False)
-    range_double: OpsRangeDouble = field(init=False)
+    range_double: OpsRangeSurface = field(init=False)
     spec: AssessmentSpec = field(init=False)
     # In-process evidence captured during external stages (durable facts live in the real ledgers).
     initial_evidence: dict[str, dict[str, object]] | None = None
@@ -228,7 +252,7 @@ class OpsDetectionControlLifecycle:
 
     @property
     def assessment_id(self) -> str:
-        return "asmt-" + _id16("phase-2.7-integration", "assessment")
+        return "asmt-" + _id16(self.campaign_id, "assessment")
 
     @property
     def loop_id(self) -> str:
@@ -242,7 +266,7 @@ class OpsDetectionControlLifecycle:
         now = datetime.now().astimezone()
         return AssessmentSpec(
             assessment_id=self.assessment_id,
-            campaign_id=CAMPAIGN_ID,
+            campaign_id=self.campaign_id,
             target_ref=TARGET_REF,
             scenario_id=SCENARIO_ID,
             run_epoch=self.run_epoch,
@@ -342,11 +366,11 @@ class OpsDetectionControlLifecycle:
             return StageOutcome(
                 ok=False, produced_epoch=context.run_epoch, detail=f"verifier={result.status.value}"
             )
-        self.remediation_ledger.open_loop(self.loop_id, CAMPAIGN_ID, TARGET_REF, SCENARIO_ID)
+        self.remediation_ledger.open_loop(self.loop_id, self.campaign_id, TARGET_REF, SCENARIO_ID)
         finding = PersistedFinding(
             finding_id=self.finding_id,
             loop_id=self.loop_id,
-            campaign_id=CAMPAIGN_ID,
+            campaign_id=self.campaign_id,
             target_ref=TARGET_REF,
             scenario_id=SCENARIO_ID,
             finding_type="HTTP_DETECTION_CONTROL_BYPASS",
@@ -388,7 +412,7 @@ class OpsDetectionControlLifecycle:
             mutation,
             now=now + timedelta(seconds=1),
             receipt_id="rcpt-" + _id16(self.assessment_id, "receipt"),
-            campaign_id=CAMPAIGN_ID,
+            campaign_id=self.campaign_id,
         )
         return StageOutcome(
             ok=True,
@@ -483,7 +507,7 @@ class OpsDetectionControlLifecycle:
             ),
         )
         return ReportSource(
-            campaign_id=CAMPAIGN_ID,
+            campaign_id=self.campaign_id,
             target_ref=TARGET_REF,
             authorized_scope=(TARGET_REF,),
             findings=(source_finding,),
@@ -513,7 +537,7 @@ class OpsDetectionControlLifecycle:
         projection = build_report_request_projection(source)
         job = ReportAgentJob(
             job_id="rptjob-" + _id16(self.assessment_id, "reportjob"),
-            campaign_id=CAMPAIGN_ID,
+            campaign_id=self.campaign_id,
             report_request_id="rptreq-" + _id16(self.assessment_id, "reportreq"),
             source_projection_sha256=projection_sha256(projection),
         )

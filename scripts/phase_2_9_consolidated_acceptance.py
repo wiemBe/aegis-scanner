@@ -1,0 +1,232 @@
+"""Phase 2.9 — consolidated end-to-end synthetic acceptance runner.
+
+Composes the accepted Phase 2.3 (remediation/retest), Phase 2.6 (REPORT_AGENT) and Phase 2.7
+(assessment lifecycle) capabilities into ONE bounded, controller-governed synthetic assessment
+lifecycle over ``aegis-ops`` and emits the typed per-contract acceptance verdicts + artifact
+manifest. See :mod:`aegis.multi_agent.consolidated_campaign`.
+
+Three modes:
+
+* **default (inert)** — prints the PROPOSED campaign and exits. It loads no secret, starts no
+  container, creates no job, changes no target state and makes no network/provider call.
+* ``--dry-run`` — a PROVIDER-FREE run. Deterministic gateway doubles at the model boundary; real
+  controller/queue/verifier/remediation/report/cleanup. ``--containerized`` (default for dry-run)
+  stands up a real ``aegis_range.ops`` container on an internal no-egress network; ``--in-process``
+  uses the network double. This never loads ``.env.gateway`` and never calls a provider. It may
+  establish ``CONTAINERIZED_SYNTHETIC_PASS`` / ``OFFLINE_INTEGRATION_PASS``; provider/model status
+  stays ``NOT_EVALUATED``.
+* ``--execute-live`` — the LIVE path. It arms ONLY with an explicit ``--authorization-ref`` and the
+  EXACT ``--max-provider-calls 5`` / ``--max-total-tokens 15000`` caps; otherwise it returns the
+  typed ``LIVE_AUTHORIZATION_REQUIRED`` / ``INVALID_LIVE_BUDGET`` BEFORE any side effect. Even once
+  armed, this build does not execute a paid campaign: the paid run is a separate, explicitly
+  authorized invocation (this file ships the provider-free dry run and the safety guard).
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from aegis.multi_agent.live_safety import LiveExecutionRequest, LiveSafetyError
+
+CANONICAL_MODEL = "deepseek-v4-pro"
+NOT_EVALUATED = "NOT_EVALUATED"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute-live", action="store_true", help="arm the live provider path")
+    parser.add_argument("--authorization-ref", default=None, help="non-secret authorization ref")
+    parser.add_argument("--max-provider-calls", type=int, default=None)
+    parser.add_argument("--max-total-tokens", type=int, default=None)
+    parser.add_argument(
+        "--dry-run", action="store_true", help="run the provider-free acceptance campaign"
+    )
+    parser.add_argument(
+        "--in-process", action="store_true",
+        help="dry-run only: use the in-process network double instead of a real container",
+    )
+    parser.add_argument("--json", action="store_true", help="emit the full record as JSON")
+    return parser
+
+
+def _print(obj: Any) -> None:
+    print(json.dumps(obj, indent=2, sort_keys=True))
+
+
+def _containerized_status(containerized: bool, containerized_pass: bool, offline_pass: bool) -> str:
+    """Honest containerized status: only a passing REAL container dry run earns the container pass.
+
+    An in-process dry run never touches a container, so the containerized dimension stays
+    NOT_EVALUATED there (the offline dimension is carried by the implementation status instead);
+    it is never conveniently reported as a container pass.
+    """
+
+    del offline_pass  # the offline dimension is reported via phase_2_9_implementation_status
+    if not containerized:
+        return NOT_EVALUATED
+    return "CONTAINERIZED_SYNTHETIC_PASS" if containerized_pass else "PARTIAL"
+
+
+def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
+    # Imported lazily so the inert default path constructs no ledgers and touches no docker module.
+    from aegis.multi_agent.consolidated_campaign import (
+        ConsolidatedOpsCampaign,
+        build_phase_2_9_checks,
+        build_typed_verdicts,
+        is_live_armed,
+        write_campaign_artifacts,
+    )
+
+    started = datetime.now(UTC)
+    stamp = started.strftime("%Y%m%dT%H%M%SZ")
+    out_root = Path("artifacts") / f"phase-2.9-consolidated-{stamp}"
+    work_dir = out_root / "work"
+    art_dir = out_root / "evidence"
+
+    # Guard self-check: the default request is inert; only the exact flags arm (recorded below).
+    guard_enforced = (
+        not is_live_armed(LiveExecutionRequest())
+        and not is_live_armed(LiveExecutionRequest(execute_live=True))
+        and not is_live_armed(
+            LiveExecutionRequest(
+                execute_live=True, authorization_ref="ops", max_provider_calls=4,
+                max_total_tokens=15000,
+            )
+        )
+        and is_live_armed(
+            LiveExecutionRequest(
+                execute_live=True, authorization_ref="ops-2-9-dry-run-selfcheck",
+                max_provider_calls=5, max_total_tokens=15000,
+            )
+        )
+    )
+
+    campaign = ConsolidatedOpsCampaign(base_dir=work_dir, containerized=containerized)
+    record = campaign.run()
+    artifact_result = write_campaign_artifacts(art_dir, campaign, record)
+    checks = build_phase_2_9_checks(
+        record,
+        guard_enforced=guard_enforced,
+        artifact_manifest_verified=artifact_result["manifest_verified"],
+        report_outputs_persisted=artifact_result["report_outputs_persisted"],
+    )
+    verdicts = build_typed_verdicts(record, checks)
+
+    manifest_ok = bool(artifact_result["manifest_verified"])
+    p29_ok = bool(verdicts["phase_2_9"]["satisfied"])
+    containerized_pass = containerized and p29_ok and manifest_ok
+    offline_pass = p29_ok and manifest_ok
+    acceptance = {
+        "phase": "2.9",
+        "evidence_type": (
+            "CONTAINERIZED_SYNTHETIC" if containerized else "OFFLINE_INTEGRATION"
+        ),
+        "range_backend": record["range_backend"],
+        "model": CANONICAL_MODEL,
+        "model_boundary": record["provenance"]["model_boundary"],
+        "checks": checks,
+        "typed_verdicts": verdicts,
+        "phase_2_9_implementation_status": "OFFLINE_PASS" if offline_pass else "PARTIAL",
+        "phase_2_9_containerized_status": _containerized_status(
+            containerized, containerized_pass, offline_pass
+        ),
+        "phase_2_9_live_provider_status": NOT_EVALUATED,
+        "phase_2_3_live_status": NOT_EVALUATED,
+        "phase_2_6_live_status": NOT_EVALUATED,
+        "phase_2_7_live_status": NOT_EVALUATED,
+        "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
+        "record": record,
+    }
+    (art_dir / "acceptance_verdict.json").write_text(
+        json.dumps(acceptance, indent=2, sort_keys=True) + "\n"
+    )
+    # Append the verdict file's digest to the manifest (the evidence set was verified before it).
+    verdict_digest = hashlib.sha256((art_dir / "acceptance_verdict.json").read_bytes()).hexdigest()
+    with (art_dir / "SHA256SUMS").open("a") as fh:
+        fh.write(f"{verdict_digest}  acceptance_verdict.json\n")
+
+    summary = {
+        "phase": "2.9",
+        "evidence_dir": str(art_dir),
+        "range_backend": record["range_backend"],
+        "final_state": record["lifecycle"]["final_state"],
+        "provider_calls": record["budget"]["snapshot"]["calls_recorded"],
+        "provider_tokens": record["budget"]["snapshot"]["tokens_recorded"],
+        "false_checks": sorted(k for k, v in checks.items() if v is False),
+        "not_evaluated_checks": sorted(k for k, v in checks.items() if v == NOT_EVALUATED),
+        "phase_2_9_implementation_status": acceptance["phase_2_9_implementation_status"],
+        "phase_2_9_containerized_status": acceptance["phase_2_9_containerized_status"],
+        "phase_2_9_live_provider_status": NOT_EVALUATED,
+        "typed_verdicts_satisfied": {
+            k: verdicts[k]["satisfied"]
+            for k in ("phase_2_3", "phase_2_6", "phase_2_7", "phase_2_9")
+        },
+    }
+    _print(acceptance if emit_json else summary)
+    return 0 if verdicts["phase_2_9"]["satisfied"] and artifact_result["manifest_verified"] else 1
+
+
+def _run_live(args: argparse.Namespace) -> int:
+    """The live path: arm from the exact flags BEFORE any side effect, then fail closed here.
+
+    Arming validates intent + non-secret authorization + exact caps. This build does NOT execute a
+    paid campaign; a real run is a separate, explicitly authorized invocation that swaps the model
+    double for the isolated live gateway. Nothing below loads a secret or starts a container.
+    """
+
+    from aegis.multi_agent.consolidated_campaign import live_guard
+
+    request = LiveExecutionRequest(
+        execute_live=True,
+        authorization_ref=args.authorization_ref,
+        max_provider_calls=args.max_provider_calls,
+        max_total_tokens=args.max_total_tokens,
+    )
+    try:
+        armed = live_guard().evaluate(request)
+    except LiveSafetyError as exc:
+        _print({"phase": "2.9", "armed": False, "error_code": exc.code, "detail": exc.detail})
+        return 2
+    _print(
+        {
+            "phase": "2.9",
+            "armed": True,
+            "authorization_ref": armed.authorization_ref,
+            "max_provider_calls": armed.max_provider_calls,
+            "max_total_tokens": armed.max_total_tokens,
+            "status": "LIVE_RUN_REQUIRES_SEPARATE_AUTHORIZED_INVOCATION",
+            "detail": (
+                "The guard armed, but this build ships the provider-free dry run only. Executing a "
+                "paid campaign is a separate, explicitly authorized step; no secret was loaded, no "
+                "container started and no provider called."
+            ),
+        }
+    )
+    return 3
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+
+    if args.execute_live:
+        return _run_live(args)
+
+    if args.dry_run:
+        # Default the dry run to the real-container backend unless --in-process is requested.
+        return _run_dry_run(containerized=not args.in_process, emit_json=args.json)
+
+    # Inert default: print the proposed campaign, no side effect of any kind.
+    from aegis.multi_agent.consolidated_campaign import proposed_campaign
+
+    _print(proposed_campaign())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
