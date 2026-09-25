@@ -71,6 +71,27 @@ class LifecycleFreshnessError(RuntimeError):
     """Stale evidence or a historical-artifact reuse attempt. Fails closed."""
 
 
+class LifecycleUnreconciledEffect(RuntimeError):
+    """A prior external stage attempt was dispatched but its outcome is UNKNOWN (a crash may have
+    occurred after the external effect but before the response was persisted locally).
+
+    The controller NEVER silently reissues such an attempt on resume: replaying an external
+    provider/tool call could double-execute a side effect (and, for a paid call, double-charge a
+    provider). Fails closed until the effect is either reconciled at the broker (see
+    :meth:`AssessmentLifecycleController.run_external_stage`) or a NEW attempt is explicitly
+    authorized by the controller/operator.
+    """
+
+
+class LifecycleReissueNotAuthorized(RuntimeError):
+    """A new external attempt was requested after an UNKNOWN effect without the required explicit
+    explicit controller decision (and, for a paid call, new operator authorization). Fails closed.
+
+    Distinct from :class:`LifecycleUnreconciledEffect`: the caller acknowledged the unknown effect
+    and asked to try again, but did not supply the authorization a re-attempt requires.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Typed stages + the controller-owned DAG.
 # --------------------------------------------------------------------------- #
@@ -240,6 +261,16 @@ class StageOutcome(StrictModel):
 
 StageExecutor = Callable[[StageContext], StageOutcome]
 
+# An external dispatcher performs the real provider/tool side effect for one attempt and returns its
+# outcome. It receives the stable idempotency key so an idempotency-aware broker can reuse it.
+ExternalDispatcher = Callable[[StageContext, str], StageOutcome]
+
+# A reconciler answers "did the external attempt for this idempotency key already complete?" by
+# querying the broker after a crash. It returns the completed outcome (dedup: no re-execution), or
+# ``None`` when the broker cannot tell (the effect stays UNKNOWN). Only for a broker whose
+# attempt was recorded ``reconcilable=True``.
+ExternalReconciler = Callable[[str], StageOutcome | None]
+
 
 class StageRecord(StrictModel):
     assessment_id: str
@@ -251,6 +282,70 @@ class StageRecord(StrictModel):
     usage: StageUsageDelta = Field(default_factory=StageUsageDelta)
     detail: str = ""
     updated_at: datetime = Field(default_factory=now_utc)
+
+
+# --------------------------------------------------------------------------- #
+# External-effect stage attempts (crash-window semantics for provider/tool dispatch).
+# --------------------------------------------------------------------------- #
+
+
+class AttemptStatus(StrEnum):
+    """The lifecycle of ONE external-effect attempt, persisted around a provider/tool dispatch.
+
+    * ``PREPARED``   — the attempt + idempotency key are recorded, but nothing dispatched yet. A
+      crash here is safe: no external effect went out, so a fresh attempt can supersede it.
+    * ``DISPATCHED`` — the external call was (about to be) sent but no response persisted yet. A
+      crash here leaves the outcome **UNKNOWN**: the side effect may or may not have happened
+      (at-least-once, never exactly-once). It is NEVER auto-reissued on resume.
+    * ``COMPLETED``  — the response was persisted. The external effect happened exactly once and its
+      result is cached; the stage's ``DONE`` record (and its usage accounting) is committed from it.
+    * ``FAILED``     — the executor reported a clean, pre-dispatch failure (no external effect).
+    * ``SUPERSEDED`` — an explicitly-authorized new attempt replaced this one (its UNKNOWN usage is
+      never recovered, so it keeps cumulative usage incomplete).
+    """
+
+    PREPARED = "PREPARED"
+    DISPATCHED = "DISPATCHED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    SUPERSEDED = "SUPERSEDED"
+
+
+# An attempt whose external outcome is unknown on resume (a crash after dispatch, before its
+# was persisted). Such an attempt is never silently reissued.
+_UNKNOWN_OUTCOME_STATUSES: frozenset[AttemptStatus] = frozenset({AttemptStatus.DISPATCHED})
+
+
+class ExternalStageAttempt(StrictModel):
+    """One persisted attempt at an external-effect stage, keyed by a stable idempotency key.
+
+    The idempotency key is the dedup handle a broker that *supports* reconciliation reuses to
+    avoid a second real execution; ``reconcilable`` records whether that broker can be asked
+    "did key K already run?" after a crash. When ``reconcilable`` is False a crash after dispatch is
+    irreducibly UNKNOWN — the effect may have run once already, so the local record must not be used
+    to claim it did *not*.
+    """
+
+    assessment_id: str
+    stage: LifecycleStage
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    attempt_no: int = Field(ge=1)
+    status: AttemptStatus
+    reconcilable: bool = False
+    paid: bool = False
+    dispatched: bool = False
+    response_persisted: bool = False
+    produced_epoch: int | None = None
+    evidence_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    side_effect_token: str = ""
+    usage: StageUsageDelta = Field(default_factory=StageUsageDelta)
+    authorized_by: str = Field(default="", max_length=200)
+    operator_authorization: str = Field(default="", max_length=200)
+    detail: str = Field(default="", max_length=300)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+    def outcome_unknown(self) -> bool:
+        return self.status in _UNKNOWN_OUTCOME_STATUSES
 
 
 class AssessmentSpec(FrozenStrictModel):
@@ -361,6 +456,17 @@ class LifecycleLedger:
                     summary TEXT NOT NULL,
                     at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS lifecycle_attempts (
+                    assessment_id TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    attempt_no INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (assessment_id, stage, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_lifecycle_attempts_stage
+                    ON lifecycle_attempts(assessment_id, stage, attempt_no);
                 """
             )
 
@@ -461,6 +567,59 @@ class LifecycleLedger:
                 "SELECT payload FROM lifecycle_stages WHERE assessment_id = ?", (assessment_id,)
             ).fetchall()
         return [StageRecord.model_validate_json(row["payload"]) for row in rows]
+
+    # --------------------------- external attempts --------------------------- #
+
+    def upsert_attempt(self, attempt: ExternalStageAttempt) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO lifecycle_attempts(
+                    assessment_id, stage, idempotency_key, attempt_no, status, payload
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(assessment_id, stage, idempotency_key) DO UPDATE SET
+                    attempt_no = excluded.attempt_no,
+                    status = excluded.status,
+                    payload = excluded.payload""",
+                (
+                    attempt.assessment_id,
+                    attempt.stage.value,
+                    attempt.idempotency_key,
+                    attempt.attempt_no,
+                    attempt.status.value,
+                    attempt.model_dump_json(),
+                ),
+            )
+
+    def get_attempt(
+        self, assessment_id: str, stage: LifecycleStage, idempotency_key: str
+    ) -> ExternalStageAttempt | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT payload FROM lifecycle_attempts
+                WHERE assessment_id = ? AND stage = ? AND idempotency_key = ?""",
+                (assessment_id, stage.value, idempotency_key),
+            ).fetchone()
+        return ExternalStageAttempt.model_validate_json(row["payload"]) if row else None
+
+    def attempts_for(
+        self, assessment_id: str, stage: LifecycleStage
+    ) -> list[ExternalStageAttempt]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT payload FROM lifecycle_attempts
+                WHERE assessment_id = ? AND stage = ? ORDER BY attempt_no""",
+                (assessment_id, stage.value),
+            ).fetchall()
+        return [ExternalStageAttempt.model_validate_json(row["payload"]) for row in rows]
+
+    def all_attempts(self, assessment_id: str) -> list[ExternalStageAttempt]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT payload FROM lifecycle_attempts
+                WHERE assessment_id = ? ORDER BY stage, attempt_no""",
+                (assessment_id,),
+            ).fetchall()
+        return [ExternalStageAttempt.model_validate_json(row["payload"]) for row in rows]
 
     def upsert_cleanup(self, assessment_id: str, entry: CleanupLedgerEntry) -> None:
         with self._connect() as connection:
@@ -698,6 +857,273 @@ class AssessmentLifecycleController:
         )
         return record
 
+    # ------------------------- external-effect stages ------------------------- #
+
+    def run_external_stage(
+        self,
+        assessment_id: str,
+        stage: LifecycleStage,
+        dispatcher: ExternalDispatcher,
+        *,
+        idempotency_key: str,
+        now: datetime,
+        reconcilable: bool = False,
+        reconcile: ExternalReconciler | None = None,
+        paid: bool = False,
+        new_attempt_authorization: str = "",
+        operator_authorization: str = "",
+    ) -> StageRecord:
+        """Execute one external-effect stage (provider/tool dispatch) with crash-safe idempotency.
+
+        The ordering below is the whole point: a *stable stage-attempt record + idempotency key are
+        persisted BEFORE anything is dispatched*, then the attempt is marked ``DISPATCHED`` (still
+        before the response is persisted), then the response is persisted and the attempt
+        ``COMPLETED``, and only then the stage's ``DONE`` record — carrying the usage accounting —
+        committed. Each boundary is a crash window with defined resume behaviour:
+
+        * crash before dispatch (``PREPARED``): no external effect went out — a fresh attempt safely
+          supersedes it, no authorization required;
+        * crash after dispatch, before response persisted (``DISPATCHED``): the outcome is UNKNOWN —
+          the side effect may have happened once already (at-least-once, *never* exactly-once);
+          NEVER silently reissued. If the broker is ``reconcilable`` a ``reconcile`` callback may
+          adopt the already-completed result (deduplicating execution); otherwise the effect stays
+          UNKNOWN and a NEW attempt requires an explicit ``new_attempt_authorization`` (and, for a
+          ``paid`` call, ``operator_authorization``);
+        * crash after response persisted, before completion (``COMPLETED`` attempt, no ``DONE``
+          stage): the response is replayed from the local record — NO re-dispatch — and the usage
+          accounting is committed exactly once here;
+        * resume with a ``DONE`` stage / completed key: idempotent — no re-execution, no re-charge.
+
+        This separates **duplicate-accounting prevention** (usage is committed atomically with the
+        ``DONE`` record, so a crash before ``DONE`` charges nothing) from **duplicate-execution
+        prevention** (the idempotency key + a reconcilable broker, or an explicit human re-authorize
+        decision). The two are not the same and this method never conflates them.
+        """
+
+        spec = self._preflight(assessment_id, stage, now)
+
+        existing = self.ledger.get_stage(assessment_id, stage)
+        if existing is not None and existing.status is StageStatus.DONE:
+            return existing  # idempotent resume: no re-execution, no re-charge
+
+        upstream_evidence = self._upstream_evidence(assessment_id, stage, spec)
+        attempts = self.ledger.attempts_for(assessment_id, stage)
+
+        # Resume: a COMPLETED attempt whose stage DONE record was never committed (a crash after the
+        # response was persisted but before stage completion). Replay from the local record — the
+        # external effect already happened exactly once — and commit the accounting now.
+        completed = next((a for a in attempts if a.status is AttemptStatus.COMPLETED), None)
+        if completed is not None:
+            self.ledger.audit(
+                assessment_id, "CONTROLLER", f"STAGE_{stage.value}_RESUMED",
+                f"replayed completed attempt {completed.idempotency_key} (no re-dispatch)",
+            )
+            return self._commit_stage_done(assessment_id, stage, spec, completed)
+
+        # An UNKNOWN (dispatched-but-unconfirmed) attempt exists: fail closed unless reconciled or a
+        # new attempt is explicitly authorized.
+        unknown = [a for a in attempts if a.outcome_unknown()]
+        if unknown:
+            latest_unknown = unknown[-1]
+            if reconcilable and latest_unknown.reconcilable and reconcile is not None:
+                reconciled = reconcile(latest_unknown.idempotency_key)
+                if reconciled is not None:
+                    adopted = latest_unknown.model_copy(
+                        update={
+                            "status": AttemptStatus.COMPLETED,
+                            "response_persisted": True,
+                            "produced_epoch": reconciled.produced_epoch,
+                            "evidence_sha256": reconciled.evidence_sha256,
+                            "side_effect_token": reconciled.side_effect_token,
+                            "usage": reconciled.usage,
+                            "detail": "reconciled at broker (idempotency key already completed)",
+                            "updated_at": now_utc(),
+                        }
+                    )
+                    self.ledger.upsert_attempt(adopted)
+                    self.ledger.audit(
+                        assessment_id, "CONTROLLER", f"STAGE_{stage.value}_RECONCILED",
+                        f"broker confirmed idempotency key {latest_unknown.idempotency_key}",
+                    )
+                    return self._commit_stage_done(assessment_id, stage, spec, adopted)
+                # reconcile returned None: the broker cannot confirm — the effect stays UNKNOWN.
+            if not new_attempt_authorization:
+                self.ledger.audit(
+                    assessment_id, "CONTROLLER", f"STAGE_{stage.value}_UNRECONCILED",
+                    f"unknown external effect for key {latest_unknown.idempotency_key}; "
+                    "not auto-reissued",
+                )
+                raise LifecycleUnreconciledEffect(
+                    f"UNRECONCILED_EXTERNAL_EFFECT_{stage.value}:{latest_unknown.idempotency_key}"
+                )
+            if (paid or latest_unknown.paid) and not operator_authorization:
+                raise LifecycleReissueNotAuthorized(
+                    f"PAID_REISSUE_REQUIRES_OPERATOR_AUTHORIZATION_{stage.value}"
+                )
+            # Explicit decision to open a NEW attempt. The abandoned attempt's usage is never
+            # recovered, so it is SUPERSEDED and keeps cumulative usage incomplete (fail-closed).
+            for stale in unknown:
+                self.ledger.upsert_attempt(
+                    stale.model_copy(
+                        update={"status": AttemptStatus.SUPERSEDED, "updated_at": now_utc()}
+                    )
+                )
+            self.ledger.audit(
+                assessment_id, "CONTROLLER", f"STAGE_{stage.value}_REISSUE_AUTHORIZED",
+                f"new attempt authorized_by={new_attempt_authorization[:60]} "
+                f"operator={operator_authorization[:60]}",
+            )
+
+        # A fresh (or authorized-new, or crash-before-dispatch/PREPARED-only) attempt.
+        for prepared in attempts:
+            if prepared.status is AttemptStatus.PREPARED:
+                self.ledger.upsert_attempt(
+                    prepared.model_copy(
+                        update={"status": AttemptStatus.SUPERSEDED, "updated_at": now_utc()}
+                    )
+                )
+        attempt_no = len(attempts) + 1
+        effective_key = idempotency_key if attempt_no == 1 else f"{idempotency_key}#{attempt_no}"
+
+        # 1) Persist the attempt + idempotency key BEFORE any dispatch.
+        attempt = ExternalStageAttempt(
+            assessment_id=assessment_id,
+            stage=stage,
+            idempotency_key=effective_key,
+            attempt_no=attempt_no,
+            status=AttemptStatus.PREPARED,
+            reconcilable=reconcilable,
+            paid=paid,
+            authorized_by=new_attempt_authorization,
+            operator_authorization=operator_authorization,
+        )
+        self.ledger.upsert_attempt(attempt)
+        self.ledger.set_state(assessment_id, _STAGE_ACTIVE_STATE[stage], f"running {stage.value}")
+        self.ledger.upsert_stage(
+            StageRecord(assessment_id=assessment_id, stage=stage, status=StageStatus.RUNNING)
+        )
+
+        # 2) Mark DISPATCHED (persisted) — the external effect is about to go out. A crash between
+        #    here and the response persist leaves the outcome UNKNOWN.
+        attempt = attempt.model_copy(
+            update={"status": AttemptStatus.DISPATCHED, "dispatched": True, "updated_at": now_utc()}
+        )
+        self.ledger.upsert_attempt(attempt)
+        self.ledger.audit(
+            assessment_id, "CONTROLLER", f"STAGE_{stage.value}_DISPATCHED", effective_key
+        )
+
+        context = StageContext(
+            assessment_id=assessment_id,
+            run_epoch=spec.run_epoch,
+            stage=stage,
+            upstream_evidence=upstream_evidence,
+        )
+        outcome = dispatcher(context, effective_key)  # the external effect (may raise = crash)
+
+        if not outcome.ok:
+            # A clean executor-reported failure. Record FAILED (no completed effect to replay).
+            self.ledger.upsert_attempt(
+                attempt.model_copy(
+                    update={
+                        "status": AttemptStatus.FAILED,
+                        "detail": (outcome.detail or "stage failed")[:300],
+                        "updated_at": now_utc(),
+                    }
+                )
+            )
+            self._fail_stage(assessment_id, stage, outcome.detail or "stage failed")
+            return StageRecord(
+                assessment_id=assessment_id,
+                stage=stage,
+                status=StageStatus.FAILED,
+                produced_epoch=outcome.produced_epoch,
+                detail=outcome.detail,
+            )
+
+        # 3) Persist the response and mark the attempt COMPLETED (the effect happened exactly once).
+        completed_attempt = attempt.model_copy(
+            update={
+                "status": AttemptStatus.COMPLETED,
+                "response_persisted": True,
+                "produced_epoch": outcome.produced_epoch,
+                "evidence_sha256": outcome.evidence_sha256,
+                "side_effect_token": outcome.side_effect_token,
+                "usage": outcome.usage,
+                "detail": outcome.detail[:300],
+                "updated_at": now_utc(),
+            }
+        )
+        self.ledger.upsert_attempt(completed_attempt)
+
+        # 4) Commit the stage DONE record + usage accounting from the persisted response.
+        return self._commit_stage_done(assessment_id, stage, spec, completed_attempt)
+
+    def _commit_stage_done(
+        self,
+        assessment_id: str,
+        stage: LifecycleStage,
+        spec: AssessmentSpec,
+        attempt: ExternalStageAttempt,
+    ) -> StageRecord:
+        """Commit a stage DONE record + usage accounting from a COMPLETED attempt's response.
+
+        Shared by fresh completion and crash-resume replay, so neither re-dispatches. Freshness
+        and budget are re-validated here; usage is committed atomically with the DONE record.
+        """
+
+        if attempt.produced_epoch != spec.run_epoch:
+            self._fail_stage(assessment_id, stage, "HISTORICAL_ARTIFACT_REUSE")
+            raise LifecycleFreshnessError("HISTORICAL_ARTIFACT_REUSE")
+        if not attempt.usage.is_known():
+            self._fail_stage(assessment_id, stage, "BUDGET_UNVERIFIABLE_UNKNOWN_USAGE")
+            raise LifecycleBudgetError("BUDGET_UNVERIFIABLE_UNKNOWN_USAGE")
+        self._check_budget(assessment_id, spec, attempt.usage, stage)
+        record = StageRecord(
+            assessment_id=assessment_id,
+            stage=stage,
+            status=StageStatus.DONE,
+            produced_epoch=attempt.produced_epoch,
+            evidence_sha256=attempt.evidence_sha256,
+            side_effect_token=attempt.side_effect_token,
+            usage=attempt.usage,
+            detail=attempt.detail,
+        )
+        self.ledger.upsert_stage(record)  # usage committed atomically with DONE
+        self.ledger.audit(
+            assessment_id, "CONTROLLER", f"STAGE_{stage.value}_DONE", attempt.detail or stage.value
+        )
+        return record
+
+    def _upstream_evidence(
+        self, assessment_id: str, stage: LifecycleStage, spec: AssessmentSpec
+    ) -> dict[str, str]:
+        """Collect fresh upstream evidence digests; reject a stale (older-epoch) upstream."""
+
+        upstream_evidence: dict[str, str] = {}
+        for dep in _STAGE_DEPS[stage]:
+            dep_record = self.ledger.get_stage(assessment_id, dep)
+            if dep_record is None:
+                raise LifecycleError(f"STAGE_DEP_MISSING_{dep.value}")
+            if dep in _EVIDENCE_STAGES:
+                if dep_record.produced_epoch != spec.run_epoch:
+                    raise LifecycleFreshnessError(f"STALE_UPSTREAM_EVIDENCE_{dep.value}")
+                if dep_record.evidence_sha256 is not None:
+                    upstream_evidence[dep.value] = dep_record.evidence_sha256
+        return upstream_evidence
+
+    def has_unreconciled_effect(self, assessment_id: str) -> bool:
+        """True if any external attempt is dispatched-but-unconfirmed (UNKNOWN) or was superseded.
+
+        Either keeps cumulative usage incomplete: an UNKNOWN effect never reported its usage, and a
+        superseded attempt's usage was never recovered. The verdict reflects it as usage-incomplete.
+        """
+
+        return any(
+            a.status in (AttemptStatus.DISPATCHED, AttemptStatus.SUPERSEDED)
+            for a in self.ledger.all_attempts(assessment_id)
+        )
+
     def _fail_stage(self, assessment_id: str, stage: LifecycleStage, detail: str) -> None:
         self.ledger.upsert_stage(
             StageRecord(
@@ -811,6 +1237,9 @@ class AssessmentLifecycleController:
             for stage in spec.required_stages
         )
         calls, tokens, tools, usage_complete = self._aggregate_usage(assessment_id)
+        # An UNKNOWN (unreconciled) or superseded external attempt never reported its usage, so
+        # cumulative usage cannot be claimed complete even if every DONE stage's usage is known.
+        usage_complete = usage_complete and not self.has_unreconciled_effect(assessment_id)
         cancelled = self.ledger.cancel_requested(assessment_id)
 
         if not cleanup_entries:

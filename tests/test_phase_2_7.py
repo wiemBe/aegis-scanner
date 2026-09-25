@@ -520,7 +520,9 @@ def test_offline_harness_verdict_passes() -> None:
     harness = _load_harness()
     result = harness.run_offline()
     verdict = result["verdict"]
-    assert verdict["full_assessment_lifecycle_status"] == "OFFLINE_PASS"
+    # Corrected labels: the harness proves the state-machine FRAMEWORK, not full integration.
+    assert verdict["lifecycle_framework_status"] == "OFFLINE_PASS"
+    assert verdict["tool_broker_in_lifecycle_status"] == "NOT_EVALUATED"
     assert verdict["live_full_lifecycle_status"] == "NOT_EVALUATED"
     assert verdict["final_state"] == "COMPLETED"
     assert verdict["passed"] is True

@@ -6,10 +6,16 @@ Composes the prior proven pieces into ONE deterministic synthetic lifecycle over
     create -> authorize -> ready -> EXECUTE -> VERIFY -> REMEDIATE -> RETEST -> REPORT
       -> cleanup compensation -> finalize (COMPLETED)
 
-Every stage is a deterministic executor the controller invokes under lease/budget/freshness/
+Every stage here is a deterministic executor the controller invokes under lease/budget/freshness/
 cancellation guards; the model never advances the workflow state. No provider call, no socket, no
-Docker. Allowed offline claim: "OFFLINE PASS for a bounded, resumable and controller-governed
-synthetic assessment lifecycle."
+Docker.
+
+Scope note (corrected): this harness exercises the controller-owned lifecycle **state-machine
+framework** with deterministic stage stubs — it is NOT proof that the real Lead queue / Tool Broker
+verifier / remediation / report / cleanup components are wired in. Allowed offline claim:
+*"OFFLINE PASS for the controller-owned assessment lifecycle state-machine framework."* The real
+component-integration evidence lives in ``tests/test_phase_2_7_integration.py`` (via
+``aegis.multi_agent.lifecycle_adapters``); full LIVE lifecycle integration stays NOT_EVALUATED.
 """
 
 from __future__ import annotations
@@ -146,9 +152,12 @@ def run_offline() -> dict[str, Any]:
     passed = all(checks.values())
     verdict = {
         "phase": "2.7",
-        "full_assessment_lifecycle_status": "OFFLINE_PASS" if passed else "OFFLINE_FAIL",
+        # Renamed (correction): harness proves the STATE-MACHINE FRAMEWORK, not full integration.
+        "lifecycle_framework_status": "OFFLINE_PASS" if passed else "OFFLINE_FAIL",
+        "real_component_integration_status": "OFFLINE_PASS_SEE_test_phase_2_7_integration",
+        "tool_broker_in_lifecycle_status": "NOT_EVALUATED",
         "live_full_lifecycle_status": "NOT_EVALUATED",
-        "evidence_type": "OFFLINE_INTEGRATION",
+        "evidence_type": "OFFLINE_FRAMEWORK_STATE_MACHINE",
         "checks": checks,
         "final_state": verdict_obj.final_state.value,
         "assurance_summary": verdict_obj.assurance_summary,

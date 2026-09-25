@@ -1022,10 +1022,19 @@ ceiling, fail-closed. **Stop condition.** Do not start 2.7 in the same commit.
 
 ---
 
-### Phase 2.7 — Full Authorized Assessment Lifecycle — `OFFLINE_PASS (live NOT_EVALUATED)`
+### Phase 2.7 — Full Authorized Assessment Lifecycle — `OFFLINE PASS for the controller-owned assessment lifecycle state-machine framework (full live lifecycle integration NOT_EVALUATED)`
 **Goal.** Integrate the prior proven pieces into ONE bounded, resumable, controller-governed
 assessment lifecycle (a typed workflow/DAG), without requiring every vulnerability class in one
 campaign.
+
+> **Correction (follow-up commit after `d33599f`).** The original 2.7 report made two claims it had
+> not earned. (1) It said atomic usage-with-`DONE` persistence prevents "duplicate paid/tool
+> execution" on resume — but that alone does **not** prevent a duplicate *external* effect when a
+> crash occurs after the external call but before the local commit; it only prevents duplicate
+> *accounting*. (2) A typed DAG with stage names is **not** evidence that the existing Lead queue,
+> Tool Broker, verifier, remediation controller, report pipeline and cleanup ledger are actually
+> invoked. Both are corrected below; the earned claim is renamed accordingly and full live lifecycle
+> integration stays `NOT_EVALUATED`.
 
 **Implemented / offline status — `OFFLINE_PASS`.** New module `src/aegis/multi_agent/lifecycle.py`:
 - **Controller-owned typed DAG** (`LifecycleStage`: AUTHORIZE → PREPARE → EXECUTE → VERIFY →
@@ -1035,10 +1044,19 @@ campaign.
   `REMEDIATING`/`RETESTING`/`REPORTING`/`CLEANING_UP`/`COMPLETED`/`PARTIAL`/`FAILED`/`CANCELLED`/
   `CLEANUP_FAILED`) with `assert_state_transition`. **The model can never advance it** — every
   transition is a controller method; stage executors only report a typed `StageOutcome`.
-- **Idempotency + resume**: usage is committed atomically with a stage's `DONE` record, so an
-  interruption before `DONE` records no usage (safe re-execution) and re-running a `DONE` stage
-  returns the cached record — **no duplicate paid/tool execution** on resume (a fresh controller on
-  the same DB resumes exactly).
+- **Crash-safe external-effect idempotency (corrected).** `run_external_stage` now persists a stable
+  **stage-attempt record + idempotency key BEFORE any dispatch**, then marks it `DISPATCHED`
+  (pre-response), then `COMPLETED` (post-response), and only then commits the stage `DONE` record with
+  its usage. This **distinguishes duplicate-accounting prevention** (usage committed atomically with
+  `DONE`; a crash before `DONE` charges nothing) **from duplicate-execution prevention** (the
+  idempotency key + a reconcilable broker, or an explicit re-authorize decision). A crash after
+  dispatch but before the response is persisted leaves the outcome **UNKNOWN** — the side effect may
+  have happened once already (**at-least-once, never exactly-once**); it is **never auto-reissued** on
+  resume. Deduplication of the *execution* is only guaranteed when the broker supports idempotent
+  reconciliation; otherwise a new attempt requires an explicit controller decision (and, for a paid
+  call, new operator authorization), and the abandoned attempt keeps cumulative usage `UNKNOWN`.
+  Re-running a `DONE` stage (or a completed idempotency key) is a no-op (no re-execution, no
+  re-charge); a fresh controller on the same DB resumes exactly.
 - **Evidence lineage + freshness**: a stage outcome must carry the current `run_epoch`; a stale
   upstream (older epoch) and a **historical-artifact reuse** (any other epoch) both fail closed.
 - **Per-stage and cumulative budgets** with usage aggregation; an `UNKNOWN` provider usage fails
@@ -1058,16 +1076,48 @@ provider- and container-free by construction — stage executors are determinist
 
 **Live-provider status — `NOT_EVALUATED`.** No paid full-lifecycle campaign was run.
 
-**Tests (`tests/test_phase_2_7.py`, 22 offline, all green; STATIC + UNIT + OFFLINE_INTEGRATION).**
-Successful offline lifecycle; restart/resume; duplicate-stage prevention; stale-evidence rejection;
-historical-artifact rejection; failed verifier; report failure → PARTIAL; per-stage + cumulative
-budget stop; UNKNOWN-usage fail-closed (no zero default); lease expiry; cancellation; cleanup
-compensation; cleanup failure → CLEANUP_FAILED; partial result; no COMPLETED when a required stage is
-incomplete; authorization/capability gates; immutable audit trail. `ruff` + `mypy` clean on the
-changed files (the one pre-existing `main.py` E501/S608 finding is unrelated).
+**Framework tests (`tests/test_phase_2_7.py`, 22 offline, all green; STATIC + UNIT +
+OFFLINE_INTEGRATION).** Successful offline lifecycle; restart/resume; duplicate-stage prevention;
+stale-evidence rejection; historical-artifact rejection; failed verifier; report failure → PARTIAL;
+per-stage + cumulative budget stop; UNKNOWN-usage fail-closed (no zero default); lease expiry;
+cancellation; cleanup compensation; cleanup failure → CLEANUP_FAILED; partial result; no COMPLETED
+when a required stage is incomplete; authorization/capability gates; immutable audit trail.
 
-**Exact bounded claim (earned):** *"OFFLINE PASS for a bounded, resumable and controller-governed
-synthetic assessment lifecycle."*
+**Crash-window tests (new — `tests/test_phase_2_7_crash.py`, 8 offline).** Crash before dispatch
+(safe re-attempt); crash after dispatch before response persist (outcome UNKNOWN, not auto-reissued);
+crash after response persist before stage completion (local replay, **no re-dispatch**); resume with
+a completed idempotency key (idempotent); resume with an unreconciled effect (fails closed);
+prevention of silent provider/tool replay; broker reconciliation dedup where available; usage
+remaining UNKNOWN where reconciliation is unavailable.
+
+**Real lifecycle-integration test (new — `tests/test_phase_2_7_integration.py`, 1 offline; adapters in
+`src/aegis/multi_agent/lifecycle_adapters.py`).** Drives a bounded ops detection-control lifecycle
+through the **actual existing controller/storage interfaces** — persisted Lead/agent queue
+(`AdvSimTaskQueue`), independent verifier (`RangeVerifier.adjudicate_detection_control_bypass_offline`,
+which alone owns CONFIRMED/PASS), remediation controller + immutable patch receipt
+(`RemediationController`), fresh post-patch retest + causal-break proof, Phase 2.6 report job path +
+assembler (`ReportAgentQueue` + `assemble_report`), and the cleanup ledger — with **only the
+network boundary** replaced by a deterministic in-process `httpx.MockTransport` double. It proves
+stable lineage (assessment → jobs → evidence → finding → remediation → retest → report), stage
+ordering, verifier ownership of CONFIRMED/PASS, fresh evidence after remediation, report truth
+inherited from records, cleanup completion, and resume without duplicate completed-stage execution.
+
+`ruff` + `mypy` clean on the changed files.
+
+**Exact bounded claim (earned, renamed):** *"OFFLINE PASS for the controller-owned assessment
+lifecycle state-machine framework"* — plus an **OFFLINE integration pass for the composed ops
+detection-control lifecycle** driven through the real queue/verifier/remediation/retest/report/cleanup
+interfaces (network boundary doubled).
+
+**Remaining `NOT_EVALUATED` behaviour (do not claim):**
+- **Full live lifecycle integration** — a paid provider-backed end-to-end run — `NOT_EVALUATED`.
+- **Tool-Broker-in-lifecycle** — the bank-scenario `ControlledToolBroker` is **not composed** into the
+  ops remediation lifecycle (its `AUTHORIZATION_COMPARISON` evidence has no remediation profile and
+  does not compose without fabrication). Its in-lifecycle adapter stays `NOT_EVALUATED`; the
+  integration test exercises the tool-execution boundary via a real HTTP client, not this class.
+- **Exactly-once external execution** — not provided; the guarantee is at-least-once with UNKNOWN
+  outcomes surfaced and never auto-reissued.
+- **Containerized synthetic full lifecycle** — `NOT_EVALUATED`.
 
 **Exclusions.** Does **not** claim production readiness, general autonomous exploitation, full OWASP
 coverage, nor any live/containerized full-lifecycle run.
