@@ -28,6 +28,7 @@ from aegis.multi_agent.consolidated_campaign import (
     RUN_EPOCH,
     ConsolidatedOpsCampaign,
     Phase29ModelDouble,
+    build_evidence_accounting,
     build_phase_2_9_checks,
     build_typed_verdicts,
     is_live_armed,
@@ -308,17 +309,86 @@ def test_offline_checks_and_verdicts(
         artifact_manifest_verified=artifacts["manifest_verified"],
         report_outputs_persisted=artifacts["report_outputs_persisted"],
     )
-    # No evaluable check is False. Offline: container-only checks stay NOT_EVALUATED (never False).
+    # No evaluable check is False. Offline: container-only checks AND the live-provider/model-only
+    # checks stay NOT_EVALUATED (never False, never coerced True from a deterministic double).
     assert [k for k, v in checks.items() if v is False] == []
     assert set(k for k, v in checks.items() if v == "NOT_EVALUATED") == {
         "no_public_egress",
         "no_leftovers",
+        "exact_model_identity",
+        "live_provider_budget_enforced",
     }
     verdicts = build_typed_verdicts(record, checks)
     for contract in ("phase_2_3", "phase_2_6", "phase_2_7", "phase_2_9"):
         assert verdicts[contract]["satisfied"] is True
         assert verdicts[contract]["live_status"] == "NOT_EVALUATED"
-    assert verdicts["phase_2_9"]["unevaluated_checks"] == ["no_leftovers", "no_public_egress"]
+    assert verdicts["phase_2_9"]["unevaluated_checks"] == [
+        "exact_model_identity",
+        "live_provider_budget_enforced",
+        "no_leftovers",
+        "no_public_egress",
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Evidence semantics: simulated-gateway vs provider accounting; canonical job addresses.
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_accounting_separates_simulated_from_provider(offline_record: dict) -> None:
+    acct = build_evidence_accounting(offline_record)
+    assert acct["gateway_mode"] == "DETERMINISTIC_DOUBLE"
+    assert acct["model_boundary"] == "DETERMINISTIC_GATEWAY_DOUBLE"
+    # The five model calls / their tokens are SIMULATED — reported as such, never as provider usage.
+    assert acct["simulated_model_calls"] == MAX_PROVIDER_CALLS
+    assert acct["simulated_usage_tokens"] <= MAX_TOTAL_TOKENS
+    assert acct["simulated_model_identity_reported"] is True
+    # Provider accounting is not evaluated (no provider was called); calls are honestly 0.
+    assert acct["provider_calls"] == 0
+    assert acct["provider_usage_tokens"] == "NOT_EVALUATED"
+    assert acct["exact_model_identity"] == "NOT_EVALUATED"
+    assert acct["live_provider_budget_enforced"] == "NOT_EVALUATED"
+
+
+def test_provider_and_model_checks_are_live_only(offline_record: dict) -> None:
+    checks = build_phase_2_9_checks(offline_record, guard_enforced=True)
+    # Live-only checks stay NOT_EVALUATED off a deterministic double.
+    assert checks["exact_model_identity"] == "NOT_EVALUATED"
+    assert checks["live_provider_budget_enforced"] == "NOT_EVALUATED"
+    # The simulated / controller budget logic IS exercised and True.
+    assert checks["controller_budget_logic_exercised"] is True
+    assert checks["simulated_call_ceiling_enforced"] is True
+    assert checks["simulated_token_ceiling_enforced"] is True
+    assert checks["simulated_model_identity_reported"] is True
+
+
+def test_canonical_agentjob_addresses_are_persisted(offline_record: dict) -> None:
+    jobs = offline_record["jobs"]
+    assert jobs["lead_job_address"] == f"agentjob://LEAD_ORCHESTRATOR/{jobs['lead_job']}"
+    assert jobs["recon_job_address"] == f"agentjob://RECON_AGENT/{jobs['recon_job']}"
+    assert (
+        jobs["retest_recon_job_address"]
+        == f"agentjob://RECON_AGENT/{jobs['retest_recon_job']}"
+    )
+    # The report job carries the canonical agentjob address; its rptjob- id is secondary metadata.
+    assert jobs["report_job_address"] == f"agentjob://REPORT_AGENT/{jobs['report_job']}"
+    assert jobs["report_job"].startswith("rptjob-")
+
+
+def test_report_agent_job_check_requires_canonical_address(offline_record: dict) -> None:
+    # A report record with a closed QUEUED->CLAIMED->CLOSED lifecycle but NO canonical agentjob
+    # address must NOT satisfy real_report_agent_job_persisted.
+    import copy
+
+    mutated = copy.deepcopy(offline_record)
+    mutated["jobs"]["report_job_address"] = None
+    checks = build_phase_2_9_checks(mutated, guard_enforced=True)
+    assert checks["real_report_agent_job_persisted"] is False
+
+
+def test_report_agent_job_lifecycle_queued_claimed_closed(offline_record: dict) -> None:
+    seq = [t["to"] for t in offline_record["jobs"]["report_transitions"]]
+    assert "CLAIMED" in seq and "CLOSED" in seq
 
 
 # --------------------------------------------------------------------------- #
@@ -415,5 +485,17 @@ def test_containerized_dry_run_passes_and_cleans_up(tmp_path: Path) -> None:
         artifact_manifest_verified=artifacts["manifest_verified"],
         report_outputs_persisted=artifacts["report_outputs_persisted"],
     )
-    # In the containerized run EVERY required check is evaluable and True (nothing NOT_EVALUATED).
-    assert [k for k, v in checks.items() if v is not True] == []
+    # The containerized run evaluates every LIFECYCLE/integration check True (the container-only
+    # egress/leftover checks included). The provider/model-specific checks are intentionally
+    # live-only and stay NOT_EVALUATED even here — a real container is not a live provider, so no
+    # blanket "all checks True" is claimed.
+    assert [k for k, v in checks.items() if v is False] == []
+    assert sorted(k for k, v in checks.items() if v == "NOT_EVALUATED") == [
+        "exact_model_identity",
+        "live_provider_budget_enforced",
+    ]
+    # The container-specific checks that were NOT_EVALUATED offline are now True here.
+    assert checks["no_public_egress"] is True
+    assert checks["no_leftovers"] is True
+    assert checks["real_report_agent_job_persisted"] is True
+    assert record["jobs"]["report_job_address"].startswith("agentjob://REPORT_AGENT/")

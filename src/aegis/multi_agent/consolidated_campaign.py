@@ -840,8 +840,17 @@ class ConsolidatedOpsCampaign:
         delegation_id = "adelg-" + _id16(asm.assessment_id, "delegation")
         lead_id = "agjob-" + _id16(asm.assessment_id, "lead")
         recon_id = "agjob-" + _id16(asm.assessment_id, "recon")
+        retest_job_id = kw["retest_job_id"]
         report_job_id = "rptjob-" + _id16(asm.assessment_id, "reportjob")
         loop_state = asm.remediation_ledger.state(asm.loop_id)
+
+        # Canonical, persisted agentjob:// addresses. Each is read back from the durable queue
+        # record (never string-formatted here), so an address only appears when its job is actually
+        # persisted; the report job's internal ``rptjob-`` id is kept as secondary metadata only.
+        lead_persisted = asm.queue.get_job(lead_id)
+        recon_persisted = asm.queue.get_job(recon_id)
+        retest_persisted = asm.queue.get_job(retest_job_id)
+        report_persisted = asm.report_queue.get_job(report_job_id)
 
         # Independent verifier re-adjudication (facts only) to record substitution-freedom: the
         # initial evidence against the sentinel digest that was live when the worker probed, and the
@@ -879,9 +888,17 @@ class ConsolidatedOpsCampaign:
                 "attempts": self.budget.attempts_export(),
             },
             "jobs": {
+                # Canonical persisted agentjob:// addresses (primary identifiers).
+                "lead_job_address": lead_persisted.address if lead_persisted else None,
+                "recon_job_address": recon_persisted.address if recon_persisted else None,
+                "retest_recon_job_address": (
+                    retest_persisted.address if retest_persisted else None
+                ),
+                "report_job_address": report_persisted.address if report_persisted else None,
+                # Raw internal ids (secondary metadata).
                 "lead_job": lead_id,
                 "recon_job": recon_id,
-                "retest_recon_job": kw["retest_job_id"],
+                "retest_recon_job": retest_job_id,
                 "report_job": report_job_id,
                 "delegation_id": delegation_id,
                 "delegation_address": f"agentqueue://RECON_AGENT/{delegation_id}",
@@ -889,7 +906,7 @@ class ConsolidatedOpsCampaign:
                 "handoff_linked": asm.queue.handoff_linked(delegation_id),
                 "lead_transitions": asm.queue.job_transitions(lead_id),
                 "recon_transitions": asm.queue.job_transitions(recon_id),
-                "retest_transitions": asm.queue.job_transitions(kw["retest_job_id"]),
+                "retest_transitions": asm.queue.job_transitions(retest_job_id),
                 "report_transitions": asm.report_queue.job_transitions(report_job_id),
             },
             "model_outputs": {
@@ -1166,7 +1183,13 @@ def build_phase_2_9_checks(
             budget["snapshot"]["calls_recorded"] == MAX_PROVIDER_CALLS
             and len(budget["attempts"]) == MAX_PROVIDER_CALLS
         ),
-        "exact_model_identity": record["model"]["reported_models"] == [CANONICAL_MODEL],
+        # The deterministic double *reported* the canonical model id; this is a simulated fact, NOT
+        # evidence that a live provider served that model. The provider-identity claim stays
+        # NOT_EVALUATED until an authorized paid campaign runs.
+        "simulated_model_identity_reported": (
+            record["model"]["reported_models"] == [CANONICAL_MODEL]
+        ),
+        "exact_model_identity": NOT_EVALUATED,
         "fresh_assessment_created": (
             record["assessment_id"].startswith("asmt-")
             and record["campaign_id"].startswith("phase-2.9-consolidated-")
@@ -1213,7 +1236,10 @@ def build_phase_2_9_checks(
             verifier["retest_facts"].get("verifier_probe_requests") == 0
             and verifier["retest_facts"].get("verifier_generated_bypass_traffic") is False
         ),
-        "real_report_agent_job_persisted": _transitions_closed(jobs["report_transitions"]),
+        "real_report_agent_job_persisted": (
+            _transitions_closed(jobs["report_transitions"])
+            and str(jobs.get("report_job_address") or "").startswith("agentjob://REPORT_AGENT/")
+        ),
         "report_projection_sanitized": True,  # assert_report_projection_clean ran without raising
         "report_truth_controller_owned": (
             report["finding_state"] == "CONFIRMED"
@@ -1226,12 +1252,22 @@ def build_phase_2_9_checks(
             and bool(lifecycle["required_stages_complete"])
         ),
         "external_effect_replay_blocked": bool(record["resume"]["replay_no_redispatch"]),
-        "provider_call_ceiling_enforced": (
+        # Budget accounting is over the DETERMINISTIC gateway double, not a live provider. These
+        # prove the controller's fail-closed reserve-before-dispatch logic and its simulated
+        # call/token ceilings; the live-provider budget claim stays NOT_EVALUATED.
+        "controller_budget_logic_exercised": (
+            call_enforced
+            and token_enforced
+            and budget["snapshot"]["within_ceilings"] is True
+            and len(budget["attempts"]) == MAX_PROVIDER_CALLS
+        ),
+        "simulated_call_ceiling_enforced": (
             call_enforced and budget["snapshot"]["calls_recorded"] <= MAX_PROVIDER_CALLS
         ),
-        "campaign_token_ceiling_enforced": (
+        "simulated_token_ceiling_enforced": (
             token_enforced and budget["snapshot"]["tokens_recorded"] <= MAX_TOTAL_TOKENS
         ),
+        "live_provider_budget_enforced": NOT_EVALUATED,
         "no_public_egress": (
             (
                 str(record["cleanup"]["egress_blocked_proof"]).startswith("EGRESS_BLOCKED")
@@ -1296,14 +1332,14 @@ def build_typed_verdicts(
         "stages_and_lineage_persisted": checks["lifecycle_lineage_complete"],
         "idempotency_resume_preserved": checks["external_effect_replay_blocked"],
         "cumulative_budget_enforced": _all(
-            "provider_call_ceiling_enforced", "campaign_token_ceiling_enforced"
+            "simulated_call_ceiling_enforced", "simulated_token_ceiling_enforced"
         ),
         "final_verdict_controller_owned": record["lifecycle"]["final_state"] == "COMPLETED",
         "satisfied": _all(
             "lifecycle_lineage_complete",
             "external_effect_replay_blocked",
-            "provider_call_ceiling_enforced",
-            "campaign_token_ceiling_enforced",
+            "simulated_call_ceiling_enforced",
+            "simulated_token_ceiling_enforced",
         ),
         "live_status": NOT_EVALUATED,
     }
@@ -1337,6 +1373,31 @@ def build_typed_verdicts(
             "Phase 2.3, 2.6, 2.7 and 2.9 verdicts are all derived from the SAME single Phase 2.9 "
             "campaign lineage (one execution, multiple acceptance contracts), not multiple runs."
         ),
+    }
+
+
+def build_evidence_accounting(record: dict[str, Any]) -> dict[str, Any]:
+    """Split deterministic-gateway (simulated) accounting from provider accounting — honestly.
+
+    The five model calls and their token totals are produced by the deterministic gateway double, so
+    they are reported as *simulated* usage. No provider was called, so provider usage, the exact
+    served-model identity and the live-provider budget claim are all ``NOT_EVALUATED`` — never
+    presented as provider usage and never coerced to zero-as-if-measured.
+    """
+
+    snap = record["budget"]["snapshot"]
+    return {
+        "gateway_mode": "DETERMINISTIC_DOUBLE",
+        "model_boundary": record["provenance"]["model_boundary"],
+        "simulated_model_calls": snap["calls_recorded"],
+        "simulated_usage_tokens": snap["tokens_recorded"],
+        "simulated_model_identity_reported": (
+            record["model"]["reported_models"] == [CANONICAL_MODEL]
+        ),
+        "provider_calls": 0,
+        "provider_usage_tokens": NOT_EVALUATED,
+        "exact_model_identity": NOT_EVALUATED,
+        "live_provider_budget_enforced": NOT_EVALUATED,
     }
 
 

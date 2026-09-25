@@ -1472,8 +1472,10 @@ adapters were made campaign-id parametrizable (backward-compatible) so Phase 2.9
   `--execute-live` arms via the guard then stops short of a paid run).
 - `deploy/range/Dockerfile.phase-2-9` — egress-free image serving the ops detection-control surface
   (`aegis_range.ops` made lazy-httpx so it runs without shipping httpx).
-- `tests/test_phase_2_9.py` (26 tests: guard, budget, model double, offline campaign lineage +
-  verdicts, receipt-replay, retest-ordering, artifact tamper-detection, and a real containerized run).
+- `tests/test_phase_2_9.py` (31 tests: guard, budget, model double, offline campaign lineage +
+  verdicts, simulated-vs-provider evidence accounting, canonical `agentjob://` address lineage +
+  report-agent-job address requirement, receipt-replay, retest-ordering, artifact tamper-detection,
+  and a real containerized run).
 
 **Authority model (unchanged, re-proven).** The model may only delegate to an allowed role, select
 registered profile ids, interpret sanitized observations, recommend one registered remediation, plan
@@ -1490,10 +1492,23 @@ denied 403; alternate reaches the sentinel 200 in vulnerable mode; alternate den
 patch); the raw sentinel is redacted to a SHA-256 digest at the source and never leaves. Result:
 lifecycle `COMPLETED`; verifier CONFIRMED → PASS; controller-owned patch (mode flip + sentinel
 rotation, pre≠post state digest) minted an immutable single-use receipt consumed exactly once; a fresh
-retest Recon job (QUEUED→CLAIMED→CLOSED); a real REPORT_AGENT job + controller-authoritative report;
-egress blocked; **zero** leftover containers/volumes/networks. **5** provider(-double) calls / **697**
-tokens (≤ 5 / ≤ 15,000). Every required Phase 2.9 check was evaluated **True** (nothing NOT_EVALUATED)
-in the containerized run.
+retest Recon job (QUEUED→CLAIMED→CLOSED, persisted at the canonical `agentjob://RECON_AGENT/…`
+address); a real REPORT_AGENT job at the canonical `agentjob://REPORT_AGENT/…` address (the internal
+`rptjob-…` id is secondary metadata) + controller-authoritative report; egress blocked; **zero**
+leftover containers/volumes/networks.
+
+**Evidence accounting (simulated vs provider — kept strictly separate).** The five model calls and
+their **697** tokens are produced by the deterministic gateway double, so they are reported as
+`gateway_mode = DETERMINISTIC_DOUBLE`, `simulated_model_calls = 5`, `simulated_usage_tokens = 697`
+(≤ 5 / ≤ 15,000) — **not** as provider usage. Because no provider was called, `provider_calls = 0`,
+`provider_usage_tokens = NOT_EVALUATED`, `exact_model_identity = NOT_EVALUATED` and
+`live_provider_budget_enforced = NOT_EVALUATED`. The controller's fail-closed budget logic *is*
+exercised: `controller_budget_logic_exercised`, `simulated_call_ceiling_enforced` and
+`simulated_token_ceiling_enforced` are True. The lifecycle/integration checks all evaluate **True**;
+the provider/model-specific checks above stay **NOT_EVALUATED even in the passing containerized run**
+(a real container is not a live provider), so **no blanket "all N checks True" is claimed** — the
+containerized run reports 35 True / 2 NOT_EVALUATED, the in-process run 33 True / 4 NOT_EVALUATED (the
+two container-only egress/leftover checks are additionally NOT_EVALUATED off a container).
 
 **Typed verdicts (from the SAME single campaign — one execution, multiple contracts, not multiple
 runs).**
@@ -1508,7 +1523,11 @@ runs).**
 
 **Statuses (separate, honest).**
 - `phase_2_9_implementation_status = OFFLINE_PASS`
-- `phase_2_9_containerized_status = CONTAINERIZED_SYNTHETIC_PASS` (real container dry run succeeded)
+- `phase_2_9_containerized_status = CONTAINERIZED_SYNTHETIC_PASS` (real container dry run succeeded
+  for the lifecycle integration; provider/model-specific checks remain `NOT_EVALUATED`)
+- `gateway_mode = DETERMINISTIC_DOUBLE`; `simulated_model_calls = 5` / `simulated_usage_tokens = 697`
+  (simulated, not provider); `provider_calls = 0`; `provider_usage_tokens = NOT_EVALUATED`;
+  `exact_model_identity = NOT_EVALUATED`; `live_provider_budget_enforced = NOT_EVALUATED`
 - `phase_2_9_live_provider_status = NOT_EVALUATED`
 - Phase 2.3 / 2.6 / 2.7 live statuses remain `NOT_EVALUATED`.
 

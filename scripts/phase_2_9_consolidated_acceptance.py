@@ -77,6 +77,7 @@ def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
     # Imported lazily so the inert default path constructs no ledgers and touches no docker module.
     from aegis.multi_agent.consolidated_campaign import (
         ConsolidatedOpsCampaign,
+        build_evidence_accounting,
         build_phase_2_9_checks,
         build_typed_verdicts,
         is_live_armed,
@@ -122,15 +123,29 @@ def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
     p29_ok = bool(verdicts["phase_2_9"]["satisfied"])
     containerized_pass = containerized and p29_ok and manifest_ok
     offline_pass = p29_ok and manifest_ok
+    accounting = build_evidence_accounting(record)
+    true_checks = sorted(k for k, v in checks.items() if v is True)
+    not_evaluated_checks = sorted(k for k, v in checks.items() if v == NOT_EVALUATED)
+    false_checks = sorted(k for k, v in checks.items() if v is False)
     acceptance = {
         "phase": "2.9",
         "evidence_type": (
             "CONTAINERIZED_SYNTHETIC" if containerized else "OFFLINE_INTEGRATION"
         ),
         "range_backend": record["range_backend"],
-        "model": CANONICAL_MODEL,
-        "model_boundary": record["provenance"]["model_boundary"],
+        "canonical_model_name": CANONICAL_MODEL,
+        # Deterministic-gateway (simulated) vs provider accounting, kept strictly separate.
+        "evidence_accounting": accounting,
         "checks": checks,
+        # Honest counts: some checks are intentionally live-only and stay NOT_EVALUATED even in a
+        # passing containerized run, so a blanket "all checks True" is never reported.
+        "check_counts": {
+            "true": len(true_checks),
+            "not_evaluated": len(not_evaluated_checks),
+            "false": len(false_checks),
+            "total": len(checks),
+        },
+        "not_evaluated_checks": not_evaluated_checks,
         "typed_verdicts": verdicts,
         "phase_2_9_implementation_status": "OFFLINE_PASS" if offline_pass else "PARTIAL",
         "phase_2_9_containerized_status": _containerized_status(
@@ -140,6 +155,12 @@ def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
         "phase_2_3_live_status": NOT_EVALUATED,
         "phase_2_6_live_status": NOT_EVALUATED,
         "phase_2_7_live_status": NOT_EVALUATED,
+        "canonical_job_addresses": {
+            "lead": record["jobs"]["lead_job_address"],
+            "initial_recon": record["jobs"]["recon_job_address"],
+            "retest_recon": record["jobs"]["retest_recon_job_address"],
+            "report": record["jobs"]["report_job_address"],
+        },
         "elapsed_seconds": round((datetime.now(UTC) - started).total_seconds(), 2),
         "record": record,
     }
@@ -156,10 +177,17 @@ def _run_dry_run(*, containerized: bool, emit_json: bool) -> int:
         "evidence_dir": str(art_dir),
         "range_backend": record["range_backend"],
         "final_state": record["lifecycle"]["final_state"],
-        "provider_calls": record["budget"]["snapshot"]["calls_recorded"],
-        "provider_tokens": record["budget"]["snapshot"]["tokens_recorded"],
-        "false_checks": sorted(k for k, v in checks.items() if v is False),
-        "not_evaluated_checks": sorted(k for k, v in checks.items() if v == NOT_EVALUATED),
+        "gateway_mode": accounting["gateway_mode"],
+        "simulated_model_calls": accounting["simulated_model_calls"],
+        "simulated_usage_tokens": accounting["simulated_usage_tokens"],
+        "provider_calls": accounting["provider_calls"],
+        "provider_usage_tokens": accounting["provider_usage_tokens"],
+        "exact_model_identity": accounting["exact_model_identity"],
+        "live_provider_budget_enforced": accounting["live_provider_budget_enforced"],
+        "check_counts": acceptance["check_counts"],
+        "false_checks": false_checks,
+        "not_evaluated_checks": not_evaluated_checks,
+        "canonical_job_addresses": acceptance["canonical_job_addresses"],
         "phase_2_9_implementation_status": acceptance["phase_2_9_implementation_status"],
         "phase_2_9_containerized_status": acceptance["phase_2_9_containerized_status"],
         "phase_2_9_live_provider_status": NOT_EVALUATED,
