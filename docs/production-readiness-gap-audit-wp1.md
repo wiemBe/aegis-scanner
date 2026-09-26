@@ -11,8 +11,19 @@ Audited at commit parent `00ecf25` on branch `codex/phase-2-9-live-adapter`.
 > **Update (WP2).** `G-ROOT-1`, `G-LIMITS-1`, and `G-ROLL-1` (P1 rows below) are now addressed on the
 > base stack — non-root `USER 10001:10001`, explicit mem/cpu/pids/restart limits, and an immutable
 > digest-pinned production overlay with a fail-closed preflight. See
-> [production-readiness-wp2.md](production-readiness-wp2.md). Overall status remains
-> **NOT_PRODUCTION_READY**; `G-OBS-1`/`G-SHUT-1` (P1) and the P2 set are still open.
+> [production-readiness-wp2.md](production-readiness-wp2.md).
+>
+> **Update (WP3).** `G-OBS-1` is now closed: shared secret-free structured JSON logging, a
+> bounded-cardinality internal `/metrics` endpoint, and version-controlled alert-policy definitions.
+> See [production-readiness-wp3.md](production-readiness-wp3.md).
+>
+> **Operator scope decision (P2 removed from the roadmap).** `G-BACKUP-1`, `G-IR-1`, and `G-DBLOCK-1`
+> are explicitly **out of scope** — see §5a. They are not implemented and are no longer tracked as
+> remaining blockers.
+>
+> **Remaining required blockers:** `G-SHUT-1` (graceful shutdown/drain); a digest-pinned
+> company-private provider/gateway production path; final staging soak/failure validation. Overall
+> status remains **NOT_PRODUCTION_READY**.
 
 ---
 
@@ -92,19 +103,25 @@ only into the `llm-gateway` service via an untracked `.env.gateway`
 
 | ID | Gap | Evidence |
 |---|---|---|
-| G-ROOT-1 | Base `control-plane`/`lab-api` run as **root**; root `Dockerfile` has no `USER`. Mitigated by `read_only`+`no-new-privileges` but inconsistent with the runners (`USER 65532`, etc.). | [`Dockerfile`](../Dockerfile), `deploy/*/Dockerfile` |
-| G-LIMITS-1 | Base stack sets **no `mem_limit`/`cpus`/`pids_limit`/`restart`** on the two long-lived services; overlays (beast, nuclei, range) do. A crash stays down; a runaway scan is unbounded. | [`docker-compose.yml`](../docker-compose.yml) |
-| G-OBS-1 | **No application logging/metrics.** `grep -rn "logging" src/` is empty; observability depends entirely on the SQLite audit trail. No stdout structured logs, no health/latency metrics for external monitoring. | `src/` (no `logging` import) |
-| G-SHUT-1 | **No graceful shutdown/drain.** `lifespan` has no teardown after `yield` ([`main.py:148-158`](../src/aegis/main.py)); in-flight `BackgroundTasks` scans are cut on SIGTERM. Partially mitigated by `PROCESS_RESTART` reconciliation (G-facts §2), but a deploy/rollback can still tear an audit write mid-flight. | `main.py:148` |
-| G-ROLL-1 | **No deterministic rollback.** `control-plane`/`lab-api` use `build: .` with no image tag/digest and no registry; rollback means rebuild-from-git. | [`docker-compose.yml`](../docker-compose.yml) |
+| G-ROOT-1 | ✅ **Closed (WP2).** Base `control-plane`/`lab-api` now run non-root (`USER 10001:10001`). | [`Dockerfile`](../Dockerfile) |
+| G-LIMITS-1 | ✅ **Closed (WP2).** Explicit `mem_limit`/`cpus`/`pids_limit`/`restart` on both services. | [`docker-compose.yml`](../docker-compose.yml) |
+| G-OBS-1 | ✅ **Closed (WP3).** Secret-free structured JSON logging + bounded internal `/metrics` + alert policy. | [`aegis_obs`](../src/aegis_obs/), [wp3](production-readiness-wp3.md) |
+| G-SHUT-1 | **OPEN (next blocker).** No graceful shutdown/drain. `lifespan` has no teardown after `yield` ([`main.py`](../src/aegis/main.py)); in-flight `BackgroundTasks` scans are cut on SIGTERM. Partially mitigated by `PROCESS_RESTART` reconciliation (§2). | `main.py` |
+| G-ROLL-1 | ✅ **Closed (WP2).** Immutable digest-pinned production overlay + fail-closed preflight. | [`docker-compose.prod.yml`](../docker-compose.prod.yml) |
 
-### P2 — process / documentation
+### 5a. P2 — OUT OF SCOPE (operator scope decision)
 
-| ID | Gap | Evidence |
+The following P2 items are **removed from the required production-readiness roadmap** by operator
+decision. They are **not implemented** and are **not** remaining blockers. Documented honestly:
+
+| ID | Disposition | Constraint documented |
 |---|---|---|
-| G-BACKUP-1 | No backup/restore procedure for the `aegis-data` volume. | `docker-compose.yml`, `runbook.md` |
-| G-IR-1 | No documented incident-response runbook section (teardown only). | `runbook.md` §8 |
-| G-DBLOCK-1 | SQLite opened without WAL/`busy_timeout`; concurrent `BackgroundTasks` writers + console reads can hit `database is locked` under load. | [`storage.py:65-68`](../src/aegis/storage.py) |
+| G-BACKUP-1 | **ACCEPTED_RISK / OUT_OF_SCOPE** | SQLite data is disposable/reconstructible. **No backup, recovery-point, or recovery-time guarantee is provided.** No backup coverage, HA, enterprise durability, or disaster recovery is claimed. |
+| G-IR-1 | **PLATFORM-OWNED / OUT_OF_SCOPE** | Application-specific incident response is not provided. Organizational/platform incident response applies externally and remains outside this repository. |
+| G-DBLOCK-1 | **ACCEPTED_CONSTRAINT / OUT_OF_SCOPE** | The deployment is strictly **single-replica, single-writer**. Horizontal scaling, multiple application workers, and shared concurrent writers are **unsupported**. Any future change to these constraints must **reopen** the SQLite concurrency/locking evaluation. |
+
+**Remaining required blockers after WP3:** (1) `G-SHUT-1` graceful shutdown/drain; (2) a digest-pinned
+company-private provider/gateway production path; (3) final staging soak/failure validation.
 
 ---
 

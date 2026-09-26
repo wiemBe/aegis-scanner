@@ -1,6 +1,7 @@
 import asyncio
 import html
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -12,11 +13,52 @@ from fastapi.responses import (
     StreamingResponse,
 )
 
+from aegis_obs.logging import StructuredLogger
+from aegis_obs.metrics import MetricsRegistry
+from aegis_obs.middleware import ObservabilityASGIMiddleware, disable_uvicorn_access_log
+from aegis_obs.normalize import SERVICE_LAB_API
+
+# WP3 / G-OBS-1: the lab API shares the same bounded, secret-free observability layer. Its own
+# per-process registry/logger keep it decoupled from the control plane while reusing one codebase.
+_obs_metrics = MetricsRegistry(service=SERVICE_LAB_API)
+_obs_logger = StructuredLogger()
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Replace Uvicorn's raw access log with the bounded structured request log (see aegis_obs).
+    disable_uvicorn_access_log()
+    _obs_logger.log(service=SERVICE_LAB_API, event="startup", level="INFO", request_id="-")
+    yield
+
+
 app = FastAPI(
     title="Synthetic Banking API",
     description="INTENTIONALLY VULNERABLE. Lab use only.",
     version="0.1.0",
+    lifespan=_lifespan,
 )
+
+# A PURE ASGI middleware (not BaseHTTPMiddleware): the lab exposes deliberately-broken streaming
+# endpoints (e.g. a mid-stream "connection drop" for the unstable negative control). A buffering
+# BaseHTTPMiddleware would mask those; this passthrough preserves streaming + mid-stream exceptions
+# exactly. Getters resolve the singletons at request time so tests can substitute them.
+app.add_middleware(
+    ObservabilityASGIMiddleware,
+    service=SERVICE_LAB_API,
+    get_registry=lambda: _obs_metrics,
+    get_logger=lambda: _obs_logger,
+)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> PlainTextResponse:
+    # Internal-only bounded operational metrics (no secrets). Reachable only inside the internal
+    # network via the Compose topology (lab-api publishes no host port). Fixed 503 if render fails.
+    body = _obs_metrics.render()
+    if body.startswith("# metrics_unavailable"):
+        return PlainTextResponse(body, status_code=503, media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 USERS = {
     "lab-token-user-a": {"id": "user-a", "name": "Ada"},

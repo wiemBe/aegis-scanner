@@ -1,16 +1,15 @@
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from uuid import uuid4
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
@@ -46,6 +45,8 @@ from aegis.multi_agent.staging import (
     tier_is_executable,
 )
 from aegis.multi_agent.store import MultiAgentStore
+from aegis.observability import logger as obs_logger
+from aegis.observability import metrics as obs_metrics
 from aegis.operator import (
     ActorType,
     AuditEnvelope,
@@ -78,6 +79,7 @@ from aegis.verifier import DeterministicVerifier
 from aegis.zap_active_controller import ZapActiveActivation, ZapActiveController
 from aegis.zap_active_lease import LeaseError
 from aegis_nuclei.manifest import load_manifest, manifest_digest
+from aegis_obs.middleware import disable_uvicorn_access_log, observe_request
 from aegis_zap.manifest import add_on_inventory_digest
 from aegis_zap.manifest import load_manifest as load_zap_manifest
 from aegis_zap.manifest import manifest_digest as zap_manifest_digest
@@ -148,6 +150,9 @@ streams = StreamConnections()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Replace Uvicorn's raw access log (which can expose paths/query strings) with our bounded,
+    # secret-free structured request log. Defence in depth alongside `--no-access-log` in Compose.
+    disable_uvicorn_access_log()
     store.initialize()
     beast_store.initialize()
     multi_agent_store.initialize()
@@ -156,6 +161,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     report_agent_queue.initialize()
     lifecycle_ledger.initialize()
     target_store.initialize()
+    obs_logger.log(service="control-plane", event="startup", level="INFO", request_id="-")
     yield
 
 
@@ -164,12 +170,16 @@ app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static
 
 
 @app.middleware("http")
-async def security_headers(request: Request, call_next: object) -> object:
-    request_id = request.headers.get("x-request-id", "")
-    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", request_id):
-        request_id = f"req-{uuid4().hex[:16]}"
-    request.state.request_id = request_id
-    response = await call_next(request)  # type: ignore[operator]
+async def security_headers(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    # Observability wraps the request: it validates/normalizes the request id (into
+    # request.state.request_id), records bounded metrics, and emits at most one structured log line.
+    # It re-raises any downstream error unchanged, so the security headers below are intact.
+    response = await observe_request(
+        request, call_next, service="control-plane", registry=obs_metrics, logger=obs_logger
+    )
+    request_id = request.state.request_id
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
         "connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; "
@@ -238,9 +248,26 @@ async def ready(response: Response) -> ReadinessReport:
     # control plane is not in a safe-to-serve state (persistence lost, schema absent, or a
     # forbidden provider credential present). Orchestrators gate on this signal, not on /health.
     report = evaluate_readiness(settings, store)
+    # Mirror the verdict into the readiness gauges. This observation never changes the verdict: a
+    # metrics/logging failure cannot convert a failed check to PASS (the report is returned as-is).
+    obs_metrics.set_readiness(
+        ready=report.ready,
+        checks={check.name: check.status.value == "PASS" for check in report.checks},
+    )
     if not report.ready:
         response.status_code = 503
     return report
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> PlainTextResponse:
+    # Internal-only operational metrics (bounded cardinality, no secrets). Exposed only inside the
+    # `security-lab` network by the Compose topology: no host port, no public ingress. A render
+    # failure returns a fixed 503 body and never leaks raw internal state.
+    body = obs_metrics.render()
+    if body.startswith("# metrics_unavailable"):
+        return PlainTextResponse(body, status_code=503, media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
 @app.post("/api/scans", response_model=ScanResult, status_code=202)

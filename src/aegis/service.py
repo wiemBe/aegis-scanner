@@ -78,6 +78,7 @@ from aegis.models import (
     ScenarioClass,
     Verification,
 )
+from aegis.observability import metrics as obs_metrics
 from aegis.planner import Planner, PlannerFailure
 from aegis.safety import SafetyController, SafetyViolation
 from aegis.scenarios import ScenarioProjection, authenticated_profiles, project
@@ -319,6 +320,9 @@ class ScanService:
             "TERMINAL_REASON",
             {"reason": reason, "status": status, "scenario": result.scenario},
         )
+        # Observation only (WP3 / G-OBS-1): bounded, controller-owned terminal-status counter. This
+        # reads the verdict the controller already set above; it never changes it.
+        obs_metrics.record_scan_completion(str(status.value))
 
     def _record_provider_metadata(self, result: ScanResult, budget: ScanBudget) -> None:
         if budget.provider_metadata is not None:

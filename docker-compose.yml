@@ -1,7 +1,9 @@
 services:
   control-plane:
     build: .
-    command: uvicorn aegis.main:app --host 0.0.0.0 --port 8000
+    # --no-access-log: Uvicorn's default access log can expose raw paths/query strings; the app emits
+    # a bounded, secret-free structured request log instead (WP3 / G-OBS-1).
+    command: uvicorn aegis.main:app --host 0.0.0.0 --port 8000 --no-access-log
     env_file:
       - path: .env
         required: false
@@ -33,7 +35,7 @@ services:
 
   lab-api:
     build: .
-    command: uvicorn lab_api.main:app --host 0.0.0.0 --port 8001
+    command: uvicorn lab_api.main:app --host 0.0.0.0 --port 8001 --no-access-log
     expose: ["8001"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]

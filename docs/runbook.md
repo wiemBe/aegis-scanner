@@ -359,6 +359,51 @@ docker compose -f docker-compose.yml exec -T control-plane \
   || echo 'NOT_READY (503) — control plane is failing closed as designed'
 ```
 
+## 5b. Observability — logging, metrics, alerts (WP3 / G-OBS-1)
+
+Full detail: [production-readiness-wp3.md](production-readiness-wp3.md).
+
+**Structured logs.** Both services emit bounded, secret-free JSON to **stdout** (schema
+`obslog-v1`). Records contain only: `schema_version, timestamp_utc, level, service, event,
+request_id, method, route (normalized template or UNMATCHED), status_code, status_class,
+duration_ms, code, exception_class`. They **never** contain bodies, query strings, cookies, auth
+headers, credentials, target URLs, raw evidence, model output, `str(exception)`, or raw paths.
+Uvicorn's raw access log is disabled (`--no-access-log` + startup disable). `/health` and `/metrics`
+scrapes are not logged; `/ready` logs only when it fails closed.
+
+```bash
+# One line of structured JSON per request (redacted, bounded):
+docker compose -f docker-compose.yml logs --no-log-prefix control-plane | tail -5
+```
+
+**Metrics.** Internal-only `GET /metrics` (Prometheus text) on both services — **no host port, no
+public ingress**; reachable only inside the `security-lab` network. Fixed metric names:
+`aegis_http_requests_total`, `aegis_http_responses_total`, `aegis_http_request_duration_seconds`,
+`aegis_http_in_flight_requests`, `aegis_process_start_timestamp_seconds`, `aegis_readiness_ready`,
+`aegis_readiness_check`, `aegis_scan_completions_total`. Labels are bounded (service, allowlisted
+method, normalized route, status class, controller enums); unknown values collapse to
+`OTHER`/`UNMATCHED`; distinct routes are hard-capped at 64.
+
+```bash
+# Scrape from inside the internal network (no port is published to the host):
+docker compose -f docker-compose.yml exec -T control-plane \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/metrics').read().decode()[:400])"
+```
+
+**Alerts.** Version-controlled rules: [`deploy/observability/alerts.yml`](../deploy/observability/alerts.yml)
+(control plane not ready, persistence/readiness failure, elevated 5xx, high p95 latency, restart
+loop). These are **policy only**.
+
+**NOT_EVALUATED.** External log aggregation/rotation/retention, any Prometheus scraper and its
+storage, and alert-manager firing/delivery are **not deployed or tested** here.
+
+**Operational constraints (accepted / out of scope).** SQLite data is disposable/reconstructible:
+**no backup, recovery-point, or recovery-time guarantee** (no backup coverage, HA, enterprise
+durability, or DR is claimed). Application-specific incident response is not provided —
+organizational/platform IR applies externally. The deployment is strictly **single-replica,
+single-writer**; horizontal scaling, multiple workers, and concurrent writers are unsupported, and
+any future change here must reopen the SQLite concurrency/locking evaluation.
+
 ## 6. Production (company private AI endpoint)
 
 Supply the real institutional details (endpoint, model, auth) — the provider is disabled until then:

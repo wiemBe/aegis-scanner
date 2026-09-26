@@ -24,4 +24,6 @@ RUN groupadd --system --gid 10001 aegis \
     && chmod 0700 /data
 USER 10001:10001
 
-CMD ["uvicorn", "aegis.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --no-access-log: suppress Uvicorn's raw access log (can leak paths/query strings); the app emits a
+# bounded, secret-free structured request log instead (WP3 / G-OBS-1). Compose overrides this command.
+CMD ["uvicorn", "aegis.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

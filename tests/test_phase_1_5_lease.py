@@ -137,9 +137,15 @@ def test_signature_tampering_is_rejected() -> None:
     # Flip one payload byte: the MAC no longer matches (or the payload stops decoding).
     raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
     flipped = base64.urlsafe_b64encode(bytes([raw[0] ^ 0x01, *raw[1:]])).decode().rstrip("=")
+    # Flip one signature byte. NB: appending a char (e.g. signature[:-1]+"x") is NOT reliable — the
+    # final base64 char carries only some significant bits, so a swap can decode to identical bytes
+    # and leave the signature valid. Decode/flip/re-encode always alters the MAC deterministically.
+    sig_raw = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+    sig_flipped = bytes([sig_raw[0] ^ 0xFF, *sig_raw[1:]])
+    tampered_sig = base64.urlsafe_b64encode(sig_flipped).decode().rstrip("=")
     for candidate in (
         f"{prefix}.{flipped}.{signature}",
-        f"{prefix}.{payload}.{signature[:-1]}x",
+        f"{prefix}.{payload}.{tampered_sig}",
     ):
         with pytest.raises(LeaseRejected) as refused:
             verify_lease(candidate, ADMISSION_TEST_SECRET, binding=_binding())

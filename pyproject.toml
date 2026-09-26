@@ -38,6 +38,7 @@ aegis = [
   "console/assets/*.js",
   "console/assets/*.css",
 ]
+aegis_obs = ["py.typed"]
 aegis_nuclei = ["manifest.json", "py.typed"]
 nuclei_runner = ["py.typed"]
 aegis_zap = ["manifest.json", "sources/*.json", "py.typed"]
@@ -67,6 +68,7 @@ python_version = "3.12"
 strict = true
 packages = [
   "aegis",
+  "aegis_obs",
   "lab_api",
   "aegis_nuclei",
   "nuclei_runner",

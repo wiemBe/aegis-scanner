@@ -1,0 +1,72 @@
+# Alert-policy definitions for the Aegis control plane and lab API (WP3 / G-OBS-1).
+#
+# These are Prometheus alerting rules written against the FIXED metric names and BOUNDED labels the
+# apps export at /metrics (see docs/production-readiness-wp3.md). They are version-controlled policy
+# only. NOT_EVALUATED: no alert manager, Prometheus server, or notification route is deployed or
+# tested by this repository — actual firing/delivery must be validated where such a stack exists.
+#
+# Every expression uses only fixed metric names and bounded labels (service, method, normalized
+# route template, status_class, controller-owned check/status). No request id, scan id, target, URL,
+# or user input appears here or in the underlying series.
+groups:
+  - name: aegis-availability
+    rules:
+      # 1. Control plane not ready for a sustained period (fail-closed readiness gate is down).
+      - alert: AegisControlPlaneNotReady
+        expr: aegis_readiness_ready{service="control-plane"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Control plane has been NOT_READY for 5m"
+          description: "GET /ready is failing closed; traffic must not be routed to this instance."
+
+      # 5. Persistence / readiness check failure (the audit substrate may be lost).
+      - alert: AegisPersistenceReadinessFailing
+        expr: aegis_readiness_check{service="control-plane",check="persistence"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Persistence readiness check failing for 2m"
+          description: "The persistence check in /ready is not PASS; the SQLite/audit store may be lost."
+
+      # 4. Process / container restart loop (start timestamp keeps advancing).
+      - alert: AegisRestartLoop
+        expr: changes(aegis_process_start_timestamp_seconds[15m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Service restarted more than 3 times in 15m"
+          description: "A crash/restart loop is likely; check container exit status and readiness."
+
+  - name: aegis-http
+    rules:
+      # 2. Repeated HTTP 5xx responses (server faults). /ready's fail-closed 503 is excluded — it has
+      #    its own readiness alerts above and is expected operational state, not a server fault.
+      - alert: AegisHttp5xxElevated
+        expr: |
+          sum by (service) (
+            rate(aegis_http_responses_total{status_class="5xx",route!="/ready"}[5m])
+          ) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated 5xx response rate over 10m"
+          description: "Server-fault responses exceed the threshold; inspect structured error logs."
+
+      # 3. Elevated request latency (p95 over the fixed histogram buckets).
+      - alert: AegisRequestLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (service, le) (rate(aegis_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 request latency above 1s for 10m"
+          description: "Requests are slow; correlate with in-flight gauge and 5xx rate."
