@@ -44,8 +44,11 @@ if [ ! -s "$OPENROUTER_API_KEY_SOURCE" ]; then
 fi
 # Local digest of the source key for a value-free presence proof; the key itself is never emitted.
 KEY_SHA="$(shasum -a 256 "$OPENROUTER_API_KEY_SOURCE" | cut -d' ' -f1)"
-# Key value read for ABSENCE scans only. Never printed.
+# Key value read for ABSENCE scans only. Never printed, and never passed as a command argument:
+# `contains_key` searches stdin for it via a bash fd fed by the `printf` builtin, so the value
+# never appears in any external process's argv (i.e. not visible in `ps`/`/proc`).
 KEY_VALUE="$(cat "$OPENROUTER_API_KEY_SOURCE")"
+contains_key() { grep -qF -f <(printf '%s' "$KEY_VALUE"); }
 
 echo "== D. Build + bring up stack (project $PROJECT) =="
 if ! docker compose $STACK -p "$PROJECT" build >/tmp/or-build.log 2>&1; then
@@ -90,7 +93,7 @@ path_absent_in "$CP" "control-plane"
 path_absent_in "$LAB" "lab-api"
 path_absent_in "$PX" "egress-proxy"
 # The key must never appear in ANY container's environment (it is a file mount, not an env var).
-if docker inspect "$CP" "$GW" "$LAB" "$PX" 2>/dev/null | grep -qF "$KEY_VALUE"; then
+if docker inspect "$CP" "$GW" "$LAB" "$PX" 2>/dev/null | contains_key; then
   fail "credential value FOUND in a container environment"
 else
   pass "credential value absent from every container environment"
@@ -130,7 +133,7 @@ fi
 echo "== H. Secret scan (key value must appear NOWHERE) =="
 scan_target() { # label command...
   local label="$1"; shift
-  if "$@" 2>/dev/null | grep -qF "$KEY_VALUE"; then
+  if "$@" 2>/dev/null | contains_key; then
     fail "credential FOUND in $label"
   else
     pass "credential absent in $label"
