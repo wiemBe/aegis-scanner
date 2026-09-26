@@ -1430,7 +1430,7 @@ logic and never fed substitute traffic; offline authority model unchanged.
 
 ---
 
-### Phase 2.9 — Consolidated End-to-End Synthetic Acceptance — `OFFLINE_PASS` + `CONTAINERIZED_SYNTHETIC_PASS` (live provider NOT_EVALUATED)
+### Phase 2.9 — Consolidated End-to-End Synthetic Acceptance — `OFFLINE_PASS` + `CONTAINERIZED_SYNTHETIC_PASS` + `LIVE_GO (narrow scope; human-adjudicated 2026-09-26)`
 **Goal.** ONE continuous, bounded, controller-governed synthetic assessment lifecycle that *composes*
 the already-accepted Phase 2.3 (remediation/retest), Phase 2.6 (REPORT_AGENT reporting) and Phase 2.7
 (assessment lifecycle) capabilities over the single authorized `aegis-ops` detection-control slice —
@@ -1528,8 +1528,12 @@ runs).**
 - `gateway_mode = DETERMINISTIC_DOUBLE`; `simulated_model_calls = 5` / `simulated_usage_tokens = 697`
   (simulated, not provider); `provider_calls = 0`; `provider_usage_tokens = NOT_EVALUATED`;
   `exact_model_identity = NOT_EVALUATED`; `live_provider_budget_enforced = NOT_EVALUATED`
-- `phase_2_9_live_provider_status = NOT_EVALUATED`
-- Phase 2.3 / 2.6 / 2.7 live statuses remain `NOT_EVALUATED`.
+- `phase_2_9_live_provider_status = LIVE_GO (narrow scope; human-adjudicated 2026-09-26 — see
+  "Narrow-scope LIVE GO" below)`. The deterministic-double statuses above are unchanged and are NOT
+  the basis of that claim; the LIVE GO rests solely on the human-adjudicated live campaign evidence.
+- Phase 2.3 / 2.6 / 2.7 live statuses remain `NOT_EVALUATED` as independent phase claims — their
+  contracts were exercised only *within* the one bounded Phase 2.9 lifecycle, not as standalone live
+  acceptances.
 
 No LIVE GO is claimed from a deterministic gateway double. `ruff` + `mypy` clean on the changed files.
 
@@ -1552,14 +1556,39 @@ decisions, finding, remediation recommendation, patch receipt, retest evidence, 
 (JSON/Markdown/HTML), cleanup ledger + leftover proof, image/tool provenance, acceptance verdict, and
 `SHA256SUMS` (manifest re-verified after write).
 
-**Future permitted live claim (only after an explicitly authorized successful campaign).** *"LIVE GO
+**Narrow-scope LIVE GO (human-adjudicated 2026-09-26 — condition now met).** *"LIVE GO
 for one bounded controller-authorized synthetic assessment lifecycle that produced a verifier-confirmed
 finding, applied a registered remediation, passed a fresh verifier-adjudicated retest, generated a
 controller-authoritative Report Agent report, and proved cleanup."* Explicitly EXCLUDES production
 readiness, real/staging targets, arbitrary remediation, autonomous source-code repair, general
 adversary simulation, full OWASP coverage, broad tool coverage and performance superiority.
 
-**Proposed live command (not executed here; separate explicit authorization required).**
+This claim rests on ONE explicitly-authorized, independently-verified live campaign:
+- **Campaign:** `phase-2.9-consolidated-5af53a4d2dba`; authorization ref
+  `authz-p29-staging-20260926-efe-r2` (armed == controller-recorded).
+- **Evidence:** `artifacts/phase-2.9-live-20260926T092213Z/evidence-phase-2.9-consolidated-5af53a4d2dba/`
+  (local/gitignored). Manifests independently recomputed and VERIFIED: outer `LIVE_SHA256SUMS`
+  (27/27), campaign `SHA256SUMS` (20/20), nested `report/SHA256SUMS` (3/3), 0 missing / 0 mismatch.
+- **Observed facts:** status `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION` (exit 0); provider model
+  exactly `deepseek-v4-pro`; **5** provider calls / **7,355** cumulative tokens (≤ 5 / ≤ 15,000);
+  37 checks = 34 True / 0 False / 3 NOT_EVALUATED (the three `simulated_*` checks, NE by design in
+  live mode); all 8 live acceptance gates true (incl. `credential_isolation_proven`,
+  `range_cleanup_complete`, `projection_correspondence_complete`).
+- **Credential isolation (runtime, value-free):** `AI_AUTH_TOKEN` present ONLY in `llm-gateway`;
+  absent from `control-plane` / `lab-api` / `egress-proxy` (all probes rc 0, all pass).
+- **Report:** assembled from the ACTUAL post-cleanup state — `COMPLETE`, `cleanup.succeeded=true`,
+  all 5 obligations, no failures; `generation_mode = LIVE_CONTROLLER_FALLBACK`, model prose
+  downgraded (production global narrative stays on controller fallback; candidate
+  `Phase29ReportFactProjectionV1` NOT activated).
+- **Cleanup:** gateway `down_rc=0`, all leftover probes rc 0, `no_leftovers=true`; range `PASS`,
+  `teardown_ok=true`, `leftover_query_ok=true`, `no_leftovers=true`, egress blocked, internal
+  network; post-run Docker sweep: 0 campaign-scoped containers / networks / volumes.
+- **Adjudication:** approved by the operator (bayefeuzunoglu@gmail.com) on 2026-09-26 for THIS narrow
+  scope only. No production readiness, real/staging targets, or broad coverage is claimed, and no
+  other phase's independent live status is changed.
+
+**Live command (executed once, under separate explicit authorization, for the adjudicated campaign
+above; re-running requires a fresh explicit authorization).**
 ```
 python scripts/phase_2_9_consolidated_acceptance.py --execute-live \
     --authorization-ref <non-secret-ref> --max-provider-calls 5 --max-total-tokens 15000
@@ -1643,29 +1672,31 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
   live-provider identity/budget checks carry the observed facts, and the typed budget verdict uses the
   mode-correct check. A false live-provider check cannot yield the observed-success status.
 
-**This task did not execute a paid campaign.** `phase_2_9_live_provider_status` and every phase's
-`live_status` remain `NOT_EVALUATED`; **no LIVE GO is claimed.** The exact five-call / 15,000-token
-ceiling and explicit `--execute-live` + non-secret `--authorization-ref` arming are unchanged.
-Verified with 57 focused mocked tests (`tests/test_phase_2_9_live_adapter.py`, no real
-docker/gateway/provider), plus the Phase 2.9 and Phase 2.7-integration suites (89 passed, 0 skipped);
-`ruff` + `mypy` clean on the changed files.
+**(Historical — the implementation/hardening task itself executed no paid campaign.)** At that task's
+commit, `phase_2_9_live_provider_status` and every phase's `live_status` were `NOT_EVALUATED` and no
+LIVE GO was claimed. The exact five-call / 15,000-token ceiling and explicit `--execute-live` +
+non-secret `--authorization-ref` arming are unchanged. Verified with 57 focused mocked tests
+(`tests/test_phase_2_9_live_adapter.py`, no real docker/gateway/provider), plus the Phase 2.9 and
+Phase 2.7-integration suites (89 passed, 0 skipped); `ruff` + `mypy` clean on the changed files. The
+narrow-scope LIVE GO was recorded later, from a subsequent authorized+adjudicated campaign (see
+"Narrow-scope LIVE GO" above).
 
-**Readiness.** With the mandatory range-cleanup proof and required gateway-retained projection now in
-place and mock-verified, the implementation is **`LIVE_READY` for exactly one separately authorized,
-bounded Phase 2.9 paid campaign**. This is **not** a LIVE GO: until that single campaign executes and
-its evidence is independently adjudicated, `phase_2_9_live_provider_status = NOT_EVALUATED` remains
-unchanged and no live claim is derived.
+**Readiness (superseded).** The implementation was `LIVE_READY` for exactly one separately
+authorized, bounded paid campaign; that campaign has since run and been human-adjudicated, so
+`phase_2_9_live_provider_status` is now the narrow-scope `LIVE_GO` documented above (not a broad or
+production GO).
 
-**Live DeepSeek staging observation (2026-09-26) — `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION`, not a
-LIVE GO.** One separately-authorized bounded paid campaign was run and observed (campaign
-`phase-2.9-consolidated-131efda36856`, evidence
+**Live DeepSeek staging campaigns (2026-09-26).** Two separately-authorized bounded paid campaigns
+were run. The FIRST (campaign `phase-2.9-consolidated-131efda36856`, evidence
 `artifacts/phase-2.9-live-20260926T082237Z/evidence-phase-2.9-consolidated-131efda36856/`, historical
-— do not modify): exact `deepseek-v4-pro` identity confirmed; 5/5 provider calls succeeded; **8,858**
-total provider tokens (≤ 15,000); all seven live acceptance gates true; zero false checks; gateway
-and range cleanup succeeded with zero Docker leftovers; inner and outer SHA-256 manifests verified.
-The final report was safely downgraded to `LIVE_CONTROLLER_FALLBACK`. This is an observation pending
-independent human adjudication; `phase_2_9_live_provider_status` stays `NOT_EVALUATED` and no LIVE GO
-or production readiness is claimed. **No model fine-tuning or training was performed** — the agents
+— do not modify): `deepseek-v4-pro`, 5/5 calls, **8,858** tokens, all live gates true, zero false
+checks, gateway+range cleanup clean, zero leftovers, manifests verified, report
+`LIVE_CONTROLLER_FALLBACK`; it remained `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION` (no GO derived).
+The SECOND (`phase-2.9-consolidated-5af53a4d2dba`, auth ref `authz-p29-staging-20260926-efe-r2`) is
+the human-adjudicated basis of the narrow-scope LIVE GO recorded above (5 calls / 7,355 tokens; 34
+True / 0 False / 3 NE checks; all 8 gates true; per-service credential isolation proven; cleanup
+clean; all three manifests independently re-verified). **No model fine-tuning or training was
+performed** — the agents
 are governed entirely by prompts, typed contracts and the controller.
 
 **Production-promotion hardening applied after staging (2026-09-26; no paid call in this task).**
@@ -1708,8 +1739,10 @@ are governed entirely by prompts, typed contracts and the controller.
 - **No NOT_EVALUATED dimension is converted to PASS without direct evidence**, and no general
   production readiness or broad security coverage is claimed.
 
-**Stop condition.** Do not execute the paid campaign without separate explicit authorization; do not
-start Phase 3.0.
+**Stop condition.** The narrow-scope LIVE GO is recorded from the one adjudicated campaign; do not
+treat it as production readiness, real/staging targets, or broad coverage, and do not derive any
+other phase's live status from it. Any further paid campaign still requires a fresh separate explicit
+authorization (a new non-secret `--authorization-ref`); do not start Phase 3.0.
 
 ---
 
