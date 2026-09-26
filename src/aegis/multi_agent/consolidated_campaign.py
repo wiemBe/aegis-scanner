@@ -47,7 +47,14 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import uuid4
 
 from aegis.container_acceptance.contracts import CleanupProof
-from aegis.container_acceptance.docker_cli import count_by_label, docker, image_id
+from aegis.container_acceptance.docker_cli import (
+    DockerQueryError,
+    DockerUnavailable,
+    count_by_label,
+    docker,
+    image_id,
+    name_present,
+)
 from aegis.multi_agent.adversary_simulation import AdvAgentJob
 from aegis.multi_agent.contracts import (
     AdversaryRemediationRecommendationOutput,
@@ -272,6 +279,71 @@ class Phase29ModelDouble:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class ResourceRemoval:
+    """The observed outcome of removing ONE labelled docker resource during teardown.
+
+    ``ok`` is truthful: a resource counts as gone only when *we* removed it (``docker rm`` rc 0), or
+    a subsequent successful strict name query proved it already absent (idempotent re-teardown). A
+    non-zero/timed-out removal whose absence query itself failed stays UNKNOWN -> ``ok`` is False.
+    """
+
+    kind: str
+    name: str
+    remove_rc: int
+    remove_timed_out: bool
+    absence_query_ok: bool
+    absent_confirmed: bool
+    diagnostic: str = ""
+
+    @property
+    def removed(self) -> bool:
+        return self.remove_rc == 0 and not self.remove_timed_out
+
+    @property
+    def ok(self) -> bool:
+        return self.removed or (self.absence_query_ok and self.absent_confirmed)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "name": self.name,
+            "remove_rc": self.remove_rc,
+            "remove_timed_out": self.remove_timed_out,
+            "removed": self.removed,
+            "absence_query_ok": self.absence_query_ok,
+            "absent_confirmed": self.absent_confirmed,
+            "ok": self.ok,
+            "diagnostic": self.diagnostic,
+        }
+
+
+@dataclass(frozen=True)
+class TeardownResult:
+    """The observable result of a range teardown attempt (never "invoked == succeeded")."""
+
+    resources: tuple[ResourceRemoval, ...]
+
+    @property
+    def ok(self) -> bool:
+        # Vacuously true when nothing was ever named; otherwise every resource must be gone.
+        return all(r.ok for r in self.resources)
+
+    @property
+    def query_ok(self) -> bool:
+        return all(r.absence_query_ok for r in self.resources)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "query_ok": self.query_ok,
+            "resources": [r.as_dict() for r in self.resources],
+        }
+
+    def failure_summary(self) -> str:
+        return ";".join(r.diagnostic for r in self.resources if not r.ok)[:180]
+
+
 @dataclass
 class ContainerOpsRange:
     """A REAL ``aegis_range.ops`` container on an internal, no-egress docker network.
@@ -478,11 +550,50 @@ class ContainerOpsRange:
         _rc, out = self._helper(code, timeout=20)
         return out.strip()[:120] or "EGRESS_PROOF_UNAVAILABLE"
 
-    def teardown(self) -> None:
+    def teardown(self) -> TeardownResult:
+        """Remove the container then the network, capturing every return code / timeout.
+
+        Idempotent: a re-teardown of an already-removed resource sees ``docker rm`` return non-zero
+        ("No such ...") and then proves the resource gone with a strict, successful name query. A
+        removal that fails AND whose absence cannot be strictly proven stays UNKNOWN (not ``ok``).
+        """
+
+        resources: list[ResourceRemoval] = []
         if self._container:
-            docker("rm", "-f", self._container, timeout=30)
+            resources.append(
+                self._remove("container", self._container, ("rm", "-f", self._container))
+            )
         if self._network:
-            docker("network", "rm", self._network, timeout=30)
+            resources.append(
+                self._remove("network", self._network, ("network", "rm", self._network))
+            )
+        return TeardownResult(resources=tuple(resources))
+
+    def _remove(self, kind: str, name: str, argv: tuple[str, ...]) -> ResourceRemoval:
+        result = docker(*argv, timeout=30)
+        if result.returncode == 0 and not result.timed_out:
+            return ResourceRemoval(
+                kind=kind, name=name, remove_rc=result.returncode,
+                remove_timed_out=result.timed_out, absence_query_ok=True,
+                absent_confirmed=True, diagnostic="removed",
+            )
+        # Removal did not clearly succeed. It may be an idempotent no-op (the resource was already
+        # removed by an earlier cleanup pass) or a genuine failure. Only a successful strict query
+        # distinguishes the two; a failed query keeps absence UNKNOWN and the resource not-ok.
+        try:
+            present = name_present(kind, name)
+        except (DockerQueryError, DockerUnavailable) as exc:
+            return ResourceRemoval(
+                kind=kind, name=name, remove_rc=result.returncode,
+                remove_timed_out=result.timed_out, absence_query_ok=False,
+                absent_confirmed=False, diagnostic=f"absence_unknown:rc={result.returncode}:{exc}",
+            )
+        where = "still_present" if present else "proven_absent"
+        return ResourceRemoval(
+            kind=kind, name=name, remove_rc=result.returncode, remove_timed_out=result.timed_out,
+            absence_query_ok=True, absent_confirmed=not present,
+            diagnostic=f"{where}:rc={result.returncode}",
+        )
 
     def leftover_proof(self, *, was_internal: bool, egress_proof: str) -> CleanupProof:
         return CleanupProof(
@@ -868,7 +979,12 @@ class ConsolidatedOpsCampaign:
             return True  # in-process double: state is discarded with the process
         if obligation == "TEARDOWN_RANGE":
             if self.container is not None:
-                self.container.teardown()
+                # Truthful: the ledger entry is compensated ONLY when teardown actually removed the
+                # range (or strictly proved it already gone), never merely because teardown() ran.
+                try:
+                    return self.container.teardown().ok
+                except (DockerQueryError, DockerUnavailable, ContainerRangeError):
+                    return False
             return True
         if obligation == "REVOKE_REFERENCES":
             return True
@@ -895,6 +1011,9 @@ class ConsolidatedOpsCampaign:
                 "status": "NOT_STARTED",
                 "backend": "CONTAINERIZED_SYNTHETIC" if self.containerized else "IN_PROCESS_DOUBLE",
                 "teardown_ran": False,
+                "teardown_ok": False,
+                "teardown_error": None,
+                "teardown_diagnostics": [],
                 "leftover_query_ok": False,
                 "no_leftovers": None,
                 "leftover_proof": None,
@@ -904,9 +1023,15 @@ class ConsolidatedOpsCampaign:
 
         teardown_error: str | None = None
         teardown_ran = False
+        teardown_ok = False
+        teardown_diagnostics: list[dict[str, Any]] = []
         try:
-            self.container.teardown()
+            teardown_result = self.container.teardown()
             teardown_ran = True
+            teardown_ok = teardown_result.ok
+            teardown_diagnostics = teardown_result.as_dict()["resources"]
+            if not teardown_ok:
+                teardown_error = f"TEARDOWN_INCOMPLETE:{teardown_result.failure_summary()}"
         except Exception as exc:  # noqa: BLE001 - fail closed; teardown failure must be visible
             teardown_error = f"{type(exc).__name__}:{str(exc)[:120]}"
 
@@ -926,7 +1051,10 @@ class ConsolidatedOpsCampaign:
             proof_dump = None
             teardown_error = teardown_error or f"{type(exc).__name__}:{str(exc)[:120]}"
 
-        if teardown_ran and leftover_query_ok and no_leftovers:
+        # PASS requires a genuinely SUCCESSFUL teardown (or strictly proven prior absence) AND a
+        # successful leftover query AND zero labelled leftovers. A teardown that merely ran is not
+        # enough. A failed leftover query is COLLECT_FAILED; any other shortfall is CLEANUP_FAILED.
+        if teardown_ok and leftover_query_ok and no_leftovers:
             status = "PASS"
         elif not leftover_query_ok:
             status = "COLLECT_FAILED"
@@ -936,7 +1064,9 @@ class ConsolidatedOpsCampaign:
             "status": status,
             "backend": "CONTAINERIZED_SYNTHETIC",
             "teardown_ran": teardown_ran,
+            "teardown_ok": teardown_ok,
             "teardown_error": teardown_error,
+            "teardown_diagnostics": teardown_diagnostics,
             "leftover_query_ok": leftover_query_ok,
             "no_leftovers": no_leftovers,
             "leftover_proof": proof_dump,

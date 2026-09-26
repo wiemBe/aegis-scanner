@@ -14,12 +14,18 @@ from typing import Any
 
 import pytest
 
+import aegis.multi_agent.consolidated_campaign as campaign_mod
 import aegis.multi_agent.phase_2_9_live_gateway as live_gateway
+from aegis.container_acceptance import docker_cli
 from aegis.container_acceptance.contracts import CleanupProof
+from aegis.container_acceptance.docker_cli import DockerQueryError, DockerResult
 from aegis.multi_agent.consolidated_campaign import (
     CANONICAL_MODEL,
     ConsolidatedOpsCampaign,
+    ContainerOpsRange,
     Phase29ModelDouble,
+    ResourceRemoval,
+    TeardownResult,
 )
 from aegis.multi_agent.contracts import AgentRole
 from aegis.multi_agent.live_safety import LiveExecutionRequest
@@ -208,7 +214,9 @@ SUCCESSFUL_RANGE_CLEANUP: dict[str, Any] = {
     "status": "PASS",
     "backend": "CONTAINERIZED_SYNTHETIC",
     "teardown_ran": True,
+    "teardown_ok": True,
     "teardown_error": None,
+    "teardown_diagnostics": [],
     "leftover_query_ok": True,
     "no_leftovers": True,
     "leftover_proof": {
@@ -908,8 +916,20 @@ class _FakeRange:
     def egress_blocked_proof(self) -> str:
         return "EGRESS_BLOCKED:TimeoutError"
 
-    def teardown(self) -> None:
+    def teardown(self) -> TeardownResult:
         self.torn_down = True
+        return TeardownResult(
+            resources=(
+                ResourceRemoval(
+                    kind="container", name="fake-ops", remove_rc=0, remove_timed_out=False,
+                    absence_query_ok=True, absent_confirmed=True, diagnostic="removed",
+                ),
+                ResourceRemoval(
+                    kind="network", name="fake-net", remove_rc=0, remove_timed_out=False,
+                    absence_query_ok=True, absent_confirmed=True, diagnostic="removed",
+                ),
+            )
+        )
 
     def leftover_proof(self, *, was_internal: bool, egress_proof: str) -> CleanupProof:
         remaining = 0 if self._clean else 1
@@ -1053,3 +1073,232 @@ def test_five_true_correspondence_records_on_success(tmp_path: Path) -> None:
     assert acceptance["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
     assert acceptance["projection_correspondence"] == [True, True, True, True, True]
     assert acceptance["live_acceptance_gates"]["projection_correspondence_complete"] is True
+
+
+# --------------------------------------------------------------------------- #
+# CORRECTION 3: fail-CLOSED range-cleanup boundary. These exercise the REAL
+# count_by_label / name_present / ContainerOpsRange.teardown code with mocked
+# DockerResult; a failed list, timed-out query, or failed removal must never be
+# read as "clean" and must prevent PASS and LIVE_OBSERVED_SUCCESS.
+# --------------------------------------------------------------------------- #
+
+_OK_EMPTY = DockerResult(returncode=0, stdout="", stderr="")
+_OK_ONE = DockerResult(returncode=0, stdout="deadbeef\n", stderr="")
+_RC1 = DockerResult(returncode=1, stdout="", stderr="boom")
+_TIMEOUT = DockerResult(returncode=124, stdout="", stderr="", timed_out=True)
+
+
+class _FakeDocker:
+    """Deterministic ``docker`` double keyed off argv; returns canned DockerResults.
+
+    Routes: a ``name=`` filter -> name_present probe; a ``label=`` filter -> leftover count query
+    (per object kind); ``rm``/``network rm`` -> the removals. Every response is a supplied
+    DockerResult, so the REAL count/teardown logic runs against known return codes/timeouts.
+    """
+
+    def __init__(
+        self,
+        *,
+        container_rm: DockerResult = _OK_EMPTY,
+        network_rm: DockerResult = _OK_EMPTY,
+        label_query: DockerResult | dict[str, DockerResult] = _OK_EMPTY,
+        name_query: DockerResult | dict[str, DockerResult] = _OK_EMPTY,
+    ) -> None:
+        self.container_rm = container_rm
+        self.network_rm = network_rm
+        self.label_query = label_query
+        self.name_query = name_query
+        self.calls: list[tuple[str, ...]] = []
+
+    @staticmethod
+    def _kind(argv: list[str]) -> str:
+        if argv[:1] == ["ps"]:
+            return "container"
+        if argv[:2] == ["network", "ls"]:
+            return "network"
+        if argv[:2] == ["volume", "ls"]:
+            return "volume"
+        raise AssertionError(f"unexpected list argv {argv}")
+
+    @staticmethod
+    def _resolve(spec: DockerResult | dict[str, DockerResult], kind: str) -> DockerResult:
+        return spec[kind] if isinstance(spec, dict) else spec
+
+    def __call__(self, *args: str, timeout: float = 60.0, check: bool = False) -> DockerResult:
+        self.calls.append(args)
+        argv = list(args)
+        if any(a.startswith("name=") for a in argv):
+            return self._resolve(self.name_query, self._kind(argv))
+        if any(a.startswith("label=") for a in argv):
+            return self._resolve(self.label_query, self._kind(argv))
+        if argv[:1] == ["network"] and "rm" in argv:
+            return self.network_rm
+        if "rm" in argv:
+            return self.container_rm
+        raise AssertionError(f"unexpected docker argv {argv}")
+
+
+def _finalize(tmp_path: Path, fake: _FakeDocker, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Produce a REAL range-cleanup snapshot from mocked docker calls."""
+
+    monkeypatch.setattr(docker_cli, "docker", fake)  # count_by_label / name_present
+    monkeypatch.setattr(campaign_mod, "docker", fake)  # ContainerOpsRange._remove
+    campaign = ConsolidatedOpsCampaign(base_dir=tmp_path / "c", containerized=True)
+    rng = ContainerOpsRange(image_ref="img", label="aegis.phase29=deadbeefcafe")
+    rng._container = "aegis-p29-ops-deadbeefcafe"
+    rng._network = "aegis-p29-deadbeefcafe"
+    campaign.container = rng
+    return campaign._finalize_range_cleanup(network_internal=True, egress_proof="EGRESS_BLOCKED:X")
+
+
+def _prevents_success(tmp_path: Path, snapshot: dict[str, Any]) -> dict[str, Any]:
+    acceptance = _run(tmp_path, FakeCompose(), range_cleanup_override=snapshot)
+    assert acceptance["status"] == "LIVE_OBSERVED_FAILED_CLOSED"
+    assert acceptance["live_acceptance_gates"]["range_cleanup_complete"] is False
+    return acceptance
+
+
+# --- unit level: a failed/timed-out query can never be read as a count/absence ---
+
+
+def test_count_by_label_raises_on_nonzero_rc(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docker_cli, "docker", _FakeDocker(label_query=_RC1))
+    with pytest.raises(DockerQueryError):
+        docker_cli.count_by_label("container", "aegis.phase29=x")
+
+
+def test_count_by_label_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docker_cli, "docker", _FakeDocker(label_query=_TIMEOUT))
+    with pytest.raises(DockerQueryError):
+        docker_cli.count_by_label("volume", "aegis.phase29=x")
+
+
+def test_name_present_raises_on_failed_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(docker_cli, "docker", _FakeDocker(name_query=_RC1))
+    with pytest.raises(DockerQueryError):
+        docker_cli.name_present("network", "aegis-p29-x")
+
+
+# --- boundary: each failure prevents PASS and LIVE_OBSERVED_SUCCESS ---
+
+
+def test_container_list_failure_is_collect_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(label_query={"container": _RC1, "network": _OK_EMPTY, "volume": _OK_EMPTY})
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["status"] == "COLLECT_FAILED"
+    assert snap["leftover_query_ok"] is False
+    assert snap["no_leftovers"] is None
+    _prevents_success(tmp_path, snap)
+
+
+def test_network_list_failure_is_collect_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(label_query={"container": _OK_EMPTY, "network": _RC1, "volume": _OK_EMPTY})
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["status"] == "COLLECT_FAILED"
+    assert snap["no_leftovers"] is None
+    _prevents_success(tmp_path, snap)
+
+
+def test_volume_list_failure_is_collect_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(label_query={"container": _OK_EMPTY, "network": _OK_EMPTY, "volume": _RC1})
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["status"] == "COLLECT_FAILED"
+    assert snap["no_leftovers"] is None
+    _prevents_success(tmp_path, snap)
+
+
+def test_query_timeout_is_collect_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(label_query=_TIMEOUT)
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["status"] == "COLLECT_FAILED"
+    assert snap["leftover_query_ok"] is False
+    assert snap["no_leftovers"] is None
+    _prevents_success(tmp_path, snap)
+
+
+def test_container_removal_failure_blocks_pass_even_if_labels_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The exact old fail-open: docker rm returns non-zero AND the resource is still present, yet
+    # the leftover label count reads 0. Truthful teardown must refuse PASS.
+    fake = _FakeDocker(
+        container_rm=_RC1,
+        name_query={"container": _OK_ONE, "network": _OK_EMPTY},  # container still present
+        label_query=_OK_EMPTY,  # (inconsistent) label count says clean
+    )
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["teardown_ok"] is False
+    assert snap["leftover_query_ok"] is True and snap["no_leftovers"] is True
+    assert snap["status"] == "CLEANUP_FAILED"
+    _prevents_success(tmp_path, snap)
+
+
+def test_network_removal_failure_blocks_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(
+        network_rm=_RC1,
+        name_query={"container": _OK_EMPTY, "network": _OK_ONE},  # network still present
+        label_query=_OK_EMPTY,
+    )
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["teardown_ok"] is False
+    assert snap["status"] == "CLEANUP_FAILED"
+    _prevents_success(tmp_path, snap)
+
+
+def test_removal_failure_with_failed_absence_query_stays_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rm failed and the strict absence query ALSO failed -> absence UNKNOWN -> not ok (req 4).
+    fake = _FakeDocker(container_rm=_RC1, name_query=_RC1, label_query=_OK_EMPTY)
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["teardown_ok"] is False
+    assert snap["status"] == "CLEANUP_FAILED"
+    _prevents_success(tmp_path, snap)
+
+
+def test_repeated_cleanup_after_proven_teardown_still_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Idempotency (req 4/6g): a second cleanup pass sees ``docker rm`` return non-zero ("No such
+    # ...") but a SUCCESSFUL name query proves the resource already gone -> ok -> PASS.
+    fake = _FakeDocker(
+        container_rm=_RC1,
+        network_rm=_RC1,
+        name_query=_OK_EMPTY,  # strictly proven absent
+        label_query=_OK_EMPTY,  # zero labelled leftovers
+    )
+    snap = _finalize(tmp_path, fake, monkeypatch)
+    assert snap["teardown_ok"] is True
+    assert snap["status"] == "PASS"
+    acceptance = _run(tmp_path, FakeCompose(), range_cleanup_override=snap)
+    assert acceptance["status"] == "LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION"
+    assert acceptance["live_acceptance_gates"]["range_cleanup_complete"] is True
+
+
+def test_teardown_result_reflects_removal_and_absence() -> None:
+    removed = ResourceRemoval(
+        kind="container", name="c", remove_rc=0, remove_timed_out=False,
+        absence_query_ok=True, absent_confirmed=True, diagnostic="removed",
+    )
+    proven = ResourceRemoval(
+        kind="network", name="n", remove_rc=1, remove_timed_out=False,
+        absence_query_ok=True, absent_confirmed=True, diagnostic="proven_absent:rc=1",
+    )
+    unknown = ResourceRemoval(
+        kind="network", name="n", remove_rc=1, remove_timed_out=False,
+        absence_query_ok=False, absent_confirmed=False, diagnostic="absence_unknown",
+    )
+    assert removed.ok is True and proven.ok is True and unknown.ok is False
+    assert TeardownResult((removed, proven)).ok is True
+    assert TeardownResult((removed, unknown)).ok is False
+    assert TeardownResult(()).ok is True  # nothing named -> vacuously torn down

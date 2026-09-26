@@ -972,12 +972,14 @@ def _assemble_live_acceptance(
     usage_complete = record["lifecycle"]["usage_complete"] is True
     gateway_cleanup_clean = stack_teardown.get("no_leftovers") is True
     # Range cleanup is MANDATORY for a live campaign: the controller ledger succeeded (incl. reset),
-    # teardown ran, the leftover query itself succeeded, and zero range resources remain. A None /
-    # missing / UNKNOWN / failed-query / non-PASS snapshot is NOT clean.
+    # teardown ran AND actually succeeded (or strictly proved prior absence), the leftover query
+    # itself succeeded, and zero range resources remain. A None / missing / UNKNOWN / failed-query /
+    # failed-teardown / non-PASS snapshot is NOT clean.
     range_cleanup_complete = (
         record["cleanup"]["cleanup_ok"] is True
         and range_cleanup.get("status") == "PASS"
         and range_cleanup.get("teardown_ran") is True
+        and range_cleanup.get("teardown_ok") is True
         and range_cleanup.get("leftover_query_ok") is True
         and range_cleanup.get("no_leftovers") is True
     )
