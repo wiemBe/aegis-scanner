@@ -8,6 +8,7 @@ never contains Ollama-specific, OpenAI-specific or company-specific request logi
       ├── DemoHeuristicProvider            (offline heuristic, provider_type "demo")
       ├── OllamaProvider                   (local/private Ollama runtime -> LOCAL_LLM)
       ├── InternalOpenAICompatibleProvider (company private endpoint -> INTERNAL_LLM; disabled)
+      ├── OpenRouterProvider               (OpenRouter Qwen3.8 27B; opt-in public egress)
       └── OpenAIResponsesProvider          (deprecated public compatibility profile; disabled)
 
 Every provider fails closed on malformed JSON, schema violations, model mismatch, timeout,
@@ -912,6 +913,82 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
 
+OPENROUTER_QWEN_MODEL = "qwen/qwen3.8-27b"
+
+
+class OpenRouterProvider(InternalOpenAICompatibleProvider):
+    """OpenRouter adapter pinned to Qwen3.8 27B and privacy-preserving routing.
+
+    This is an explicit public-egress profile. The API key exists only in the gateway, the
+    destination origin and model are immutable, and each request requires an upstream endpoint
+    that supports every requested parameter. ZDR and data-collection denial are requested on every
+    call; the response is still validated locally against the strict planner schema.
+    """
+
+    provider_type = "openrouter"
+    CHAT_PATH = "/api/v1/chat/completions"
+
+    def __init__(
+        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
+        # Do not inherit the internal-provider credential or placeholder-host semantics. Retain its
+        # hardened HTTP client, strict structured-output handling and all local schema validation.
+        _HttpModelProvider.__init__(
+            self,
+            settings.ai_base_url,
+            require_https=True,
+            timeout=settings.model_timeout_seconds,
+            body_limit=settings.max_response_bytes,
+            allowed_paths=(self.CHAT_PATH,),
+            extension_manifest_path=settings.extension_manifest_path,
+            transport=transport,
+        )
+        if transport is None and self._host != "openrouter.ai":
+            raise ValueError("AI_PROVIDER=openrouter requires AI_BASE_URL=https://openrouter.ai")
+        self.model = settings.ai_model
+        if self.model != OPENROUTER_QWEN_MODEL:
+            raise ValueError(
+                f"AI_PROVIDER=openrouter supports only the exact model {OPENROUTER_QWEN_MODEL}"
+            )
+        self._allowed_models = settings.allowed_model_set
+        if self._allowed_models != {OPENROUTER_QWEN_MODEL}:
+            raise ValueError("OpenRouter model allowlist must contain only the exact pinned model")
+        try:
+            self._token = settings.require_openrouter_api_key()
+        except RuntimeError:
+            raise ValueError(
+                "AI_PROVIDER=openrouter requires exactly one valid OPENROUTER_API_KEY or "
+                "OPENROUTER_API_KEY_FILE gateway credential source"
+            ) from None
+        self._auth_mode = "bearer"
+        self._temperature = settings.ai_temperature
+        self._seed = settings.ai_seed
+        self._response_mode = "json_schema"
+        # Routed upstreams do not provide a stable determinism guarantee, so omit seed and do not
+        # record one in provenance even if an individual endpoint happens to accept it.
+        self._supports_seed = False
+        self._use_proxy = settings.ai_use_egress_proxy
+        self._proxy_url = settings.provider_proxy_url
+        self._verify = settings.provider_ca_bundle or True
+        self._output_cap = settings.max_completion_tokens
+        self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    def _payload(
+        self,
+        system_prompt: str,
+        content: dict[str, Any],
+        max_output_tokens: int,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = super()._payload(system_prompt, content, max_output_tokens, schema)
+        payload["provider"] = {
+            "require_parameters": True,
+            "data_collection": "deny",
+            "zdr": True,
+        }
+        return payload
+
+
 class DeepSeekProvider(InternalOpenAICompatibleProvider):
     """DeepSeek hosted OpenAI-compatible API (/chat/completions) for the beast adversary route.
 
@@ -1420,6 +1497,7 @@ _PROVIDERS: dict[str, type[PlannerProvider]] = {
     "internal_openai_compatible": InternalOpenAICompatibleProvider,
     "openai_responses": OpenAIResponsesProvider,
     "deepseek": DeepSeekProvider,
+    "openrouter": OpenRouterProvider,
 }
 
 

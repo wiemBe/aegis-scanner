@@ -91,7 +91,12 @@ settings = get_settings()
 extension_runtime = load_extension_pack(settings.extension_manifest_path)
 # Structural enforcement: the control plane must never receive a provider credential. It reaches
 # the model only via the isolated llm-gateway. A credential mounted here is a misconfiguration.
-if settings.ai_auth_token is not None or settings.ai_auth_token_file is not None:
+if (
+    settings.ai_auth_token is not None
+    or settings.ai_auth_token_file is not None
+    or settings.openrouter_api_key is not None
+    or settings.openrouter_api_key_file is not None
+):
     raise RuntimeError(
         "Control plane must not be given a provider credential; mount it only on the "
         "llm-gateway service"
@@ -576,10 +581,13 @@ async def console_assessment_lifecycle(assessment_id: str) -> dict[str, object]:
         "campaign_id": spec.campaign_id,
         "state": lifecycle_ledger.get_state(assessment_id).value,
         "cancel_requested": lifecycle_ledger.cancel_requested(assessment_id),
-        "stages": [record.model_dump(mode="json") for record in
-                   lifecycle_ledger.all_stages(assessment_id)],
-        "cleanup": [entry.model_dump(mode="json") for entry in
-                    lifecycle_ledger.cleanup_entries(assessment_id)],
+        "stages": [
+            record.model_dump(mode="json") for record in lifecycle_ledger.all_stages(assessment_id)
+        ],
+        "cleanup": [
+            entry.model_dump(mode="json")
+            for entry in lifecycle_ledger.cleanup_entries(assessment_id)
+        ],
         "audit_trail": lifecycle_ledger.audit_trail(assessment_id),
         "live_full_lifecycle_status": "NOT_EVALUATED",
     }
@@ -1234,9 +1242,7 @@ async def _profile_availability() -> dict[str, ProfileAvailability]:
         if not authorized:
             return {
                 "available": False,
-                "reason": (
-                    f"The {enable_flag} runner has not returned an authorized attestation."
-                ),
+                "reason": (f"The {enable_flag} runner has not returned an authorized attestation."),
             }
         return {"available": True, "reason": ""}
 

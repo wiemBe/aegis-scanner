@@ -18,10 +18,16 @@ PROVIDER_MODE_LABELS: dict[str, str] = {
     # DeepSeek is a public hosted API: the label is honest about the egress and the loss of the
     # digest-pinned, reproducible provenance that local Ollama runs carry.
     "deepseek": "PUBLIC_LLM_DEEPSEEK",
+    "openrouter": "PUBLIC_LLM_OPENROUTER",
 }
 
 ProviderName = Literal[
-    "demo", "ollama", "internal_openai_compatible", "openai_responses", "deepseek"
+    "demo",
+    "ollama",
+    "internal_openai_compatible",
+    "openai_responses",
+    "deepseek",
+    "openrouter",
 ]
 AuthMode = Literal["none", "bearer"]
 # Structured-output negotiation for OpenAI-compatible backends. "json_schema" uses the provider's
@@ -77,6 +83,11 @@ class Settings(BaseSettings):
     # llm-gateway service, never the control plane or the beast sandbox, and is redacted everywhere.
     # Never commit it; export DEEPSEEK_API_KEY in the shell that runs compose.
     deepseek_api_key: SecretStr | None = None
+    # OpenRouter hosted-API key (AI_PROVIDER=openrouter). Production mounts it as a read-only
+    # file into llm-gateway only; inline environment configuration remains available for local
+    # development. The control plane refuses either credential source.
+    openrouter_api_key: SecretStr | None = None
+    openrouter_api_key_file: str | None = None
 
     # Control plane -> llm-gateway RPC over the internal planner-rpc network (no secret in transit).
     llm_gateway_url: str = "http://llm-gateway:8080"
@@ -213,6 +224,31 @@ class Settings(BaseSettings):
             raise RuntimeError("internal provider bearer credential is unavailable")
         if not value or "\x00" in value or len(value.encode("utf-8")) > 16_384:
             raise RuntimeError("internal provider bearer credential is invalid")
+        return value
+
+    def require_openrouter_api_key(self) -> str:
+        """Resolve one OpenRouter credential without leaking its value or source path."""
+
+        inline = self.openrouter_api_key
+        key_file = self.openrouter_api_key_file
+        if inline is not None and key_file is not None:
+            raise RuntimeError("configure exactly one OpenRouter credential source")
+        if inline is not None:
+            value = inline.get_secret_value().strip()
+        elif key_file is not None:
+            try:
+                path = Path(key_file)
+                if not path.is_absolute() or not path.is_file() or path.is_symlink():
+                    raise OSError
+                if path.stat().st_size > 16_384:
+                    raise OSError
+                value = path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                raise RuntimeError("OpenRouter credential file is unavailable") from None
+        else:
+            raise RuntimeError("OpenRouter bearer credential is unavailable")
+        if not value or "\x00" in value or len(value.encode("utf-8")) > 16_384:
+            raise RuntimeError("OpenRouter bearer credential is invalid")
         return value
 
     def require_zap_active_runner_client_secret(self) -> str:
