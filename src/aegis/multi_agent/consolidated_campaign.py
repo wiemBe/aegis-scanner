@@ -81,7 +81,10 @@ from aegis.multi_agent.live_safety import (
     estimate_input_tokens,
 )
 from aegis.multi_agent.report_agent import (
+    AssessmentReport,
     ReportAgentJob,
+    SourceCleanup,
+    SourceUsage,
     assemble_report,
     assert_report_projection_clean,
     build_report_request_projection,
@@ -113,6 +116,16 @@ OPS_ALIAS = "aegis-ops"
 
 NOT_EVALUATED = "NOT_EVALUATED"
 
+# The controller-owned cleanup obligations, in the order they are compensated. Shared by the cleanup
+# ledger run and the report so the FINAL report's obligation list is exactly what actually ran.
+CLEANUP_OBLIGATIONS = (
+    "RESET_SYNTHETIC_TARGET_TO_BASELINE",
+    "ROTATE_SENTINEL",
+    "INVALIDATE_PATCH_RECEIPT",
+    "REVOKE_REFERENCES",
+    "TEARDOWN_RANGE",
+)
+
 _HARDENING = (
     "--user", "65532:65532", "--read-only",
     "--tmpfs", "/tmp:size=32m",  # noqa: S108 - docker tmpfs mount spec, not a host temp path
@@ -121,6 +134,50 @@ _HARDENING = (
 )
 
 RangeBackendKind = Literal["IN_PROCESS_DOUBLE", "CONTAINERIZED_SYNTHETIC"]
+
+
+def derive_source_cleanup(
+    *,
+    cleanup_entries: list[tuple[str, bool]],
+    range_cleanup: dict[str, Any],
+    containerized: bool,
+) -> SourceCleanup:
+    """Derive the report's cleanup facts from the ACTUAL controller ledger + range snapshot.
+
+    Truthful and fail-closed:
+
+    * Any uncompensated controller obligation is a visible failure and ``succeeded`` is ``False``.
+    * For a containerized range, a non-``PASS`` snapshot is a failure: a ``COLLECT_FAILED`` (the
+      leftover query itself could not be established) makes ``succeeded`` ``"UNKNOWN"`` — it can
+      NEVER become success — while a ``CLEANUP_FAILED`` / ``NOT_STARTED`` / any other status is
+      ``False``.
+    * Only a fully-compensated ledger AND (for a container) a ``PASS`` snapshot yields ``True``.
+
+    ``cleanup_entries`` are ``(obligation, compensated)`` pairs read from the controller ledger; no
+    value is invented and nothing here can flip a failure into success.
+    """
+
+    obligations = tuple(obligation for obligation, _ in cleanup_entries)
+    failures = [obligation for obligation, compensated in cleanup_entries if not compensated]
+    ledger_ok = bool(cleanup_entries) and not failures
+
+    unknown = False
+    status = range_cleanup.get("status")
+    if containerized and status != "PASS":
+        if status == "COLLECT_FAILED":
+            unknown = True
+            failures.append("RANGE_LEFTOVER_QUERY_UNKNOWN")
+        else:
+            failures.append(f"RANGE_CLEANUP_{status}")
+
+    succeeded: bool | Literal["UNKNOWN"]
+    if not ledger_ok or (containerized and status not in ("PASS", "COLLECT_FAILED")):
+        succeeded = False
+    elif unknown:
+        succeeded = "UNKNOWN"
+    else:
+        succeeded = True
+    return SourceCleanup(succeeded=succeeded, obligations=obligations, failures=tuple(failures))
 
 
 @runtime_checkable
@@ -661,6 +718,12 @@ class ConsolidatedOpsCampaign:
     # Durable fail-closed range-cleanup snapshot; captured in run()'s finally so it survives aborts.
     range_cleanup: dict[str, Any] = field(default_factory=lambda: {"status": "NOT_STARTED"})
     _range_cleanup_proof: CleanupProof | None = field(default=None, init=False, repr=False)
+    # The REPORT_AGENT draft retained from the REPORT stage until post-cleanup final assembly.
+    _report_draft: AssessmentReportDraftOutput | None = field(
+        default=None, init=False, repr=False
+    )
+    # The single controller-authoritative report, assembled ONLY after the cleanup ledger completes.
+    final_report: AssessmentReport | None = field(default=None, init=False, repr=False)
     record: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -725,32 +788,48 @@ class ConsolidatedOpsCampaign:
 
     # ------------------------------- report -------------------------------- #
 
+    def _live_run(self) -> bool:
+        return self.model.name == "ISOLATED_LIVE_GATEWAY"
+
+    def _report_usage(self) -> SourceUsage:
+        identity_exact: bool | Literal["NOT_EVALUATED"]
+        if self._live_run():
+            identity_exact = set(self.model.reported_models) == {CANONICAL_MODEL}
+        else:
+            identity_exact = "NOT_EVALUATED"
+        return SourceUsage(
+            provider_calls=self.budget.calls_recorded,
+            input_tokens=sum(a.input_tokens or 0 for a in self.budget.attempts),
+            output_tokens=sum(a.output_tokens or 0 for a in self.budget.attempts),
+            total_tokens=self.budget.tokens_recorded,
+            tool_executions=4,
+            identity_exact_deepseek_v4_pro=identity_exact,
+        )
+
+    def _report_id(self) -> str:
+        return "rpt-" + _id16(self.asm.assessment_id, "report")
+
     def _report_executor(self, draft: AssessmentReportDraftOutput) -> Any:
+        """REPORT stage: run + persist the REPORT_AGENT job and retain the draft.
+
+        Cleanup has NOT run at this point, so NO authoritative report is assembled or saved here —
+        the report that could claim a cleanup outcome is deferred to :meth:`_assemble_final_report`,
+        which runs only after the cleanup ledger completes. The persisted REPORT_AGENT job
+        (QUEUED->CLAIMED->CLOSED) and the single provider call for its draft are preserved; the job's
+        projection honestly records cleanup as PENDING (``"UNKNOWN"``).
+        """
+
         asm = self.asm
 
         def executor(context: StageContext) -> StageOutcome:
             asm.calls["report"] = asm.calls.get("report", 0) + 1
-            from aegis.multi_agent.report_agent import SourceUsage
-
-            live_model_observed = self.model.name == "ISOLATED_LIVE_GATEWAY"
-            identity_exact: bool | Literal["NOT_EVALUATED"]
-            if live_model_observed:
-                identity_exact = set(self.model.reported_models) == {CANONICAL_MODEL}
-            else:
-                identity_exact = "NOT_EVALUATED"
-            usage = SourceUsage(
-                provider_calls=self.budget.calls_recorded,
-                input_tokens=sum(a.input_tokens or 0 for a in self.budget.attempts),
-                output_tokens=sum(a.output_tokens or 0 for a in self.budget.attempts),
-                total_tokens=self.budget.tokens_recorded,
-                tool_executions=4,
-                identity_exact_deepseek_v4_pro=identity_exact,
-            )
+            # A pre-cleanup source used ONLY to build the persisted job projection + the CONFIRMED
+            # gate; it is never assembled into a saved report while cleanup is still pending.
             source = asm.build_report_source(
-                cleanup_succeeded=True,
-                cleanup_obligations=("RESET_SYNTHETIC_TARGET_TO_BASELINE", "ROTATE_SENTINEL"),
-                usage=usage,
-                live_run=live_model_observed,
+                cleanup_succeeded="UNKNOWN",
+                cleanup_obligations=CLEANUP_OBLIGATIONS,
+                usage=self._report_usage(),
+                live_run=self._live_run(),
             )
             projection = build_report_request_projection(source)
             assert_report_projection_clean(projection)
@@ -762,24 +841,51 @@ class ConsolidatedOpsCampaign:
             )
             address = asm.report_queue.enqueue_job(job)
             asm.report_queue.claim_job(address)
-            report = assemble_report(
-                source=source,
-                model_output=draft,  # exercises the Phase 2.6 model-prose path (discard/downgrade)
-                report_id="rpt-" + _id16(asm.assessment_id, "report"),
-                version=1,
-            )
-            asm.report_queue.save_report(report)
             asm.report_queue.close_job(address)
+            self._report_draft = draft
             return StageOutcome(
-                ok=report.verified_findings[0].state == "CONFIRMED",
+                ok=source.findings[0].state == "CONFIRMED",
                 produced_epoch=context.run_epoch,
-                evidence_sha256=report.content_sha256,
-                side_effect_token=report.report_id,
+                evidence_sha256=projection_sha256(projection),
+                side_effect_token=self._report_id(),
                 usage=StageUsageDelta(provider_calls=1, tokens=0, tool_executions=0),
-                detail="assembled controller-authoritative report from records + model prose",
+                detail="executed REPORT_AGENT job; final report deferred until after cleanup",
             )
 
         return executor
+
+    def _assemble_final_report(self) -> AssessmentReport:
+        """Assemble the controller-authoritative FINAL report from the ACTUAL cleanup result.
+
+        Called once, AFTER the cleanup ledger and range teardown have completed, and BEFORE the
+        immutable artifact bundle is written. It re-derives cleanup truth from the controller ledger
+        and the durable range-cleanup snapshot (never assumed success), reuses the REPORT_AGENT draft
+        retained in the REPORT stage (no new provider call), and never mutates an already-manifested
+        report — it is the single saved report for the campaign (version 1).
+        """
+
+        asm = self.asm
+        cleanup = derive_source_cleanup(
+            cleanup_entries=[(e.obligation, bool(e.compensated)) for e in _cleanup_ledger(asm)],
+            range_cleanup=self.range_cleanup,
+            containerized=self.containerized,
+        )
+        source = asm.build_report_source(
+            cleanup_succeeded=cleanup.succeeded,
+            cleanup_obligations=cleanup.obligations,
+            cleanup_failures=cleanup.failures,
+            usage=self._report_usage(),
+            live_run=self._live_run(),
+        )
+        report = assemble_report(
+            source=source,
+            model_output=self._report_draft,  # retained draft (discard/downgrade path unchanged)
+            report_id=self._report_id(),
+            version=1,
+        )
+        asm.report_queue.save_report(report)
+        self.final_report = report
+        return report
 
     # ------------------------------- run ----------------------------------- #
 
@@ -936,13 +1042,7 @@ class ConsolidatedOpsCampaign:
             receipt_id = "rcpt-" + _id16(asm.assessment_id, "receipt")
             cleanup_ok = controller.run_cleanup(
                 spec.assessment_id,
-                (
-                    "RESET_SYNTHETIC_TARGET_TO_BASELINE",
-                    "ROTATE_SENTINEL",
-                    "INVALIDATE_PATCH_RECEIPT",
-                    "REVOKE_REFERENCES",
-                    "TEARDOWN_RANGE",
-                ),
+                CLEANUP_OBLIGATIONS,
                 lambda ob: self._compensate(ob, receipt_id),
             )
             _timeline("CLEANING_UP")
@@ -955,8 +1055,13 @@ class ConsolidatedOpsCampaign:
                 network_internal=network_internal, egress_proof=egress_proof
             )
 
+        # ONLY now — after the cleanup ledger AND range teardown have completed — assemble the single
+        # controller-authoritative report from the ACTUAL cleanup result, before the immutable bundle
+        # is written. No provider call happens here (the retained REPORT_AGENT draft is reused).
+        report = self._assemble_final_report()
         cleanup_proof = self._range_cleanup_proof
         self.record = self._build_record(
+            report=report,
             backend=backend,
             delegation=delegation,
             initial_plan=initial_plan,
@@ -1090,7 +1195,7 @@ class ConsolidatedOpsCampaign:
         finding = asm.remediation_ledger.get_finding(asm.finding_id)
         receipt = asm.remediation_ledger.get_receipt(kw["receipt_id"])
         assert finding is not None and receipt is not None
-        report = asm.get_report()
+        report = kw["report"]  # the post-cleanup FINAL report (assembled after the cleanup ledger)
         assert report is not None
         delegation_id = "adelg-" + _id16(asm.assessment_id, "delegation")
         lead_id = "agjob-" + _id16(asm.assessment_id, "lead")
@@ -1223,6 +1328,12 @@ class ConsolidatedOpsCampaign:
                 "retest_state": report.retest_results[0].state,
                 "generation_mode": report.generation_mode,
                 "live_report_agent_status": report.live_report_agent_status,
+                # Provenance: the report is finalized from the ACTUAL cleanup result AFTER the
+                # cleanup ledger runs — never a pre-cleanup assumed success.
+                "finalized_after_cleanup": True,
+                "cleanup_succeeded": report.cleanup.succeeded,
+                "cleanup_obligations": list(report.cleanup.obligations),
+                "cleanup_failures": list(report.cleanup.failures),
             },
             "lifecycle": {
                 "final_state": verdict.final_state.value,
@@ -1722,7 +1833,9 @@ def write_campaign_artifacts(
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    report = campaign.asm.get_report()
+    # The FINAL, post-cleanup report (assembled after the cleanup ledger). The manifest below covers
+    # exactly this report bundle, so the immutable evidence carries the truthful cleanup outcome.
+    report = campaign.final_report or campaign.asm.get_report()
     assert report is not None
 
     data_files: dict[str, Any] = {

@@ -36,7 +36,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 import httpx
 
@@ -464,9 +464,20 @@ class OpsDetectionControlLifecycle:
             detail=f"fresh retest {final.value}; causal break proven={ok}",
         )
 
-    def build_report_source(self, *, cleanup_succeeded: bool, cleanup_obligations: tuple[str, ...],
-                            usage: SourceUsage, live_run: bool = False) -> ReportSource:
-        """Assemble the report input STRICTLY from controller/verifier records (report truth)."""
+    def build_report_source(
+        self,
+        *,
+        cleanup_succeeded: bool | Literal["UNKNOWN"],
+        cleanup_obligations: tuple[str, ...],
+        usage: SourceUsage,
+        cleanup_failures: tuple[str, ...] = (),
+        live_run: bool = False,
+    ) -> ReportSource:
+        """Assemble the report input STRICTLY from controller/verifier records (report truth).
+
+        ``cleanup_succeeded`` / ``cleanup_failures`` are the ACTUAL cleanup result. A pre-cleanup
+        (preliminary) report passes ``"UNKNOWN"`` (cleanup has not run); the final report passes the
+        real ledger outcome. Cleanup is NEVER assumed to have succeeded here."""
 
         finding = self.remediation_ledger.get_finding(self.finding_id)
         receipt = self.remediation_ledger.get_receipt(
@@ -517,7 +528,9 @@ class OpsDetectionControlLifecycle:
             findings=(source_finding,),
             retests=(retest,),
             cleanup=SourceCleanup(
-                succeeded=cleanup_succeeded, obligations=cleanup_obligations, failures=()
+                succeeded=cleanup_succeeded,
+                obligations=cleanup_obligations,
+                failures=cleanup_failures,
             ),
             usage=usage,
             live_run=live_run,
