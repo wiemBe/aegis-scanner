@@ -815,8 +815,8 @@ class ConsolidatedOpsCampaign:
         Cleanup has NOT run at this point, so NO authoritative report is assembled or saved here —
         the report that could claim a cleanup outcome is deferred to :meth:`_assemble_final_report`,
         which runs only after the cleanup ledger completes. The persisted REPORT_AGENT job
-        (QUEUED->CLAIMED->CLOSED) and the single provider call for its draft are preserved; the job's
-        projection honestly records cleanup as PENDING (``"UNKNOWN"``).
+        (QUEUED->CLAIMED->CLOSED) and the single provider call for its draft are preserved; the
+        job's projection honestly records cleanup as PENDING (``"UNKNOWN"``).
         """
 
         asm = self.asm
@@ -859,8 +859,8 @@ class ConsolidatedOpsCampaign:
 
         Called once, AFTER the cleanup ledger and range teardown have completed, and BEFORE the
         immutable artifact bundle is written. It re-derives cleanup truth from the controller ledger
-        and the durable range-cleanup snapshot (never assumed success), reuses the REPORT_AGENT draft
-        retained in the REPORT stage (no new provider call), and never mutates an already-manifested
+        and the durable range-cleanup snapshot (never assumed success), reuses the retained
+        REPORT_AGENT draft (no new provider call), and never mutates an already-manifested
         report — it is the single saved report for the campaign (version 1).
         """
 
@@ -1055,9 +1055,9 @@ class ConsolidatedOpsCampaign:
                 network_internal=network_internal, egress_proof=egress_proof
             )
 
-        # ONLY now — after the cleanup ledger AND range teardown have completed — assemble the single
-        # controller-authoritative report from the ACTUAL cleanup result, before the immutable bundle
-        # is written. No provider call happens here (the retained REPORT_AGENT draft is reused).
+        # ONLY now — after the cleanup ledger AND range teardown have completed — assemble the one
+        # controller-authoritative report from the ACTUAL cleanup result, before the immutable
+        # bundle is written. No provider call happens here (the retained draft is reused).
         report = self._assemble_final_report()
         cleanup_proof = self._range_cleanup_proof
         self.record = self._build_record(
