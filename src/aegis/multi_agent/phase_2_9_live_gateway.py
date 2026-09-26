@@ -33,6 +33,7 @@ import json
 import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -339,6 +340,9 @@ class Phase29GatewayStack:
     runner: ComposeRunner = _default_compose_runner
     env: dict[str, str] = field(default_factory=dict)
     up_done: bool = False
+    health_attempts: int = 1
+    health_interval_seconds: float = 0.0
+    health_diagnostic: dict[str, Any] = field(default_factory=dict, init=False)
 
     @property
     def project(self) -> str:
@@ -364,19 +368,36 @@ class Phase29GatewayStack:
         return result
 
     def health(self, *, timeout: int = 30) -> bool:
-        """True iff both the gateway and the control plane answer their in-network health checks."""
+        """Wait boundedly until gateway and control-plane health endpoints both answer.
 
-        gw = self._dc(
-            "exec", "-T", GATEWAY_SERVICE, "python", "-c",
-            "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health')",
-            timeout=timeout,
-        )
-        cp = self._dc(
-            "exec", "-T", CONTROL_PLANE_SERVICE, "python", "-c",
-            "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')",
-            timeout=timeout,
-        )
-        return gw.returncode == 0 and cp.returncode == 0
+        ``docker compose up -d`` waits for the gateway dependency healthcheck but the control-plane
+        service itself has no compose healthcheck. Its process can therefore be running a fraction
+        before Uvicorn accepts connections. Production uses bounded retries; injected test stacks
+        default to one attempt so permanent-failure tests remain instant.
+        """
+
+        attempts = max(1, self.health_attempts)
+        for attempt in range(1, attempts + 1):
+            gw = self._dc(
+                "exec", "-T", GATEWAY_SERVICE, "python", "-c",
+                "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health')",
+                timeout=timeout,
+            )
+            cp = self._dc(
+                "exec", "-T", CONTROL_PLANE_SERVICE, "python", "-c",
+                "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')",
+                timeout=timeout,
+            )
+            self.health_diagnostic = {
+                "attempts": attempt,
+                "gateway_rc": gw.returncode,
+                "control_plane_rc": cp.returncode,
+            }
+            if gw.returncode == 0 and cp.returncode == 0:
+                return True
+            if attempt < attempts and self.health_interval_seconds > 0:
+                time.sleep(self.health_interval_seconds)
+        return False
 
     def control_plane_has_no_key(self, *, timeout: int = 30) -> bool:
         """Prove the control-plane process environment does not contain the provider credential."""
@@ -702,7 +723,11 @@ class LiveCampaignError(RuntimeError):
 
 
 def _default_stack_factory(campaign_id: str) -> Phase29GatewayStack:
-    return Phase29GatewayStack(campaign_id=campaign_id)
+    return Phase29GatewayStack(
+        campaign_id=campaign_id,
+        health_attempts=30,
+        health_interval_seconds=1.0,
+    )
 
 
 def _default_campaign_factory(
@@ -789,6 +814,9 @@ def run_live_campaign(
             raise LiveCampaignError("GATEWAY_STACK_UP_FAILED")
         preflight["gateway_healthy"] = stack.health()
         if not preflight["gateway_healthy"]:
+            live_model.failure_diagnostics.append(
+                {"code": "GATEWAY_UNHEALTHY", **stack.health_diagnostic}
+            )
             raise LiveCampaignError("GATEWAY_UNHEALTHY")
         preflight["control_plane_has_no_key"] = stack.control_plane_has_no_key()
         if not preflight["control_plane_has_no_key"]:

@@ -78,6 +78,7 @@ class FakeCompose:
         control_plane_has_key: bool = False,
         fail_up: bool = False,
         unhealthy: bool = False,
+        transient_unhealthy_execs: int = 0,
         reject_at: int | None = None,
         reject_usage: dict[str, int] | None = None,
         mismatch_at: int | None = None,
@@ -95,6 +96,8 @@ class FakeCompose:
         self.control_plane_has_key = control_plane_has_key
         self.fail_up = fail_up
         self.unhealthy = unhealthy
+        self.transient_unhealthy_execs = transient_unhealthy_execs
+        self.health_execs = 0
         self.reject_at = reject_at
         self.reject_usage = reject_usage
         self.mismatch_at = mismatch_at
@@ -147,7 +150,9 @@ class FakeCompose:
         if last == _HEALTH_PY:
             return ComposeResult(0, stdout=json.dumps({"model": self.health_model}))
         if _GW_HEALTH_SNIPPET in last or _CP_HEALTH_SNIPPET in last:
-            return ComposeResult(1 if self.unhealthy else 0)
+            self.health_execs += 1
+            transient_failure = self.health_execs <= self.transient_unhealthy_execs
+            return ComposeResult(1 if self.unhealthy or transient_failure else 0)
         return ComposeResult(0, stdout="")
 
     def argv_log_steps(self) -> list[list[str]]:
@@ -603,6 +608,23 @@ def test_stack_uses_unique_project_name_and_compose_files() -> None:
     argv = fake.argv_log[-1]
     assert "-p" in argv and stack.project in argv
     assert "docker-compose.yml" in argv and "docker-compose.deepseek.yml" in argv
+
+
+def test_stack_health_retries_transient_control_plane_startup_race() -> None:
+    fake = FakeCompose(transient_unhealthy_execs=2)
+    stack = Phase29GatewayStack(
+        campaign_id="phase-2.9-consolidated-abc123",
+        runner=fake,
+        health_attempts=3,
+        health_interval_seconds=0,
+    )
+    assert stack.health() is True
+    assert fake.health_execs == 4
+    assert stack.health_diagnostic == {
+        "attempts": 2,
+        "gateway_rc": 0,
+        "control_plane_rc": 0,
+    }
 
 
 def test_compose_project_name_is_legal_deterministic_and_unique() -> None:
