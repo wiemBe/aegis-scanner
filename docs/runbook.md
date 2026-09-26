@@ -381,6 +381,63 @@ AI_AUTH_TOKEN=<company-issued token>
 
 The control plane refuses to start if `AI_AUTH_TOKEN` is present in its own environment.
 
+## 6a. Deterministic production images + rollback (WP2 / G-ROLL-1)
+
+The base stack builds `control-plane`/`lab-api` locally (`build: .`), which is fine for local/demo
+use but is **not** deterministic for production. The production overlay
+[`docker-compose.prod.yml`](docker-compose.prod.yml) removes that local-build fallback and pins both
+services to a single **immutable image digest**, so a rollout — and its rollback — restore exact bits.
+
+- Reference form (required): `registry/repository@sha256:<64 lowercase hex characters>`. A mutable
+  tag (`latest`, `0.2.0`) is rejected.
+- The digest is **not** a secret. **Never** put registry or provider credentials in `AEGIS_IMAGE`, in
+  the overlay, in scripts, or in deploy logs. Registry auth is your own `docker login` (its credentials
+  live in the Docker credential store).
+- Both services run non-root (`USER 10001:10001`) with `read_only` rootfs, `no-new-privileges`, and
+  the resource/restart limits from §7-adjacent base compose (mem `512m`/`256m`, cpus `1.0`/`0.5`,
+  pids `256`/`128`, `restart: unless-stopped`). These are containment ceilings, **not** a load-test SLO.
+
+**Record the current digest** (before changing anything):
+
+```bash
+# Save the digest you are currently running so you can roll back to it.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config | grep -E '^\s+image:' | sort -u
+```
+
+**Deploy a new digest** (fail-closed preflight first, then bring up, then confirm readiness):
+
+```bash
+export AEGIS_IMAGE=registry.example.com/aegis@sha256:<64-hex>
+python -m aegis.deploy.preflight    # exits non-zero on a missing/tag-only/latest/malformed/non-sha256 ref
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  -f docker-compose.provider.yml up -d
+# Gate on readiness, never on /health:
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T control-plane \
+  python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/ready'); print(r.status)"
+```
+
+**Roll back** — restore the prior digest you recorded and repeat the preflight + `up -d` + `/ready`
+check:
+
+```bash
+export AEGIS_IMAGE=<prior recorded digest>
+python -m aegis.deploy.preflight
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.provider.yml up -d
+```
+
+**First-time non-root volume migration.** A fresh `aegis-data` volume inherits `/data`'s ownership
+(`10001:10001`) from the image, so the non-root control plane can write it. A volume created by an
+**older root build** stays root-owned and must be migrated once before upgrading — either recreate it
+(evidence permitting) or chown it to the runtime user:
+
+```bash
+docker run --rm -v <project>_aegis-data:/data busybox chown -R 10001:10001 /data
+```
+
+Not yet covered (see [production-readiness-wp2.md](production-readiness-wp2.md)): runtime digest **pull**
+verification (NOT_EVALUATED — no registry image available to pull), provider/gateway image pinning, and
+volume backup/restore.
+
 ## 7. Quality gates
 
 ```bash

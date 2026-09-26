@@ -1,0 +1,29 @@
+# Production deployment overlay (WP2 / G-ROLL-1) — deterministic, immutable image references.
+#
+# This overlay replaces the local `build:` of the two long-lived services with a single immutable
+# image reference pinned by sha256 digest, so a production rollout and its rollback are deterministic
+# (a digest cannot move the way `latest` or a mutable tag can). `build: !reset null` removes the base
+# stack's local-build fallback in the MERGED configuration — there is no silent fall-back to
+# `build: .`, `latest`, or another mutable tag in production mode. control-plane and lab-api are
+# pinned to the SAME digest. All base-stack hardening (read_only, no-new-privileges, resource/restart
+# limits, the /ready healthcheck) is inherited unchanged from docker-compose.yml.
+#
+# AEGIS_IMAGE must be an immutable reference of the form
+#   registry/repository@sha256:<64 lowercase hex characters>
+# The digest is not a secret; NEVER place registry or provider credentials in this file, in
+# AEGIS_IMAGE, or in any deploy log. Registry authentication is the operator's `docker login`
+# (credentials live in the Docker credential store, never here).
+#
+# Deploy / record / roll back (see docs/runbook.md §6a):
+#   export AEGIS_IMAGE=registry.example.com/aegis@sha256:<64-hex>
+#   python -m aegis.deploy.preflight            # fail-closed validation + rendered-config proof
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.provider.yml up -d      # add the provider overlay for the private endpoint
+services:
+  control-plane:
+    build: !reset null
+    image: "${AEGIS_IMAGE:?AEGIS_IMAGE must be an immutable registry/repository@sha256 digest; run python -m aegis.deploy.preflight}"
+
+  lab-api:
+    build: !reset null
+    image: "${AEGIS_IMAGE:?AEGIS_IMAGE must be an immutable registry/repository@sha256 digest; run python -m aegis.deploy.preflight}"

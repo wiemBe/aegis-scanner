@@ -8,6 +8,12 @@ claim. Phase 2.9 evidence and semantics are untouched.
 
 Audited at commit parent `00ecf25` on branch `codex/phase-2-9-live-adapter`.
 
+> **Update (WP2).** `G-ROOT-1`, `G-LIMITS-1`, and `G-ROLL-1` (P1 rows below) are now addressed on the
+> base stack — non-root `USER 10001:10001`, explicit mem/cpu/pids/restart limits, and an immutable
+> digest-pinned production overlay with a fail-closed preflight. See
+> [production-readiness-wp2.md](production-readiness-wp2.md). Overall status remains
+> **NOT_PRODUCTION_READY**; `G-OBS-1`/`G-SHUT-1` (P1) and the P2 set are still open.
+
 ---
 
 ## 1. Production deployment path (as built)
