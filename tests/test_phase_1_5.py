@@ -17,6 +17,7 @@ The authority for real engine behaviour is the live 1+1 synthetic smoke against 
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import http.client
@@ -2641,7 +2642,15 @@ def test_expired_and_tampered_leases_are_rejected_with_zero_traffic(
     assert response.error_code is ZapActiveErrorCode.LEASE_EXPIRED
     tampered, _ = signed_lease_token(target=VULN, projection=VULN_PROJECTION)
     prefix, payload, signature = tampered.split(".")
-    tampered = f"{prefix}.{payload}.{signature[:-1]}x"
+    # The signature is urlsafe-base64 of the 32-byte HMAC. Its FINAL base64 character carries only 4
+    # significant bits, so merely swapping that char (e.g. 'x'->'y', which share their top 4 bits)
+    # can decode to identical bytes and leave the signature valid — the tamper would then silently
+    # not happen. Decode, flip a byte deterministically, and re-encode so the token is ALWAYS
+    # genuinely tampered while staying a well-formed AZL token that reaches signature verification.
+    raw = bytearray(base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)))
+    raw[0] ^= 0xFF
+    forged = base64.urlsafe_b64encode(bytes(raw)).decode("ascii").rstrip("=")
+    tampered = f"{prefix}.{payload}.{forged}"
     response = executor.run(_request(lease_token=tampered, suffix="ab"))
     assert response.status == "REJECTED"
     assert response.error_code is ZapActiveErrorCode.LEASE_SIGNATURE_INVALID
