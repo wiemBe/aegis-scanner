@@ -32,6 +32,7 @@ from aegis.multi_agent.contracts import AgentRole
 from aegis.multi_agent.live_safety import LiveExecutionRequest
 from aegis.multi_agent.phase_2_9_live_gateway import (
     _HEALTH_PY,
+    _KEY_PRESENCE_SH,
     _KEY_PROBE_PY,
     _STEP_PY,
     ComposeResult,
@@ -76,6 +77,9 @@ class FakeCompose:
         *,
         health_model: str = CANONICAL_MODEL,
         control_plane_has_key: bool = False,
+        key_services: set[str] | None = None,
+        credential_probe_fail: str | None = None,
+        credential_probe_malformed: str | None = None,
         fail_up: bool = False,
         unhealthy: bool = False,
         transient_unhealthy_execs: int = 0,
@@ -94,6 +98,11 @@ class FakeCompose:
     ) -> None:
         self.health_model = health_model
         self.control_plane_has_key = control_plane_has_key
+        # Which services report the credential PRESENT. Default: only the gateway (correct).
+        self.key_services = key_services if key_services is not None else {"llm-gateway"}
+        # A service whose credential probe returns rc!=0 (failed) or non-PRESENT/ABSENT (malformed).
+        self.credential_probe_fail = credential_probe_fail
+        self.credential_probe_malformed = credential_probe_malformed
         self.fail_up = fail_up
         self.unhealthy = unhealthy
         self.transient_unhealthy_execs = transient_unhealthy_execs
@@ -147,6 +156,16 @@ class FakeCompose:
             return self._step(stdin)
         if last == _KEY_PROBE_PY:
             return ComposeResult(0, stdout="True" if self.control_plane_has_key else "False")
+        if last == _KEY_PRESENCE_SH:
+            service = argv[argv.index("-T") + 1]
+            if self.credential_probe_fail == service:
+                return ComposeResult(1, stderr="probe boom")
+            if self.credential_probe_malformed == service:
+                return ComposeResult(0, stdout="unexpected-garble")
+            present = service in self.key_services or (
+                service == "control-plane" and self.control_plane_has_key
+            )
+            return ComposeResult(0, stdout="PRESENT" if present else "ABSENT")
         if last == _HEALTH_PY:
             return ComposeResult(0, stdout=json.dumps({"model": self.health_model}))
         if _GW_HEALTH_SNIPPET in last or _CP_HEALTH_SNIPPET in last:
@@ -509,18 +528,88 @@ def test_secret_isolation_requires_key_free_control_plane(tmp_path: Path) -> Non
     assert fake.down_calls == 1
 
 
-def test_secret_isolation_is_evidence_derived_or_not_evaluated(tmp_path: Path) -> None:
+def test_secret_isolation_is_evidence_derived_and_proven(tmp_path: Path) -> None:
     fake = FakeCompose()
     acceptance = _run(tmp_path, fake)
     iso = acceptance["secret_isolation"]
     # control-plane probe genuinely ran and proved the process env is key-free.
     assert iso["control_plane_key_free"] is True
-    # "only in gateway" cannot be established from the single control-plane probe -> NOT_EVALUATED.
-    assert iso["provider_key_only_in_gateway"] == NOT_EVALUATED
+    # "only in gateway" is now a RUNTIME per-service proof (present in gateway, absent elsewhere).
+    assert iso["provider_key_only_in_gateway"] is True
     # There is NO hard-coded host_output_key_free=True claim anymore.
     assert "host_output_key_free" not in iso
     # The credential-free claim is evidence-derived from a scan of the transported evidence.
     assert iso["recorded_evidence_credential_free"] is True
+    # The observed-success verdict now requires the credential-isolation gate to be True.
+    assert acceptance["live_acceptance_gates"]["credential_isolation_proven"] is True
+
+
+# --------------------------------------------------------------------------- #
+# GAP 2: runtime per-service credential-placement proof (value-free).
+# --------------------------------------------------------------------------- #
+
+
+def _probe_by_service(acceptance: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    services = acceptance["secret_isolation"]["per_service_credential_probe"]
+    return {s["service"]: s for s in services}
+
+
+def test_credential_isolation_proof_records_every_service(tmp_path: Path) -> None:
+    acceptance = _run(tmp_path, FakeCompose())
+    probe = _probe_by_service(acceptance)
+    assert set(probe) == {"llm-gateway", "control-plane", "lab-api", "egress-proxy"}
+    assert probe["llm-gateway"]["observed_present"] is True and probe["llm-gateway"]["pass"] is True
+    for svc in ("control-plane", "lab-api", "egress-proxy"):
+        assert probe[svc]["observed_present"] is False and probe[svc]["pass"] is True
+    # The probe records ONLY booleans + return codes — never a credential value.
+    blob = json.dumps(acceptance["secret_isolation"])
+    assert "AI_AUTH_TOKEN" not in blob and "PRESENT" not in blob
+
+
+def _assert_aborts_before_dispatch(
+    fake: FakeCompose, acceptance: dict[str, Any], code: str
+) -> None:
+    assert acceptance["status"] == "LIVE_ABORTED_FAIL_CLOSED"
+    assert acceptance["abort_code"] == code
+    assert fake.step_index == 0  # aborted BEFORE the first provider call
+    assert fake.down_calls == 1  # stack still torn down
+    assert acceptance["integrity_manifest_verified"] is True  # evidence still persisted
+
+
+def test_credential_leak_to_control_plane_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(key_services={"llm-gateway", "control-plane"})
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "CONTROL_PLANE_HOLDS_CREDENTIAL")
+
+
+def test_credential_leak_to_lab_api_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(key_services={"llm-gateway", "lab-api"})
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "CREDENTIAL_LEAKED_TO_LAB_API")
+
+
+def test_credential_leak_to_egress_proxy_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(key_services={"llm-gateway", "egress-proxy"})
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "CREDENTIAL_LEAKED_TO_EGRESS_PROXY")
+
+
+def test_credential_missing_from_gateway_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(key_services=set())  # gateway itself lacks the credential
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "GATEWAY_MISSING_CREDENTIAL")
+
+
+def test_credential_probe_command_failure_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(credential_probe_fail="lab-api")
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "CREDENTIAL_PROBE_FAILED")
+
+
+def test_credential_probe_malformed_output_aborts(tmp_path: Path) -> None:
+    fake = FakeCompose(credential_probe_malformed="control-plane")
+    acceptance = _run(tmp_path, fake)
+    _assert_aborts_before_dispatch(fake, acceptance, "CREDENTIAL_PROBE_AMBIGUOUS")
 
 
 def test_cleanup_runs_on_gateway_up_failure(tmp_path: Path) -> None:

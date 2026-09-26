@@ -63,6 +63,15 @@ DS_STACK = ("-f", "docker-compose.yml", "-f", "docker-compose.deepseek.yml")
 CONTROL_PLANE_SERVICE = "control-plane"
 GATEWAY_SERVICE = "llm-gateway"
 EGRESS_PROXY_SERVICE = "egress-proxy"
+LAB_API_SERVICE = "lab-api"
+# Per-service credential-placement expectation: the provider credential must exist ONLY in the
+# gateway and be absent from every other service. Probed in this order; the first violation aborts.
+_CREDENTIAL_SERVICES: tuple[tuple[str, bool], ...] = (
+    (GATEWAY_SERVICE, True),
+    (CONTROL_PLANE_SERVICE, False),
+    (LAB_API_SERVICE, False),
+    (EGRESS_PROXY_SERVICE, False),
+)
 # Per-call output ceiling passed to the gateway (it clamps again provider-side).
 PER_CALL_OUTPUT_TOKENS = PER_CALL_OUTPUT_CEILING
 COMPOSE_PROJECT_MAX_LENGTH = 63
@@ -330,6 +339,18 @@ _HEALTH_PY = (
 )
 # The control-plane process must never hold the provider credential.
 _KEY_PROBE_PY = "import os; print(bool(os.environ.get('AI_AUTH_TOKEN')))\n"
+# A value-free per-service credential-presence probe. It NEVER prints, hashes, compares or returns
+# the credential value — only the fixed token PRESENT / ABSENT. POSIX ``sh`` so it works even in a
+# service without Python (e.g. egress-proxy).
+_KEY_PRESENCE_SH = 'if [ -n "${AI_AUTH_TOKEN:-}" ]; then echo PRESENT; else echo ABSENT; fi'
+
+
+def _leak_abort_code(service: str) -> str:
+    """The abort code for a forbidden service that unexpectedly holds the credential."""
+
+    if service == CONTROL_PLANE_SERVICE:
+        return "CONTROL_PLANE_HOLDS_CREDENTIAL"
+    return "CREDENTIAL_LEAKED_TO_" + service.upper().replace("-", "_")
 
 
 @dataclass
@@ -406,6 +427,71 @@ class Phase29GatewayStack:
             "exec", "-T", CONTROL_PLANE_SERVICE, "python", "-c", _KEY_PROBE_PY, timeout=timeout
         )
         return probe.returncode == 0 and probe.stdout.strip() == "False"
+
+    def _probe_service_credential(self, service: str, *, timeout: int) -> tuple[bool | None, int]:
+        """Value-free presence probe for one service. Returns (present|None, returncode).
+
+        ``present`` is ``None`` when the probe command failed or its output was not the fixed
+        ``PRESENT``/``ABSENT`` token (ambiguous) — the caller fails closed on ``None`` and never
+        infers absence from a failed/ambiguous probe. The credential VALUE is never observed."""
+
+        probe = self._dc(
+            "exec", "-T", service, "sh", "-c", _KEY_PRESENCE_SH, timeout=timeout
+        )
+        if probe.returncode != 0:
+            return None, probe.returncode
+        marker = probe.stdout.strip().splitlines()[-1].strip() if probe.stdout.strip() else ""
+        if marker == "PRESENT":
+            return True, probe.returncode
+        if marker == "ABSENT":
+            return False, probe.returncode
+        return None, probe.returncode
+
+    def credential_isolation_proof(self, *, timeout: int = 30) -> dict[str, Any]:
+        """Prove at runtime that the provider credential exists ONLY in the gateway.
+
+        Probes each service for the boolean presence of ``AI_AUTH_TOKEN`` (never its value) and
+        checks it against the required placement: present in ``llm-gateway``, absent elsewhere.
+        Fail closed — any failed/ambiguous probe, a credential in a forbidden service, or a missing
+        credential in the gateway sets a specific ``abort_code`` (in service order) and leaves
+        ``provider_key_only_in_gateway`` False. Only records booleans and return codes.
+        """
+
+        services: list[dict[str, Any]] = []
+        abort_code: str | None = None
+        for service, expected_present in _CREDENTIAL_SERVICES:
+            observed, rc = self._probe_service_credential(service, timeout=timeout)
+            if observed is None:
+                probe_ok = False
+                passed = False
+                code = "CREDENTIAL_PROBE_FAILED" if rc != 0 else "CREDENTIAL_PROBE_AMBIGUOUS"
+            else:
+                probe_ok = True
+                passed = observed == expected_present
+                if passed:
+                    code = None
+                elif service == GATEWAY_SERVICE:
+                    code = "GATEWAY_MISSING_CREDENTIAL"
+                else:
+                    code = _leak_abort_code(service)
+            services.append(
+                {
+                    "service": service,
+                    "expected_present": expected_present,
+                    "observed_present": observed,
+                    "returncode": rc,
+                    "probe_ok": probe_ok,
+                    "pass": passed,
+                }
+            )
+            if abort_code is None and code is not None:
+                abort_code = code
+        return {
+            "services": services,
+            "all_probes_ok": all(s["probe_ok"] for s in services),
+            "provider_key_only_in_gateway": all(s["pass"] for s in services),
+            "abort_code": abort_code,
+        }
 
     def gateway_reported_model(self, *, timeout: int = 30) -> str | None:
         """Zero-cost model identity from the gateway /health endpoint (no provider call)."""
@@ -784,6 +870,7 @@ def run_live_campaign(
         "gateway_up": False,
         "gateway_healthy": False,
         "control_plane_has_no_key": None,
+        "credential_isolation": None,
         "gateway_reported_model": None,
         "model_identity_preflight_ok": False,
         "authorization_binding_ok": False,
@@ -818,9 +905,17 @@ def run_live_campaign(
                 {"code": "GATEWAY_UNHEALTHY", **stack.health_diagnostic}
             )
             raise LiveCampaignError("GATEWAY_UNHEALTHY")
-        preflight["control_plane_has_no_key"] = stack.control_plane_has_no_key()
-        if not preflight["control_plane_has_no_key"]:
-            raise LiveCampaignError("CONTROL_PLANE_HOLDS_CREDENTIAL")
+        # Runtime per-service credential-placement proof: the provider credential must exist ONLY in
+        # the gateway. Any failed/ambiguous probe, a leak into a forbidden service, or a missing
+        # gateway credential aborts BEFORE the first provider dispatch (stacks still torn down).
+        isolation = stack.credential_isolation_proof()
+        preflight["credential_isolation"] = isolation
+        cp_record = next(
+            (s for s in isolation["services"] if s["service"] == CONTROL_PLANE_SERVICE), None
+        )
+        preflight["control_plane_has_no_key"] = bool(cp_record and cp_record["pass"])
+        if isolation["abort_code"] is not None:
+            raise LiveCampaignError(isolation["abort_code"])
         reported = stack.gateway_reported_model()
         preflight["gateway_reported_model"] = reported
         preflight["model_identity_preflight_ok"] = reported == CANONICAL_MODEL
@@ -874,18 +969,27 @@ def _secret_isolation_evidence(
 
     * ``control_plane_key_free`` — the value-free boolean probe result (the control-plane process
       env does not carry the provider credential), or NOT_EVALUATED when the probe never ran.
-    * ``provider_key_only_in_gateway`` — NOT_EVALUATED: the single control-plane probe cannot, on
-      its own, establish the credential lives ONLY in the gateway (that needs a per-service probe).
+    * ``provider_key_only_in_gateway`` — the runtime per-service proof result: True ONLY when every
+      service probe succeeded and matched the required placement (present in the gateway, absent
+      from control-plane / lab-api / egress-proxy); NOT_EVALUATED when the proof never ran.
+    * ``per_service_credential_probe`` — the value-free per-service records (booleans + return
+      codes; never the credential value).
     * ``recorded_evidence_credential_free`` — evidence-derived: no credential-shaped value (an
       ``sk-*`` key, a bearer token, an ``api_key=`` marker) appears in the recorded evidence.
     """
 
     cp = preflight.get("control_plane_has_no_key")
     control_plane_key_free: bool | str = bool(cp) if isinstance(cp, bool) else NOT_EVALUATED
+    isolation = preflight.get("credential_isolation") or {}
+    only_in_gateway = isolation.get("provider_key_only_in_gateway")
+    provider_key_only_in_gateway: bool | str = (
+        only_in_gateway if isinstance(only_in_gateway, bool) else NOT_EVALUATED
+    )
     blob = json.dumps(transported_evidence, sort_keys=True, default=str)
     return {
         "control_plane_key_free": control_plane_key_free,
-        "provider_key_only_in_gateway": NOT_EVALUATED,
+        "provider_key_only_in_gateway": provider_key_only_in_gateway,
+        "per_service_credential_probe": isolation.get("services", []),
         "recorded_evidence_credential_free": not bool(_SECRETISH_VALUE.search(blob)),
     }
 
@@ -1074,6 +1178,11 @@ def _assemble_live_acceptance(
         "gateway_cleanup_no_leftovers": gateway_cleanup_clean,
         "range_cleanup_complete": range_cleanup_complete,
         "projection_correspondence_complete": projection_correspondence_complete,
+        # The runtime per-service proof that the provider credential lives ONLY in the gateway must
+        # be strictly True — a NOT_EVALUATED / False isolation cannot earn observed success.
+        "credential_isolation_proven": (
+            secret_isolation["provider_key_only_in_gateway"] is True
+        ),
     }
     observed_ok = all(gates.values())
     status = (
