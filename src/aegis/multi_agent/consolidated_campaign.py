@@ -732,17 +732,25 @@ class ConsolidatedOpsCampaign:
             asm.calls["report"] = asm.calls.get("report", 0) + 1
             from aegis.multi_agent.report_agent import SourceUsage
 
+            live_model_observed = self.model.name == "ISOLATED_LIVE_GATEWAY"
+            identity_exact: bool | Literal["NOT_EVALUATED"]
+            if live_model_observed:
+                identity_exact = set(self.model.reported_models) == {CANONICAL_MODEL}
+            else:
+                identity_exact = "NOT_EVALUATED"
             usage = SourceUsage(
                 provider_calls=self.budget.calls_recorded,
                 input_tokens=sum(a.input_tokens or 0 for a in self.budget.attempts),
                 output_tokens=sum(a.output_tokens or 0 for a in self.budget.attempts),
                 total_tokens=self.budget.tokens_recorded,
                 tool_executions=4,
+                identity_exact_deepseek_v4_pro=identity_exact,
             )
             source = asm.build_report_source(
                 cleanup_succeeded=True,
                 cleanup_obligations=("RESET_SYNTHETIC_TARGET_TO_BASELINE", "ROTATE_SENTINEL"),
                 usage=usage,
+                live_run=live_model_observed,
             )
             projection = build_report_request_projection(source)
             assert_report_projection_clean(projection)

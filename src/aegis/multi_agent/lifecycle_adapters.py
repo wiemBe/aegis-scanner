@@ -465,7 +465,7 @@ class OpsDetectionControlLifecycle:
         )
 
     def build_report_source(self, *, cleanup_succeeded: bool, cleanup_obligations: tuple[str, ...],
-                            usage: SourceUsage) -> ReportSource:
+                            usage: SourceUsage, live_run: bool = False) -> ReportSource:
         """Assemble the report input STRICTLY from controller/verifier records (report truth)."""
 
         finding = self.remediation_ledger.get_finding(self.finding_id)
@@ -520,6 +520,7 @@ class OpsDetectionControlLifecycle:
                 succeeded=cleanup_succeeded, obligations=cleanup_obligations, failures=()
             ),
             usage=usage,
+            live_run=live_run,
         )
 
     def report_executor(self, context: StageContext) -> StageOutcome:

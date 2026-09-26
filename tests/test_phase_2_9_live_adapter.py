@@ -1142,6 +1142,15 @@ def test_five_true_correspondence_records_on_success(tmp_path: Path) -> None:
     assert acceptance["live_acceptance_gates"]["projection_correspondence_complete"] is True
 
 
+def test_live_report_metadata_records_observed_gateway_model(tmp_path: Path) -> None:
+    acceptance = _run(tmp_path, FakeCompose())
+    report_path = Path(acceptance["evidence_dir"]) / "report" / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["live_report_agent_status"] == "LIVE_OBSERVED"
+    assert report["generation_mode"] == "LIVE_MODEL_ASSISTED"
+    assert report["usage"]["identity_exact_deepseek_v4_pro"] is True
+
+
 # --------------------------------------------------------------------------- #
 # CORRECTION 3: fail-CLOSED range-cleanup boundary. These exercise the REAL
 # count_by_label / name_present / ContainerOpsRange.teardown code with mocked

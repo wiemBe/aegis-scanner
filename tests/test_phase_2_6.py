@@ -221,6 +221,30 @@ def test_prose_with_forbidden_token_is_downgraded() -> None:
     assert "Bearer" not in report.executive_summary
 
 
+def test_prose_denying_controller_findings_is_downgraded() -> None:
+    draft = _draft(
+        executive_summary="No adjudicated facts were supplied, so there are no findings.",
+        methodology_and_limitations="None were provided; no substantive findings can be stated.",
+        finding_remediations=[],
+    )
+    report = _assemble(_source(), draft)
+    assert report.model_prose_used is False
+    assert report.model_prose_downgraded is True
+    assert "no findings" not in report.executive_summary.lower()
+    assert report.verified_findings
+
+
+def test_live_report_metadata_distinguishes_controller_fallback() -> None:
+    draft = _draft(
+        executive_summary="No adjudicated facts were supplied, so there are no findings.",
+        methodology_and_limitations="None were provided.",
+        finding_remediations=[],
+    )
+    report = _assemble(_source(live_run=True), draft)
+    assert report.live_report_agent_status == "LIVE_OBSERVED"
+    assert report.generation_mode == "LIVE_CONTROLLER_FALLBACK"
+
+
 def test_malformed_output_none_falls_back_to_controller_prose() -> None:
     report = _assemble(_source(), None)
     assert report.model_prose_used is False

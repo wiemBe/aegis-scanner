@@ -336,8 +336,10 @@ class AssessmentReport(FrozenStrictModel):
     target_ref: str
     generated_at: datetime
     status: ReportStatus
-    live_report_agent_status: Literal["NOT_EVALUATED"] = "NOT_EVALUATED"
-    generation_mode: Literal["OFFLINE_DETERMINISTIC"] = "OFFLINE_DETERMINISTIC"
+    live_report_agent_status: Literal["NOT_EVALUATED", "LIVE_OBSERVED"] = "NOT_EVALUATED"
+    generation_mode: Literal[
+        "OFFLINE_DETERMINISTIC", "LIVE_MODEL_ASSISTED", "LIVE_CONTROLLER_FALLBACK"
+    ] = "OFFLINE_DETERMINISTIC"
     model_prose_used: bool
     model_prose_downgraded: bool
 
@@ -381,6 +383,25 @@ def _prose_is_safe(text: str) -> bool:
     return not any(token in lowered for token in _FORBIDDEN_REPORT_TOKENS)
 
 
+_NO_FINDING_CLAIMS = (
+    "no adjudicated fact",
+    "no finding",
+    "none were provided",
+    "no substantive finding",
+)
+
+
+def _prose_is_consistent(text: str, source: ReportSource) -> bool:
+    """Reject model prose that directly contradicts controller-owned report facts."""
+
+    lowered = text.lower()
+    if source.findings and any(claim in lowered for claim in _NO_FINDING_CLAIMS):
+        return False
+    if source.retests and ("no retest" in lowered or "retest was not" in lowered):
+        return False
+    return True
+
+
 def assemble_report(
     *,
     source: ReportSource,
@@ -398,16 +419,26 @@ def assemble_report(
 
     generated_at = generated_at or now_utc()
     downgraded = False
-    model_used = model_output is not None
+    model_contributions = 0
 
     # Executive summary + methodology: use model prose only if present AND token-clean.
-    if model_output is not None and _prose_is_safe(model_output.executive_summary):
+    if (
+        model_output is not None
+        and _prose_is_safe(model_output.executive_summary)
+        and _prose_is_consistent(model_output.executive_summary, source)
+    ):
         executive_summary = model_output.executive_summary
+        model_contributions += 1
     else:
         executive_summary = _CONTROLLER_SUMMARY_FALLBACK
         downgraded = downgraded or model_output is not None
-    if model_output is not None and _prose_is_safe(model_output.methodology_and_limitations):
+    if (
+        model_output is not None
+        and _prose_is_safe(model_output.methodology_and_limitations)
+        and _prose_is_consistent(model_output.methodology_and_limitations, source)
+    ):
         methodology = model_output.methodology_and_limitations
+        model_contributions += 1
     else:
         methodology = _CONTROLLER_METHOD_FALLBACK
         downgraded = downgraded or model_output is not None
@@ -419,6 +450,7 @@ def assemble_report(
         for draft in model_output.finding_remediations:
             if draft.finding_id in valid_ids and _prose_is_safe(draft.remediation_text):
                 draft_remediation[draft.finding_id] = draft.remediation_text
+                model_contributions += 1
             else:
                 # A remediation keyed to an unknown finding, or carrying a forbidden token, is
                 # discarded — the controller default is used instead.
@@ -461,6 +493,7 @@ def assemble_report(
                 chain_draft.causal_link_explanation
             ):
                 draft_explanation[chain_draft.chain_id] = chain_draft.causal_link_explanation
+                model_contributions += 1
             else:
                 downgraded = True
 
@@ -492,6 +525,15 @@ def assemble_report(
         )
 
     status = _report_status(source)
+    model_used = model_contributions > 0
+    if source.live_run:
+        live_report_agent_status: Literal["NOT_EVALUATED", "LIVE_OBSERVED"] = "LIVE_OBSERVED"
+        generation_mode: Literal[
+            "OFFLINE_DETERMINISTIC", "LIVE_MODEL_ASSISTED", "LIVE_CONTROLLER_FALLBACK"
+        ] = "LIVE_MODEL_ASSISTED" if model_used else "LIVE_CONTROLLER_FALLBACK"
+    else:
+        live_report_agent_status = "NOT_EVALUATED"
+        generation_mode = "OFFLINE_DETERMINISTIC"
     return AssessmentReport(
         report_id=report_id,
         version=version,
@@ -499,6 +541,8 @@ def assemble_report(
         target_ref=source.target_ref,
         generated_at=generated_at,
         status=status,
+        live_report_agent_status=live_report_agent_status,
+        generation_mode=generation_mode,
         model_prose_used=model_used,
         model_prose_downgraded=downgraded,
         executive_summary=executive_summary,
