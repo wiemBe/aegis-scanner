@@ -24,11 +24,19 @@ from typing import Any
 import pytest
 import yaml
 
+import aegis.deploy.preflight as preflight_module
 from aegis.deploy.image_reference import (
     ImageReferenceError,
     parse_immutable_image_reference,
 )
-from aegis.deploy.preflight import PreflightError, analyze_rendered_config
+from aegis.deploy.preflight import (
+    EXIT_BAD_REFERENCE,
+    EXIT_OK,
+    EXIT_RENDER_FAILED,
+    PreflightError,
+    analyze_rendered_config,
+    main,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
@@ -142,8 +150,13 @@ def test_prod_overlay_resets_build_and_pins_image_var(service: str) -> None:
 
 def test_valid_lowercase_sha256_digest_is_accepted_unchanged() -> None:
     parsed = parse_immutable_image_reference(_PLACEHOLDER_IMAGE)
-    assert parsed.reference == _PLACEHOLDER_IMAGE
+    assert parsed.reference == _PLACEHOLDER_IMAGE  # byte-for-byte unchanged
     assert parsed.digest == _PLACEHOLDER_DIGEST
+
+
+def test_multi_component_repository_with_port_registry_is_accepted() -> None:
+    ref = f"registry.example.test:5000/team/aegis@{_PLACEHOLDER_DIGEST}"
+    assert parse_immutable_image_reference(ref).reference == ref
 
 
 @pytest.mark.parametrize(
@@ -156,6 +169,12 @@ def test_valid_lowercase_sha256_digest_is_accepted_unchanged() -> None:
         "registry.example.test/aegis:0.2.0",  # mutable tag only
         "registry.example.test/aegis:latest",  # latest
         "aegis:latest",  # latest, no registry
+        f"aegis@{_PLACEHOLDER_DIGEST}",  # bare/local name, no explicit registry
+        f"aegis/app@{_PLACEHOLDER_DIGEST}",  # implicit docker.io namespace, no explicit registry
+        f"registry.example.test/aegis:1.2.0@{_PLACEHOLDER_DIGEST}",  # tag + digest
+        f" registry.example.test/aegis@{_PLACEHOLDER_DIGEST}",  # leading whitespace
+        f"registry.example.test/aegis@{_PLACEHOLDER_DIGEST} ",  # trailing whitespace
+        f"registry.example.test/aegis@{_PLACEHOLDER_DIGEST}\n",  # trailing newline
         "registry.example.test/aegis@sha256:deadbeef",  # too-short digest
         "registry.example.test/aegis@sha256:" + "a" * 63,  # 63 hex
         "registry.example.test/aegis@sha256:" + "a" * 65,  # 65 hex
@@ -168,6 +187,23 @@ def test_valid_lowercase_sha256_digest_is_accepted_unchanged() -> None:
 def test_non_immutable_reference_is_rejected(bad: str | None) -> None:
     with pytest.raises(ImageReferenceError):
         parse_immutable_image_reference(bad)
+
+
+def test_error_never_echoes_attacker_controlled_or_secret_shaped_input() -> None:
+    # A secret-shaped algorithm and a secret-shaped digest body must never appear in the error text.
+    secret_algorithm = "AKIAIOSFODNN7SECRETALGO"  # noqa: S105 - placeholder, not a real credential
+    secret_body = "SECRETtokenvaluethatmustnotleak0000000000000000000000000000"  # noqa: S105 - placeholder
+    for malformed in (
+        f"registry.example.test/aegis@{secret_algorithm}:{'a' * 64}",
+        f"registry.example.test/aegis@sha256:{secret_body}",
+        f"{secret_body}@sha256:{'a' * 64}",
+    ):
+        with pytest.raises(ImageReferenceError) as excinfo:
+            parse_immutable_image_reference(malformed)
+        message = str(excinfo.value)
+        assert secret_algorithm not in message
+        assert secret_body not in message
+        assert malformed not in message
 
 
 # --- Preflight rendered-config analysis (fail closed) --------------------------------------------
@@ -211,6 +247,109 @@ def test_analyze_rejects_missing_service() -> None:
     config = _rendered({"control-plane": {"image": _PLACEHOLDER_IMAGE}})
     with pytest.raises(PreflightError, match="missing service"):
         analyze_rendered_config(config, _PLACEHOLDER_IMAGE)
+
+
+# --- Preflight CLI: mandatory render, no bypass (fail closed) -------------------------------------
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_cli_has_no_render_bypass_option() -> None:
+    # A production preflight must always render; a `--no-render` (or any bypass) must not exist.
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--no-render", "--image", _PLACEHOLDER_IMAGE])
+    assert excinfo.value.code == 2  # argparse: unrecognized argument
+
+
+def test_cli_fails_closed_when_docker_unavailable(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: None)
+
+    code = main(["--image", _PLACEHOLDER_IMAGE])
+
+    assert code == EXIT_RENDER_FAILED
+    out = capsys.readouterr().out
+    assert "PREFLIGHT OK" not in out
+    assert "FAILED" in out
+
+
+def test_cli_fails_closed_when_compose_render_fails(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/docker")
+    leaky_stderr = "secret-registry-creds should not leak"
+    monkeypatch.setattr(
+        preflight_module.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompleted(returncode=1, stderr=leaky_stderr),
+    )
+
+    code = main(["--image", _PLACEHOLDER_IMAGE])
+
+    assert code == EXIT_RENDER_FAILED
+    out = capsys.readouterr().out
+    assert "PREFLIGHT OK" not in out
+    assert "secret-registry-creds" not in out  # raw Compose stderr must never be surfaced
+
+
+def test_cli_fails_closed_when_compose_render_times_out(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/docker")
+
+    def _timeout(*_a: Any, **_k: Any) -> None:
+        raise subprocess.TimeoutExpired(cmd="docker compose config", timeout=60)
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", _timeout)
+
+    code = main(["--image", _PLACEHOLDER_IMAGE])
+
+    assert code == EXIT_RENDER_FAILED
+    assert "PREFLIGHT OK" not in capsys.readouterr().out
+
+
+def test_cli_fails_closed_when_rendered_output_is_invalid_json(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(preflight_module.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(
+        preflight_module.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompleted(returncode=0, stdout="not json {{"),
+    )
+
+    code = main(["--image", _PLACEHOLDER_IMAGE])
+
+    assert code == EXIT_RENDER_FAILED
+    assert "PREFLIGHT OK" not in capsys.readouterr().out
+
+
+def test_cli_rejects_bad_reference_before_render(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bad reference must fail at exit 2 without ever attempting a render.
+    def _must_not_run(*_a: Any, **_k: Any) -> None:  # pragma: no cover - must never be called
+        raise AssertionError("render must not be attempted for an invalid reference")
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", _must_not_run)
+
+    code = main(["--image", f"aegis@{_PLACEHOLDER_DIGEST}"])  # bare/local name
+
+    assert code == EXIT_BAD_REFERENCE
+    assert "PREFLIGHT OK" not in capsys.readouterr().out
+
+
+@_requires_docker
+def test_cli_succeeds_with_real_render(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["--image", _PLACEHOLDER_IMAGE])
+    assert code == EXIT_OK
+    assert "PREFLIGHT OK" in capsys.readouterr().out
 
 
 # --- Docker-gated: rendered production config -----------------------------------------------------

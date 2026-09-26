@@ -59,17 +59,30 @@ they do not prove capacity or throughput under load.
 ## 3. Deterministic production image + rollback (G-ROLL-1)
 
 A mutable tag (`latest`, `0.2.0`) is insufficient. The production path pins an **immutable digest**.
+This covers the two **base** services (`control-plane`, `lab-api`) only; the provider-backed path is
+NOT_READY (§5).
 
-- **Reference form (required):** `registry/repository@sha256:<64 lowercase hex characters>`.
+- **Reference contract (required):** `registry/repository@sha256:<64 lowercase hex characters>` with
+  an **explicit registry host** (dotted domain, `host:port`, or `localhost[:port]`) and **≥1
+  repository component**. Rejected: missing/empty, leading/trailing whitespace (rejected, **not**
+  stripped), bare/local name (`aegis@sha256:…`), implicit-namespace name (`aegis/app@sha256:…`),
+  tag-only, `latest`, **tag+digest** (`…/aegis:1.2@sha256:…`), uppercase/short/long/non-hex digest,
+  and non-`sha256` algorithm. A valid reference is returned **byte-for-byte unchanged**.
 - **Overlay:** [`docker-compose.prod.yml`](../docker-compose.prod.yml) sets, for both services,
   `build: !reset null` (removes the base local-build fallback on merge) and
   `image: "${AEGIS_IMAGE:?…}"`. Both services use the **same** `AEGIS_IMAGE`. Compose errors if it is
   unset.
-- **Fail-closed preflight:** [`python -m aegis.deploy.preflight`](../src/aegis/deploy/preflight.py)
-  ([`image_reference.py`](../src/aegis/deploy/image_reference.py)) rejects — before any deploy side
-  effect — a missing, tag-only, `latest`, malformed, uppercase, or non-`sha256` reference (exit `2`),
-  and then renders the merged production config and rejects it (exit `3`) unless **both** services use
-  exactly the digest with **no** `build` key. A valid lowercase digest is accepted unchanged (exit `0`).
+- **Fail-closed preflight (no bypass):**
+  [`python -m aegis.deploy.preflight`](../src/aegis/deploy/preflight.py)
+  ([`image_reference.py`](../src/aegis/deploy/image_reference.py)) rejects a bad reference **before any
+  render** (exit `2`), then **always** renders and analyzes the merged production config: exit `3`
+  unless **both** services use exactly the digest with **no** `build` key. There is no `--no-render`
+  option and no NOT_EVALUATED success path — Docker unavailable, Compose unavailable/failure, timeout,
+  invalid JSON, or ambiguous output all return exit `3`, and `PREFLIGHT OK` is never printed without a
+  completed render proof. Valid reference → exit `0`.
+- **No credential/attacker echo:** all preflight/validator diagnostics are fixed, credential-free
+  strings. Raw Compose stderr, raw exceptions, and the caller-supplied reference/algorithm/secret-shaped
+  input are never surfaced in errors.
 - **No silent fallback:** proven from the rendered configuration
   (`docker compose -f docker-compose.yml -f docker-compose.prod.yml config`), the merged production
   config contains **no** `build:` for either service — verified in an offline analysis unit test, a
@@ -77,12 +90,12 @@ A mutable tag (`latest`, `0.2.0`) is insufficient. The production path pins an *
 - **Credentials:** never embedded. The digest is not a secret; registry auth is the operator's
   `docker login` (Docker credential store), never Compose/scripts/logs/docs.
 
-**Rollback procedure** (details in runbook §6a):
+**Rollback procedure** (base services; details in runbook §6a):
 
 1. Record the currently deployed digest before changing anything:
    `docker compose -f docker-compose.yml -f docker-compose.prod.yml config | grep image` → save it.
-2. Deploy a new digest: set `AEGIS_IMAGE=<new digest>`, run the preflight, `up -d`, then confirm
-   `GET /ready` → `200 {"ready": true}`.
+2. Deploy a new digest: set `AEGIS_IMAGE=<new digest>`, run the preflight, `up -d` (base + prod overlay
+   only — **not** `docker-compose.provider.yml`), then confirm `GET /ready` → `200 {"ready": true}`.
 3. Roll back: set `AEGIS_IMAGE=<prior recorded digest>`, run the preflight again, `up -d`, re-check
    `/ready`. Because the reference is a digest, the rollback restores the exact prior bits.
 
@@ -92,11 +105,15 @@ A mutable tag (`latest`, `0.2.0`) is insufficient. The production path pins an *
   Dockerfile numeric non-root `USER` (and ≠ 0), no extra privilege; base-stack `read_only` /
   `no-new-privileges` / tmpfs retained; non-zero mem/cpu/pids + `unless-stopped` on both services;
   prod overlay resets `build` and pins `AEGIS_IMAGE`; the image-reference validator (valid digest
-  accepted unchanged; missing / tag-only / `latest` / short / long / uppercase / non-hex / `sha512` /
-  `md5` all rejected); preflight rendered-config analysis (exact digest on both services with no build;
-  active build, image mismatch, and missing service all rejected). Docker-gated: real rendered-config
-  digest proof; built image runs non-root, **cannot** write `/app`, **can** initialize
-  `/data/aegis.db`.
+  accepted **byte-for-byte unchanged**, incl. port-registry/multi-component repo; missing / tag-only /
+  `latest` / bare-local / implicit-namespace / **tag+digest** / leading+trailing-whitespace / short /
+  long / uppercase / non-hex / `sha512` / `md5` all rejected; **secret-shaped input never echoed** in
+  errors); preflight rendered-config analysis (exact digest on both services with no build; active
+  build, image mismatch, and missing service all rejected). **Preflight CLI (no bypass):** no
+  `--no-render` option; Docker unavailable → exit 3 with no `PREFLIGHT OK`; Compose failure / timeout /
+  invalid JSON → exit 3 (raw stderr not surfaced); bad reference → exit 2 with no render attempted;
+  valid → exit 0. Docker-gated: real rendered-config digest proof and a real `main()` exit-0; built
+  image runs non-root, **cannot** write `/app`, **can** initialize `/data/aegis.db`.
 - **Readiness tests** — [`tests/test_readiness.py`](../tests/test_readiness.py) unchanged and green.
 - **Real provider-free Docker run** (unique project, base stack, **zero paid calls**): control-plane
   and lab-api effective **`uid=10001 gid=10001`**; control-plane **healthy through `/ready`** (`200
@@ -110,9 +127,13 @@ A mutable tag (`latest`, `0.2.0`) is insufficient. The production path pins an *
 - **Runtime digest pull** — no registry image is available to pull; validated only through the
   fail-closed preflight and rendered Compose configuration. Pull/verify of a live digest is
   **NOT_EVALUATED**.
-- **Existing pre-root `aegis-data` volume migration** — documented, not exercised.
-- **Provider/gateway image pinning** — the `llm-gateway` and provider overlays are outside WP2 scope;
-  their images are not yet digest-pinned.
+- **Complete provider-backed production path — NOT_READY / NOT_EVALUATED.** The only provider overlays
+  today are public-egress profiles (`docker-compose.provider.yml` forces the deprecated public OpenAI
+  profile; deepseek/ollama overlays are not the company-private model). A digest-pinned private-provider
+  `llm-gateway` production overlay does not exist and is not evaluated. Production is base-services-only.
+- **Existing pre-root `aegis-data` volume migration** — documented in runbook §6a (stop → back up →
+  chown to `10001:10001` via a **pinned-digest** tool image → verify ownership → readiness → rollback),
+  but **not executed** (NOT_EVALUATED).
 - **Load/throughput under the limits**, user-namespace/seccomp/AppArmor hardening, and image supply-
   chain signing of the base `Dockerfile` — not addressed here.
 

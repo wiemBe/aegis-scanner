@@ -2,16 +2,20 @@
 
 A production rollout is deterministic only when the image cannot move underneath it. A mutable tag
 (``latest``, ``0.2.0``) can be repushed to point at different bits; a ``sha256`` digest cannot. This
-module is the single fail-closed gate: it accepts *only* a reference of the form
+module is the single fail-closed gate: it accepts *only* a fully-qualified reference of the form
 
     registry/repository@sha256:<64 lowercase hex characters>
 
-and rejects everything else — a missing reference, a tag-only reference, ``latest``, a malformed
-digest, or a non-``sha256`` digest algorithm. It is a pure function with no I/O and no dependency on
-Docker, so it is cheap to unit-test exhaustively and safe to call before any deployment side effect.
+with an **explicit registry host** (a dotted domain, a ``host:port``, or ``localhost[:port]``) and
+at least one repository path component. It rejects everything else — a missing reference, a
+bare/local name (``aegis@sha256:...``), a tag-only reference, ``latest``, a tag+digest reference, a
+malformed or non-lowercase digest, a non-``sha256`` algorithm, and any leading/trailing whitespace
+(rejected, never stripped).
 
-The validator never emits registry or provider credentials; it only inspects the reference string it
-is given and returns it unchanged when valid.
+Security: the validator is a pure function with no I/O. It **never** echoes the caller-supplied
+reference, its (possibly attacker-controlled) digest algorithm, or any secret-shaped input in an
+error message — every diagnostic is a fixed constant. A valid reference is returned byte-for-byte
+unchanged.
 """
 
 from __future__ import annotations
@@ -21,23 +25,30 @@ from dataclasses import dataclass
 
 DIGEST_ALGORITHM = "sha256"
 
-# A single, anchored grammar for an immutable image reference:
-#   [registry-host[:port]/] path[/path...] [:tag] @sha256:<64 lowercase hex>
-# The digest is REQUIRED, must be sha256, and must be exactly 64 lowercase hex characters. A bare
-# name, a tag-only name, ``latest``, an uppercase digest, or a non-sha256 algorithm all fail to
-# match this pattern.
-_NAME_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*"
-_REGISTRY_HOST = r"[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[0-9]+)?"
-_TAG = r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}"
+# An explicit registry host: a dotted domain, ``localhost``, or any host with an explicit ``:port``.
+# A bare single-label name with neither a dot nor a port (Docker's implicit docker.io namespace,
+# such as ``library`` in ``library/aegis``) is NOT a registry, so ``aegis/app@...`` is rejected.
+_DOTTED_HOST = r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+"
+_REGISTRY_HOST = rf"(?:(?:{_DOTTED_HOST}|localhost)(?::[0-9]+)?|[a-z0-9]+(?:-[a-z0-9]+)*:[0-9]+)"
+# A repository path component. Lowercase only; no ``:`` (a ``:`` in the final component is a tag).
+_REPO_COMPONENT = r"[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*"
+
+# Anchored grammar: <registry-host>/<repo>[/<repo>...]@sha256:<64 lowercase hex>. No tag is allowed
+# (that would be a mutable tag+digest reference), and the digest must be exactly 64 lowercase hex.
 _REFERENCE_RE = re.compile(
-    r"^"
+    r"\A"
     r"(?P<name>"
-    rf"(?:{_REGISTRY_HOST}/)?"
-    rf"{_NAME_COMPONENT}(?:/{_NAME_COMPONENT})*"
+    rf"(?P<registry>{_REGISTRY_HOST})"
+    rf"/(?P<repository>{_REPO_COMPONENT}(?:/{_REPO_COMPONENT})*)"
     r")"
-    rf"(?::(?P<tag>{_TAG}))?"
     rf"@(?P<digest>{DIGEST_ALGORITHM}:[0-9a-f]{{64}})"
-    r"$"
+    r"\Z"
+)
+
+# Fixed, credential-free diagnostics. None interpolates the caller's input.
+_CONTRACT_HINT = (
+    "expected an immutable registry/repository@sha256:<64 lowercase hex> reference "
+    "(explicit registry host, at least one repository component, no tag)"
 )
 
 
@@ -50,7 +61,8 @@ class ImmutableImageReference:
     """A validated immutable image reference.
 
     ``reference`` is the exact, unmodified string the operator supplied (so it can be handed to
-    Compose verbatim); ``name`` and ``digest`` are its parsed parts for diagnostics.
+    Compose verbatim); ``name`` and ``digest`` are its parsed parts for internal use only — they are
+    never placed in an error message.
     """
 
     reference: str
@@ -61,39 +73,25 @@ class ImmutableImageReference:
 def parse_immutable_image_reference(raw: str | None) -> ImmutableImageReference:
     """Return the validated reference, or raise :class:`ImageReferenceError` (fail closed).
 
-    Rejects, with a fixed, credential-free message: a missing/empty reference, a reference with no
-    ``@sha256`` digest (tag-only, including ``latest``), a non-``sha256`` digest algorithm, and any
-    malformed or non-lowercase digest. A valid reference is returned unchanged.
+    Rejects — with a fixed, credential-free message that never echoes the input — a missing/empty
+    reference, one with leading/trailing whitespace, a bare/local name, a tag-only or tag+digest
+    reference, ``latest``, a non-``sha256`` algorithm, and any malformed or non-lowercase digest. A
+    valid reference is returned byte-for-byte unchanged.
     """
 
     if raw is None:
+        raise ImageReferenceError(f"image reference is missing; {_CONTRACT_HINT}")
+    if raw == "":
+        raise ImageReferenceError(f"image reference is empty; {_CONTRACT_HINT}")
+    if raw != raw.strip():
         raise ImageReferenceError(
-            "image reference is missing; set an immutable registry/repository@sha256:<64 hex>"
+            f"image reference must not have leading or trailing whitespace; {_CONTRACT_HINT}"
         )
-    reference = raw.strip()
-    if not reference:
-        raise ImageReferenceError(
-            "image reference is empty; set an immutable registry/repository@sha256:<64 hex>"
-        )
-    if "@" not in reference:
-        raise ImageReferenceError(
-            "image reference is tag-only or has no digest; an immutable "
-            "registry/repository@sha256:<64 hex> reference is required"
-        )
-    algorithm = reference.rsplit("@", 1)[1].split(":", 1)[0]
-    if algorithm != DIGEST_ALGORITHM:
-        raise ImageReferenceError(
-            f"image digest algorithm {algorithm!r} is not supported; only "
-            f"{DIGEST_ALGORITHM} digests are accepted"
-        )
-    match = _REFERENCE_RE.fullmatch(reference)
+    match = _REFERENCE_RE.fullmatch(raw)
     if match is None:
-        raise ImageReferenceError(
-            "image reference is malformed; expected registry/repository@sha256: followed by "
-            "exactly 64 lowercase hex characters"
-        )
+        raise ImageReferenceError(f"image reference is invalid; {_CONTRACT_HINT}")
     return ImmutableImageReference(
-        reference=reference,
+        reference=raw,
         name=match.group("name"),
         digest=match.group("digest"),
     )
