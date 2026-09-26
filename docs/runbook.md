@@ -383,6 +383,9 @@ public ingress**; reachable only inside the `security-lab` network. Fixed metric
 `aegis_readiness_check`, `aegis_scan_completions_total`. Labels are bounded (service, allowlisted
 method, normalized route, status class, controller enums); unknown values collapse to
 `OTHER`/`UNMATCHED`; distinct routes are hard-capped at 64.
+Histogram finite buckets are cumulative exactly once, monotonically non-decreasing and bounded by
+`_count`; the `+Inf` bucket always equals `_count`. Observer backend/getter/inc/dec failures are
+isolated and cannot alter a response or mask the application's original exception.
 
 ```bash
 # Scrape from inside the internal network (no port is published to the host):

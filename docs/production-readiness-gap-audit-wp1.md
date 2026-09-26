@@ -15,6 +15,8 @@ Audited at commit parent `00ecf25` on branch `codex/phase-2-9-live-adapter`.
 >
 > **Update (WP3).** `G-OBS-1` is now closed: shared secret-free structured JSON logging, a
 > bounded-cardinality internal `/metrics` endpoint, and version-controlled alert-policy definitions.
+> The post-review correction additionally proves closed-schema behavior at the raw emit boundary,
+> valid Prometheus histogram accumulation, and availability-neutral observer lifecycle failures.
 > See [production-readiness-wp3.md](production-readiness-wp3.md).
 >
 > **Operator scope decision (P2 removed from the roadmap).** `G-BACKUP-1`, `G-IR-1`, and `G-DBLOCK-1`
@@ -105,7 +107,7 @@ only into the `llm-gateway` service via an untracked `.env.gateway`
 |---|---|---|
 | G-ROOT-1 | ✅ **Closed (WP2).** Base `control-plane`/`lab-api` now run non-root (`USER 10001:10001`). | [`Dockerfile`](../Dockerfile) |
 | G-LIMITS-1 | ✅ **Closed (WP2).** Explicit `mem_limit`/`cpus`/`pids_limit`/`restart` on both services. | [`docker-compose.yml`](../docker-compose.yml) |
-| G-OBS-1 | ✅ **Closed (WP3).** Secret-free structured JSON logging + bounded internal `/metrics` + alert policy. | [`aegis_obs`](../src/aegis_obs/), [wp3](production-readiness-wp3.md) |
+| G-OBS-1 | ✅ **Closed (WP3 + correction).** Secret-free closed-schema JSON logging + mathematically valid bounded internal `/metrics` + availability-neutral observer hooks + alert policy. | [`aegis_obs`](../src/aegis_obs/), [wp3](production-readiness-wp3.md) |
 | G-SHUT-1 | **OPEN (next blocker).** No graceful shutdown/drain. `lifespan` has no teardown after `yield` ([`main.py`](../src/aegis/main.py)); in-flight `BackgroundTasks` scans are cut on SIGTERM. Partially mitigated by `PROCESS_RESTART` reconciliation (§2). | `main.py` |
 | G-ROLL-1 | ✅ **Closed (WP2).** Immutable digest-pinned production overlay + fail-closed preflight. | [`docker-compose.prod.yml`](../docker-compose.prod.yml) |
 

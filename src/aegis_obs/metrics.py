@@ -115,6 +115,10 @@ class MetricsRegistry:
             for i, upper in enumerate(DURATION_BUCKETS):
                 if duration <= upper:
                     buckets[i] += 1
+                    # Store one non-cumulative observation. Prometheus histogram buckets are
+                    # rendered cumulatively below; incrementing every matching bucket here would
+                    # make the renderer count the same observation repeatedly.
+                    break
             self._hist_sum[(m, r)] = self._hist_sum.get((m, r), 0.0) + duration
             self._hist_count[(m, r)] = self._hist_count.get((m, r), 0) + 1
 

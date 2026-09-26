@@ -7,6 +7,11 @@ work, and it does not modify historical Phase 2.9 evidence.
 
 Built on WP2-correction HEAD `30d93f0` (branch `codex/phase-2-9-live-adapter`).
 
+The post-review correction after `160c63e` closes three boundary defects found during independent
+adjudication: histogram buckets are accumulated exactly once, every logger emission is rebuilt
+through the closed schema without `str`/`repr` coercion, and observer lifecycle/getter failures are
+isolated from both normal responses and downstream exceptions.
+
 **Security objective.** Operators can detect failures and degraded behavior without logs or metrics
 becoming a new secret-exfiltration, high-cardinality, authority, or availability boundary.
 
@@ -29,7 +34,7 @@ services. One bounded record is written per line to **stdout only**.
 | `request_id` | reused request-id (validated) | `≤256` chars |
 | `method` | HTTP method | allowlist, else `OTHER` |
 | `route` | **normalized route template** | matched template or `UNMATCHED`, `≤128` |
-| `status_code` | bounded status code | int |
+| `status_code` | HTTP status code | `100…599`, else fixed `0` |
 | `status_class` | `1xx`…`5xx` | closed set (else `OTHER`) |
 | `duration_ms` | request duration | clamped `0…3_600_000` |
 | `code` | fixed error/stop code (e.g. `UNHANDLED_EXCEPTION`) | `≤256` |
@@ -45,7 +50,9 @@ supplied request ids are validated against `[A-Za-z0-9._:-]{1,64}`; oversized/ma
 replaced with a generated `req-<hex16>`. Every string field is length-bounded, and if serialization
 fails the logger emits one fixed `log_serialization_failed` record and returns — **it never raises**,
 so a logging failure cannot weaken authorization, budgets, cleanup, readiness, controller verdicts,
-or HTTP security behavior.
+or HTTP security behavior. The fallback itself contains all required `obslog-v1` fields and no
+caller-derived value. Even the low-level `emit()` boundary rejects unexpected keys and never uses
+`default=str`, `str()`, or `repr()` to serialize an arbitrary object.
 
 **Uvicorn access log.** Uvicorn's default access logger (which can print raw paths/query strings) is
 disabled two ways: `--no-access-log` in the base Compose commands and the Dockerfile `CMD`, and
@@ -75,6 +82,9 @@ exports a Prometheus/OpenMetrics text body at an internal-only `GET /metrics`.
 | `aegis_scan_completions_total` | counter | `service, status` (controller terminal status) |
 
 Histogram buckets (seconds): `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`.
+Observations are stored in one non-cumulative finite bucket and made cumulative exactly once during
+rendering. Finite buckets are therefore monotonic and never exceed `_count`; `+Inf == _count`,
+including for observations above the largest finite bucket.
 
 **Cardinality bounds.** Labels may contain **only** fixed service names, allowlisted methods
 (`GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS`, else `OTHER`), normalized route templates, bounded status
@@ -117,6 +127,11 @@ sum by (status) (aegis_scan_completions_total{service="control-plane"})
 gauges afterward — a metrics/logging failure can never convert a failed check to PASS. Readiness
 observations record no path, exception, database content, or credential.
 
+Every observer hook is availability-neutral: registry/logger resolution, in-flight increment and
+decrement, request observation, and log emission are individually isolated. In-flight decrement is
+attempted exactly once per request. An observer failure cannot change a successful response or mask
+the original downstream exception.
+
 ## 4. Alert policy
 
 Version-controlled rules live in [`deploy/observability/alerts.yml`](../deploy/observability/alerts.yml),
@@ -143,12 +158,14 @@ No external log aggregation, Prometheus scraping, or alert delivery is proven by
 ## 6. Verification
 
 - **Focused WP3 tests** — [`tests/test_wp3_observability.py`](../tests/test_wp3_observability.py):
-  strict schema, single-line valid JSON, no-raise on unserializable field; sentinels injected into
+  strict schema, single-line valid JSON, secret-free no-raise behavior for arbitrary/unserializable
+  records; exact single- and multi-observation histogram invariants; sentinels injected into
   query string / unmatched path / Authorization / Cookie / body / malformed request id never appear
   in logs or `/metrics`; `/metrics` never contains request ids or user values; unknown paths collapse
   to one `UNMATCHED` series and never grow known-route cardinality; registry route cardinality is
-  hard-bounded; counter/histogram increment; render-failure → fixed 503; logging/metrics failure does
-  not change a response; exception message never logged (only `UNHANDLED_EXCEPTION` + `ValueError`);
+  hard-bounded; render-failure → fixed 503; getter/inc/dec/observe/log failures do not change a
+  response or mask a downstream exception; exception message never logged (only
+  `UNHANDLED_EXCEPTION` + `ValueError`);
   liveness + security headers unchanged; readiness still fail-closed and gauge reflects 0; health/
   metrics scrapes not access-logged; Uvicorn access log disabled in Compose + Dockerfile; no host port.
 - **Real provider-free Docker run** — recorded in §7 of this file's companion report.

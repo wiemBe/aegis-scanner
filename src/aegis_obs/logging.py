@@ -33,6 +33,27 @@ from aegis_obs.normalize import (
 
 LOG_SCHEMA_VERSION: Final = "obslog-v1"
 
+_ALLOWED_RECORD_KEYS: Final = frozenset(
+    {
+        "schema_version",
+        "timestamp_utc",
+        "level",
+        "service",
+        "event",
+        "request_id",
+        "method",
+        "route",
+        "status_code",
+        "status_class",
+        "duration_ms",
+        "code",
+        "exception_class",
+    }
+)
+_REQUIRED_RECORD_KEYS: Final = frozenset(
+    {"schema_version", "timestamp_utc", "level", "service", "event", "request_id"}
+)
+
 # The closed set of levels and events. Anything else is coerced to a safe default.
 _LEVELS: Final = frozenset({"INFO", "WARNING", "ERROR"})
 _EVENTS: Final = frozenset({"http_request", "http_error", "startup", "log_serialization_failed"})
@@ -74,6 +95,42 @@ def _bounded_ms(duration_seconds: float) -> int:
     return min(ms, _MAX_DURATION_MS)
 
 
+def _bounded_status_code(value: object) -> int:
+    """Keep only real HTTP status codes; collapse every other value to the fixed sentinel 0."""
+
+    if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+        return value
+    return 0
+
+
+def _timestamp_utc() -> str:
+    """Return a timestamp without ever exposing caller-controlled data on failure."""
+
+    try:
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    except Exception:  # noqa: BLE001 - a logging fallback must remain no-raise
+        return "1970-01-01T00:00:00.000000Z"
+
+
+def _fallback_record() -> dict[str, Any]:
+    """Return a complete, constant, closed-schema serialization-failure record."""
+
+    return {
+        "schema_version": LOG_SCHEMA_VERSION,
+        "timestamp_utc": _timestamp_utc(),
+        "level": "ERROR",
+        "service": "unknown",
+        "event": "log_serialization_failed",
+        "request_id": "-",
+    }
+
+
+def _exact_string(value: object) -> str | None:
+    """Accept plain strings only; never call ``str``/``repr`` on arbitrary objects."""
+
+    return value if type(value) is str else None
+
+
 def build_record(
     *,
     service: str,
@@ -95,7 +152,7 @@ def build_record(
 
     record: dict[str, Any] = {
         "schema_version": LOG_SCHEMA_VERSION,
-        "timestamp_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "timestamp_utc": _timestamp_utc(),
         "level": level if level in _LEVELS else "INFO",
         "service": service if service in KNOWN_SERVICES else "unknown",
         "event": event if event in _EVENTS else "http_request",
@@ -106,8 +163,9 @@ def build_record(
     if route is not None:
         record["route"] = bound_route(route)
     if status_code is not None:
-        record["status_code"] = status_code if isinstance(status_code, int) else 0
-        record["status_class"] = status_class(status_code if isinstance(status_code, int) else 0)
+        safe_status = _bounded_status_code(status_code)
+        record["status_code"] = safe_status
+        record["status_class"] = status_class(safe_status)
     if duration_seconds is not None:
         record["duration_ms"] = _bounded_ms(duration_seconds)
     if code is not None:
@@ -125,18 +183,48 @@ class StructuredLogger:
         self._stream = stream if stream is not None else sys.stdout
         self._lock = threading.Lock()
 
-    def emit(self, record: dict[str, Any]) -> None:
+    @staticmethod
+    def _sanitize_record(record: object) -> dict[str, Any]:
+        """Rebuild an emitted record through the closed schema without stringifying objects."""
+
+        if not isinstance(record, dict):
+            return _fallback_record()
+        keys = set(record)
+        if not _REQUIRED_RECORD_KEYS.issubset(keys) or not keys.issubset(_ALLOWED_RECORD_KEYS):
+            return _fallback_record()
         try:
-            line = json.dumps(record, separators=(",", ":"), ensure_ascii=True, default=str)
-        except (TypeError, ValueError):
-            line = json.dumps(
-                {
-                    "schema_version": LOG_SCHEMA_VERSION,
-                    "event": "log_serialization_failed",
-                    "service": str(record.get("service", "unknown"))[:64],
-                    "level": "ERROR",
-                }
+            duration_ms: object = record.get("duration_ms")
+            duration_seconds: float | None = None
+            if isinstance(duration_ms, int | float) and not isinstance(duration_ms, bool):
+                duration_seconds = float(duration_ms) / 1000
+            status: object = record.get("status_code")
+            safe_status = (
+                status if isinstance(status, int) and not isinstance(status, bool) else None
             )
+            return build_record(
+                service=_exact_string(record.get("service")) or "unknown",
+                event=_exact_string(record.get("event")) or "log_serialization_failed",
+                level=_exact_string(record.get("level")) or "ERROR",
+                request_id=_exact_string(record.get("request_id")) or "-",
+                method=_exact_string(record.get("method")),
+                route=_exact_string(record.get("route")),
+                status_code=safe_status,
+                duration_seconds=duration_seconds,
+                code=_exact_string(record.get("code")),
+                exception_class=_exact_string(record.get("exception_class")),
+            )
+        except Exception:  # noqa: BLE001 - logging must stay no-raise
+            return _fallback_record()
+
+    def emit(self, record: object) -> None:
+        try:
+            safe_record = self._sanitize_record(record)
+            line = json.dumps(safe_record, separators=(",", ":"), ensure_ascii=True)
+        except Exception:  # noqa: BLE001 - hostile mappings/serializers must remain no-raise
+            try:
+                line = json.dumps(_fallback_record(), separators=(",", ":"), ensure_ascii=True)
+            except Exception:  # noqa: BLE001 - no output is safer than propagating a log failure
+                return
         try:
             with self._lock:
                 self._stream.write(line + "\n")
@@ -150,10 +238,5 @@ class StructuredLogger:
         try:
             record = build_record(**fields)
         except Exception:  # noqa: BLE001 - never let a logging call break the caller
-            record = {
-                "schema_version": LOG_SCHEMA_VERSION,
-                "event": "log_serialization_failed",
-                "service": str(fields.get("service", "unknown"))[:64],
-                "level": "ERROR",
-            }
+            record = _fallback_record()
         self.emit(record)

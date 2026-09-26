@@ -42,6 +42,31 @@ Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
 Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 
 
+def _safe_resolve[ObserverT](getter: Callable[[], ObserverT]) -> ObserverT | None:
+    try:
+        return getter()
+    except Exception:  # noqa: BLE001 - observer discovery must never break the application
+        return None
+
+
+def _safe_inc_in_flight(registry: MetricsRegistry | None) -> None:
+    if registry is None:
+        return
+    try:
+        registry.inc_in_flight()
+    except Exception:  # noqa: BLE001, S110 - metrics must never break a request
+        pass
+
+
+def _safe_dec_in_flight(registry: MetricsRegistry | None) -> None:
+    if registry is None:
+        return
+    try:
+        registry.dec_in_flight()
+    except Exception:  # noqa: BLE001, S110 - metrics must never mask a response or exception
+        pass
+
+
 def resolve_request_id(raw: str | None) -> str:
     """Return the client request id if valid/bounded, else a fresh generated one (fail safe)."""
 
@@ -109,8 +134,8 @@ def _should_log(path: str, status_code: int, errored: bool) -> tuple[bool, str, 
 def _emit_observation(
     *,
     service: str,
-    registry: MetricsRegistry,
-    logger: StructuredLogger,
+    registry: MetricsRegistry | None,
+    logger: StructuredLogger | None,
     request_id: str,
     method: str,
     route: str,
@@ -122,29 +147,31 @@ def _emit_observation(
 ) -> None:
     """Record metrics + log with all failures swallowed (never affect the request path)."""
 
-    try:
-        registry.observe_request(
-            method=method, route=route, status_code=status_code, duration_seconds=duration
-        )
-    except Exception:  # noqa: BLE001, S110 - metrics must never break a request
-        pass
-    try:
-        emit, level, event = _should_log(path, status_code, errored)
-        if emit:
-            logger.log(
-                service=service,
-                event=event,
-                level=level,
-                request_id=request_id,
-                method=method,
-                route=route,
-                status_code=status_code,
-                duration_seconds=duration,
-                code=_UNHANDLED_EXCEPTION_CODE if errored else None,
-                exception_class=exception_class,
+    if registry is not None:
+        try:
+            registry.observe_request(
+                method=method, route=route, status_code=status_code, duration_seconds=duration
             )
-    except Exception:  # noqa: BLE001, S110 - logging must never break a request
-        pass
+        except Exception:  # noqa: BLE001, S110 - metrics must never break a request
+            pass
+    if logger is not None:
+        try:
+            emit, level, event = _should_log(path, status_code, errored)
+            if emit:
+                logger.log(
+                    service=service,
+                    event=event,
+                    level=level,
+                    request_id=request_id,
+                    method=method,
+                    route=route,
+                    status_code=status_code,
+                    duration_seconds=duration,
+                    code=_UNHANDLED_EXCEPTION_CODE if errored else None,
+                    exception_class=exception_class,
+                )
+        except Exception:  # noqa: BLE001, S110 - logging must never break a request
+            pass
 
 
 async def observe_request(
@@ -159,12 +186,12 @@ async def observe_request(
 
     request_id = resolve_request_id(request.headers.get("x-request-id"))
     request.state.request_id = request_id
-    registry.inc_in_flight()
+    _safe_inc_in_flight(registry)
     start = monotonic()
     try:
         response = await call_next(request)
     except BaseException as exc:  # noqa: BLE001 - observe, then re-raise unchanged
-        registry.dec_in_flight()
+        _safe_dec_in_flight(registry)
         _emit_observation(
             service=service,
             registry=registry,
@@ -179,7 +206,7 @@ async def observe_request(
             exception_class=bounded_exception_label(exc),
         )
         raise
-    registry.dec_in_flight()
+    _safe_dec_in_flight(registry)
     _emit_observation(
         service=service,
         registry=registry,
@@ -223,8 +250,8 @@ class ObservabilityASGIMiddleware:
             await self.app(scope, receive, send)
             return
 
-        registry = self._get_registry()
-        logger = self._get_logger()
+        registry = _safe_resolve(self._get_registry)
+        logger = _safe_resolve(self._get_logger)
         request_id = resolve_request_id(_header_value(scope, b"x-request-id"))
         state = scope.setdefault("state", {})
         if isinstance(state, dict):
@@ -242,12 +269,12 @@ class ObservabilityASGIMiddleware:
                     message = {**message, "headers": headers}
             await send(message)
 
-        registry.inc_in_flight()
+        _safe_inc_in_flight(registry)
         start = monotonic()
         try:
             await self.app(scope, receive, send_wrapper)
         except BaseException as exc:  # noqa: BLE001 - observe, then re-raise so the drop is preserved
-            registry.dec_in_flight()
+            _safe_dec_in_flight(registry)
             _emit_observation(
                 service=self.service,
                 registry=registry,
@@ -262,7 +289,7 @@ class ObservabilityASGIMiddleware:
                 exception_class=bounded_exception_label(exc),
             )
             raise
-        registry.dec_in_flight()
+        _safe_dec_in_flight(registry)
         _emit_observation(
             service=self.service,
             registry=registry,

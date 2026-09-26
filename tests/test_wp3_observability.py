@@ -27,8 +27,8 @@ import lab_api.main as lab_main
 from aegis.settings import Settings
 from aegis.storage import ScanStore
 from aegis_obs.logging import LOG_SCHEMA_VERSION, StructuredLogger, build_record
-from aegis_obs.metrics import MAX_ROUTE_LABELS, MetricsRegistry
-from aegis_obs.middleware import observe_request
+from aegis_obs.metrics import DURATION_BUCKETS, MAX_ROUTE_LABELS, MetricsRegistry
+from aegis_obs.middleware import ObservabilityASGIMiddleware, observe_request
 from aegis_obs.normalize import ROUTE_OTHER
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +53,13 @@ _REQUIRED_LOG_KEYS = {"schema_version", "timestamp_utc", "level", "service", "ev
 
 def _parse_logs(buffer: io.StringIO) -> list[dict[str, Any]]:
     return [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
+
+
+def _sample_value(body: str, metric: str, *labels: str) -> float:
+    for line in body.splitlines():
+        if line.startswith(metric + "{") and all(label in line for label in labels):
+            return float(line.rsplit(" ", 1)[1])
+    raise AssertionError(f"metric sample not found: {metric} {labels!r}")
 
 
 # --- Log schema is strict and JSON-valid ---------------------------------------------------------
@@ -92,6 +99,7 @@ def test_build_record_coerces_out_of_contract_values() -> None:
     assert record["event"] == "http_request"
     assert record["level"] == "INFO"
     assert record["method"] == ROUTE_OTHER
+    assert record["status_code"] == 0
     assert record["status_class"] == "OTHER"
     assert record["exception_class"] == "Exception"  # not on the allowlist -> generic
 
@@ -106,12 +114,51 @@ def test_logger_writes_single_line_valid_json() -> None:
     assert json.loads(lines[0])["service"] == "lab-api"
 
 
-def test_logger_never_raises_on_unserializable_field() -> None:
+class _SecretStringObject:
+    def __str__(self) -> str:
+        return "SENTINEL-FROM-STR-MUST-NOT-LEAK"
+
+
+def test_logger_arbitrary_emit_is_closed_schema_secret_free_and_no_raise() -> None:
+    records: list[object] = [
+        {"schema_version": LOG_SCHEMA_VERSION, "weird_secret": "SENTINEL-RAW-EMIT"},
+        {
+            "schema_version": LOG_SCHEMA_VERSION,
+            "nested": {"token": "SENTINEL-NESTED"},
+        },
+        {
+            "schema_version": LOG_SCHEMA_VERSION,
+            "timestamp_utc": "SENTINEL-TIMESTAMP",
+            "level": "INFO",
+            "service": _SecretStringObject(),
+            "event": "startup",
+            "request_id": "-",
+        },
+        _SecretStringObject(),
+    ]
     buf = io.StringIO()
     logger = StructuredLogger(stream=buf)
-    # An object json cannot encode is coerced by default=str; the logger must not raise.
-    logger.emit({"schema_version": LOG_SCHEMA_VERSION, "weird": {1, 2, 3}})
-    assert buf.getvalue()  # something was written
+    for record in records:
+        logger.emit(record)
+    logger.log(
+        service=_SecretStringObject(),
+        event="startup",
+        level="INFO",
+        request_id="-",
+    )
+
+    output = buf.getvalue()
+    for sentinel in (
+        "SENTINEL-RAW-EMIT",
+        "SENTINEL-NESTED",
+        "SENTINEL-TIMESTAMP",
+        "SENTINEL-FROM-STR-MUST-NOT-LEAK",
+    ):
+        assert sentinel not in output
+    logs = _parse_logs(buf)
+    assert len(logs) == len(records) + 1
+    assert all(_REQUIRED_LOG_KEYS <= set(record) <= _ALLOWED_LOG_KEYS for record in logs)
+    assert all(record["schema_version"] == LOG_SCHEMA_VERSION for record in logs)
 
 
 # --- Redaction: sentinels injected everywhere never appear in logs or metrics --------------------
@@ -243,6 +290,67 @@ def test_observe_request_increments_counter_and_histogram() -> None:
     assert 'aegis_http_responses_total' in body and 'status_class="2xx"' in body
 
 
+def test_histogram_single_observation_is_cumulative_exactly_once() -> None:
+    registry = MetricsRegistry(service="lab-api")
+    registry.observe_request(method="GET", route="/hist", status_code=200, duration_seconds=0.02)
+    body = registry.render()
+    expected = {upper: (0 if upper < 0.02 else 1) for upper in DURATION_BUCKETS}
+    observed = {
+        upper: _sample_value(
+            body,
+            "aegis_http_request_duration_seconds_bucket",
+            'route="/hist"',
+            f'le="{upper!r}"',
+        )
+        for upper in DURATION_BUCKETS
+    }
+    assert observed == expected
+    assert _sample_value(
+        body,
+        "aegis_http_request_duration_seconds_bucket",
+        'route="/hist"',
+        'le="+Inf"',
+    ) == 1
+    assert _sample_value(
+        body, "aegis_http_request_duration_seconds_count", 'route="/hist"'
+    ) == 1
+
+
+def test_histogram_multiple_observations_obey_prometheus_invariants() -> None:
+    registry = MetricsRegistry(service="control-plane")
+    durations = (0.002, 0.02, 0.2, 12.0)
+    for duration in durations:
+        registry.observe_request(
+            method="POST", route="/hist-many", status_code=202, duration_seconds=duration
+        )
+    body = registry.render()
+    finite = [
+        _sample_value(
+            body,
+            "aegis_http_request_duration_seconds_bucket",
+            'route="/hist-many"',
+            f'le="{upper!r}"',
+        )
+        for upper in DURATION_BUCKETS
+    ]
+    count = _sample_value(
+        body, "aegis_http_request_duration_seconds_count", 'route="/hist-many"'
+    )
+    infinity = _sample_value(
+        body,
+        "aegis_http_request_duration_seconds_bucket",
+        'route="/hist-many"',
+        'le="+Inf"',
+    )
+    assert finite == sorted(finite)
+    assert all(value <= count for value in finite)
+    assert finite[-1] == 3  # 12s exceeds every finite bucket
+    assert infinity == count == len(durations)
+    assert _sample_value(
+        body, "aegis_http_request_duration_seconds_sum", 'route="/hist-many"'
+    ) == pytest.approx(sum(durations))
+
+
 def test_metrics_render_failure_returns_fixed_body(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = MetricsRegistry(service="lab-api")
 
@@ -271,13 +379,38 @@ async def test_metrics_endpoint_returns_503_on_render_failure(
 
 
 class _ExplodingLogger(StructuredLogger):
-    def emit(self, record: dict[str, Any]) -> None:  # type: ignore[override]
+    def emit(self, record: object) -> None:
         raise RuntimeError("logging backend down")
 
 
 class _ExplodingRegistry(MetricsRegistry):
     def observe_request(self, **_kwargs: Any) -> None:  # type: ignore[override]
         raise RuntimeError("metrics backend down")
+
+
+class _LifecycleExplodingRegistry(MetricsRegistry):
+    def __init__(self, *, fail_at: str) -> None:
+        super().__init__(service="lab-api")
+        self.fail_at = fail_at
+        self.inc_calls = 0
+        self.dec_calls = 0
+
+    def inc_in_flight(self) -> None:
+        self.inc_calls += 1
+        if self.fail_at == "inc":
+            raise RuntimeError("metrics inc backend down")
+        super().inc_in_flight()
+
+    def dec_in_flight(self) -> None:
+        self.dec_calls += 1
+        if self.fail_at == "dec":
+            raise RuntimeError("metrics dec backend down")
+        super().dec_in_flight()
+
+    def observe_request(self, **kwargs: Any) -> None:  # type: ignore[override]
+        if self.fail_at == "observe":
+            raise RuntimeError("metrics observation backend down")
+        super().observe_request(**kwargs)
 
 
 async def test_logging_and_metrics_failure_do_not_break_requests() -> None:
@@ -303,6 +436,94 @@ async def test_logging_and_metrics_failure_do_not_break_requests() -> None:
     # The response (the controller-owned verdict payload) is unchanged despite obs failures.
     assert resp.status_code == 200
     assert resp.json() == {"verdict": "PASS"}
+
+
+@pytest.mark.parametrize("fail_at", ["inc", "dec", "observe"])
+async def test_metric_lifecycle_failure_does_not_change_base_middleware_response(
+    fail_at: str,
+) -> None:
+    registry = _LifecycleExplodingRegistry(fail_at=fail_at)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def mw(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
+        return await observe_request(
+            request,
+            call_next,
+            service="lab-api",
+            registry=registry,
+            logger=StructuredLogger(stream=io.StringIO()),
+        )
+
+    @app.get("/ok")
+    async def ok() -> dict[str, str]:
+        return {"verdict": "PASS"}
+
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ok")
+    assert response.status_code == 200
+    assert response.json() == {"verdict": "PASS"}
+    assert registry.inc_calls == 1
+    assert registry.dec_calls == 1
+
+
+def _observer_getter_failure() -> Any:
+    raise RuntimeError("observer getter unavailable")
+
+
+async def test_asgi_observer_getter_failures_do_not_change_response() -> None:
+    app = FastAPI()
+
+    @app.get("/ok")
+    async def ok() -> dict[str, str]:
+        return {"verdict": "PASS"}
+
+    wrapped = ObservabilityASGIMiddleware(
+        app,
+        service="lab-api",
+        get_registry=_observer_getter_failure,
+        get_logger=_observer_getter_failure,
+    )
+    transport = httpx.ASGITransport(app=wrapped, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/ok")
+    assert response.status_code == 200
+    assert response.json() == {"verdict": "PASS"}
+
+
+async def test_asgi_observer_failures_do_not_mask_downstream_exception() -> None:
+    marker = ValueError("downstream-marker")
+
+    async def broken_app(scope: Any, receive: Any, send: Any) -> None:
+        raise marker
+
+    registry = _LifecycleExplodingRegistry(fail_at="dec")
+    wrapped = ObservabilityASGIMiddleware(
+        broken_app,
+        service="lab-api",
+        get_registry=lambda: registry,
+        get_logger=lambda: _ExplodingLogger(),
+    )
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/boom",
+        "headers": [],
+        "state": {},
+    }
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        del message
+
+    with pytest.raises(ValueError) as raised:
+        await wrapped(scope, receive, send)
+    assert raised.value is marker
+    assert registry.inc_calls == 1
+    assert registry.dec_calls == 1
 
 
 async def test_exception_message_is_never_logged() -> None:
