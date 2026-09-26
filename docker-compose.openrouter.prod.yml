@@ -1,0 +1,14 @@
+# Immutable-image enforcement for docker-compose.openrouter.yml.
+# Apply this file last, after docker-compose.yml, docker-compose.openrouter.yml and
+# docker-compose.prod.yml. Both image values must include an @sha256 digest.
+
+services:
+  control-plane:
+    env_file: !reset []
+
+  llm-gateway:
+    build: !reset null
+    image: "${AEGIS_IMAGE:?set AEGIS_IMAGE to an immutable registry/repository@sha256 digest}"
+
+  egress-proxy:
+    image: "${AEGIS_EGRESS_PROXY_IMAGE:?set AEGIS_EGRESS_PROXY_IMAGE to an immutable Squid image @sha256 digest}"

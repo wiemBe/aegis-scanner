@@ -1,0 +1,92 @@
+# Opt-in OpenRouter/Qwen3.8 27B gateway overlay.
+#
+# Development:
+#   export OPENROUTER_API_KEY_SOURCE="$PWD/.secrets/openrouter-api-key"
+#   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build -d
+#
+# Production adds immutable application and proxy images:
+#   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
+#     -f docker-compose.prod.yml -f docker-compose.openrouter.prod.yml up -d
+#
+# The API key is a read-only file visible only to llm-gateway. The gateway has no target-network
+# access and can reach the public network only through Squid; Squid permits CONNECT solely to
+# openrouter.ai:443 and cannot decrypt the request or see its Authorization header.
+
+services:
+  control-plane:
+    environment:
+      AI_PROVIDER: openrouter
+      AI_MODEL: qwen/qwen3.8-27b
+      AI_ALLOWED_MODELS: qwen/qwen3.8-27b
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      EXTENSION_MANIFEST_PATH: /etc/aegis/extensions/manifest.json
+    volumes:
+      - "${AEGIS_EXTENSION_MANIFEST_SOURCE:-./deploy/extensions/manifest.json}:/etc/aegis/extensions/manifest.json:ro,z"
+    networks: [security-lab, planner-rpc]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+
+  llm-gateway:
+    build: .
+    command: >-
+      uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080 --no-access-log
+      --timeout-graceful-shutdown 12
+    environment:
+      AI_PROVIDER: openrouter
+      AI_BASE_URL: https://openrouter.ai
+      AI_MODEL: qwen/qwen3.8-27b
+      AI_ALLOWED_MODELS: qwen/qwen3.8-27b
+      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter-api-key
+      AI_RESPONSE_FORMAT: json_schema
+      AI_SUPPORTS_SEED: "false"
+      AI_USE_EGRESS_PROXY: "true"
+      PROVIDER_PROXY_URL: http://egress-proxy:3128
+      EXTENSION_MANIFEST_PATH: /etc/aegis/extensions/manifest.json
+      MODEL_TIMEOUT_SECONDS: "${MODEL_TIMEOUT_SECONDS:-60}"
+      MAX_COMPLETION_TOKENS: "${MAX_COMPLETION_TOKENS:-2048}"
+      MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-131072}"
+      MAX_TOKENS_PER_SCAN: "${MAX_TOKENS_PER_SCAN:-80000}"
+    volumes:
+      - "${OPENROUTER_API_KEY_SOURCE:?set OPENROUTER_API_KEY_SOURCE to an absolute key-file path}:/run/secrets/openrouter-api-key:ro,Z"
+      - "${AEGIS_EXTENSION_MANIFEST_SOURCE:-./deploy/extensions/manifest.json}:/etc/aegis/extensions/manifest.json:ro,z"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [planner-rpc, gateway-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  egress-proxy:
+    image: "${AEGIS_EGRESS_PROXY_IMAGE:-ubuntu/squid:6.6-24.04_beta}"
+    volumes:
+      - ./deploy/egress-proxy.openrouter.squid.conf:/etc/squid/squid.conf:ro,z
+    networks: [gateway-egress, provider-egress]
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "squid -k parse"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  planner-rpc:
+    internal: true
+  gateway-egress:
+    internal: true
+  provider-egress:
+    internal: false

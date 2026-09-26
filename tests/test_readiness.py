@@ -218,6 +218,25 @@ def test_not_ready_when_deepseek_key_present(tmp_path: Path) -> None:
     assert _check(report, "credential_isolation") is CheckStatus.FAIL
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        Settings(openrouter_api_key=_PLACEHOLDER_CREDENTIAL),
+        Settings(openrouter_api_key_file="/run/secrets/openrouter-api-key"),
+    ],
+)
+def test_not_ready_when_openrouter_credential_present(tmp_path: Path, settings: Settings) -> None:
+    store = ScanStore(str(tmp_path / "aegis.db"))
+    store.initialize()
+
+    report = evaluate_readiness(settings, store)
+
+    assert report.ready is False
+    assert _check(report, "credential_isolation") is CheckStatus.FAIL
+    assert _PLACEHOLDER_CREDENTIAL not in report.model_dump_json()
+    assert "/run/secrets/openrouter-api-key" not in report.model_dump_json()
+
+
 def test_report_never_contains_credential_value(tmp_path: Path) -> None:
     store = ScanStore(str(tmp_path / "aegis.db"))
     store.initialize()

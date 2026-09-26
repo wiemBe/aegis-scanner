@@ -179,8 +179,9 @@ scripts/run_management_demo.sh --cleanup  # remove only that Compose project
 
 ## Production deployment
 
-Production is limited to a **company-private OpenAI-compatible endpoint**. Public AI egress is never
-the deployment model. There are two supported production topologies.
+The default production path uses a **company-private OpenAI-compatible endpoint**. An explicit,
+separately isolated OpenRouter/Qwen3.8 27B profile is also available when public AI egress is an
+accepted deployment constraint; it is never selected implicitly.
 
 Status: the deployment path is `DEPLOYMENT_PATH_READY` (repository/config checks complete). Real
 registry pull, private endpoint/TLS/model validation, and staging soak/failure evidence remain
@@ -239,6 +240,21 @@ never placed in the environment — it is a SELinux-labelled read-only file moun
 - **Cleanup** — `make cleanup-check` fails if any `aegis`-labelled container or network is left
   behind.
 
+### OpenRouter + Qwen3.8 27B (explicit opt-in)
+
+The OpenRouter profile pins the exact model ID `qwen/qwen3.8-27b`, requires strict JSON Schema
+support, requests ZDR and denies provider data collection on every call. The key is mounted only
+into `llm-gateway`; a CONNECT proxy restricts public egress to `openrouter.ai:443`.
+
+```bash
+export OPENROUTER_API_KEY_SOURCE=/absolute/path/openrouter-api-key
+docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build -d
+```
+
+For immutable Fedora/RHEL production deployment, SELinux file labels, extension-manifest examples,
+verification, update and rollback commands, see the
+[OpenRouter/Qwen deployment guide](docs/openrouter-qwen38.md).
+
 ### Extensions
 
 A declarative extension manifest can add bounded prompt guidance, agent profiles over existing
@@ -287,6 +303,8 @@ on internal-only networks with **no published host port**.
 | `docker-compose.dashboard.yml` | Optional loopback-only Nginx ingress on `127.0.0.1:8000` |
 | `docker-compose.ollama.yml` | `LOCAL_LLM` overlay — private Ollama provider |
 | `docker-compose.deepseek.yml` | DeepSeek OpenAI-compatible gateway overlay (live-provider smoke) |
+| `docker-compose.openrouter.yml` | OpenRouter + exact `qwen/qwen3.8-27b` isolated gateway overlay |
+| `docker-compose.openrouter.prod.yml` | Immutable image enforcement for the OpenRouter overlay |
 | `docker-compose.provider.yml` | Generic provider/gateway overlay |
 | `docker-compose.prod.yml` | Production overlay — immutable digest-pinned images |
 | `docker-compose.private-provider.prod.yml` | Company-private OpenAI-compatible provider overlay |

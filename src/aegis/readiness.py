@@ -148,6 +148,8 @@ def _check_credential_isolation(settings: Settings) -> ReadinessCheck:
         settings.ai_auth_token is not None
         or settings.ai_auth_token_file is not None
         or settings.deepseek_api_key is not None
+        or settings.openrouter_api_key is not None
+        or settings.openrouter_api_key_file is not None
     ):
         return ReadinessCheck(
             name=name,
