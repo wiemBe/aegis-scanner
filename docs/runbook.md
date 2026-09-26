@@ -335,12 +335,15 @@ The control plane exposes two distinct probes:
   control plane is safe to serve, and `503` with `{"ready": false, ...}` otherwise. Route production
   traffic and gate rollouts on this, never on `/health`.
 
-`/ready` runs deterministic, side-effect-free checks (it never writes and opens the database
-read-only) and treats any state it cannot positively confirm as **NOT_READY**:
+`/ready` runs deterministic, side-effect-free checks (it never writes or creates a database) and
+treats any state it cannot positively confirm as **NOT_READY**:
 
-- `persistence` — the `aegis-data` volume is writable and the SQLite schema
-  (`scans`, `audit_events`, `audit_access_log`) is present. Fails closed if the volume detaches, the
-  disk fills, the file is removed, or the schema is absent after startup.
+- `persistence` — at probe time, the SQLite path must be an existing regular file, its parent must
+  have write permission, the filesystem must report caller-available blocks, SQLite must open the
+  existing file with `mode=rw`, and the required tables **and columns** must exist. Missing storage,
+  zero available capacity, read-write open failure, malformed schema or an ambiguous filesystem/
+  SQLite result is `NOT_READY`. The probe is a point-in-time signal: it cannot guarantee that space
+  or write availability will remain unchanged after the response.
 - `credential_isolation` — the control plane holds no provider credential (`AI_AUTH_TOKEN` /
   `DEEPSEEK_API_KEY`). Only credential *presence* is inspected; the value is never read or emitted.
 

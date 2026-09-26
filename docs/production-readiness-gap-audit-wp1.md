@@ -123,6 +123,14 @@ backward compatible: a new `/ready` endpoint and a `control-plane` healthcheck; 
 hardening set (root user, resource/restart limits, logging/metrics, graceful drain, deterministic
 rollback) open. The system is suitable for continued **staging validation** only.
 
+**Post-audit correction.** The companion implementation was subsequently tightened so the
+readiness contract does not infer write availability from permission bits plus a read-only SQLite
+open. The final point-in-time check requires an existing regular file, caller-available filesystem
+blocks, a successful SQLite `mode=rw` open, and all required table/column contracts. It performs no
+persistent mutation, returns only fixed diagnostics, and explicitly makes no guarantee about future
+capacity after the probe completes. Zero capacity and ambiguous filesystem/SQLite states fail
+closed. The overall status remains **NOT_PRODUCTION_READY**.
+
 ## 8. Exact next recommended work package
 
 **WP2 — Container runtime hardening for the base stack (G-ROOT-1 + G-LIMITS-1 + G-ROLL-1):** add a

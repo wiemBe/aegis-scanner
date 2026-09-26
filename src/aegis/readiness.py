@@ -6,10 +6,10 @@ control plane must satisfy before it is safe to route traffic to it — and it f
 whose outcome cannot be positively confirmed is treated as ``NOT_READY``.
 
 The evaluation is a pure function over :class:`~aegis.settings.Settings` and the
-:class:`~aegis.storage.ScanStore`. It performs no mutation, opens the database read-only, does no
-network I/O, and never places a secret (or any secret-derived value) in its output — only the
-*presence* of a forbidden credential is checked, never its value, and check details are fixed
-strings rather than raw exception text.
+:class:`~aegis.storage.ScanStore`. It performs no mutation, opens the existing database in
+read-write mode without creating it, does no network I/O, and never places a secret (or any
+secret-derived value) in its output — only the *presence* of a forbidden credential is checked,
+never its value, and check details are fixed strings rather than raw exception text.
 
 The readiness contract mirrors the ``200 READY / 503 NOT_READY`` convention already used by the
 isolated runner services (see ``zap_runner.server``), bringing the control plane in line.
@@ -29,9 +29,13 @@ from aegis.storage import ScanStore
 
 READINESS_CONTRACT_VERSION = "readiness-v1"
 
-# The persisted tables the control plane requires before it can accept a scan or serve the audit
-# trail. Kept in lock-step with ``ScanStore.initialize()``.
-REQUIRED_TABLES: frozenset[str] = frozenset({"scans", "audit_events", "audit_access_log"})
+# The persisted table/column contracts the control plane requires before it can accept a scan or
+# serve the audit trail. Kept in lock-step with ``ScanStore.initialize()``.
+REQUIRED_SCHEMA: dict[str, frozenset[str]] = {
+    "scans": frozenset({"id", "status", "created_at", "payload"}),
+    "audit_events": frozenset({"id", "scan_id", "event", "created_at", "details"}),
+    "audit_access_log": frozenset({"id", "request_id", "route", "outcome", "created_at"}),
+}
 
 
 class CheckStatus(str, Enum):
@@ -64,10 +68,12 @@ class ReadinessReport(BaseModel):
 
 
 def _check_persistence(database_path: str) -> ReadinessCheck:
-    """Confirm the scan/audit store is initialized and its volume is writable, without mutation.
+    """Confirm the existing scan/audit store is usable at probe time, without mutation.
 
-    The database is opened read-only so a probe never creates a stray file, and any state that
-    cannot be positively confirmed resolves to ``UNKNOWN`` (fails closed).
+    ``mode=rw`` proves that SQLite can open the existing file read-write without creating a stray
+    database. ``statvfs`` separately rejects a volume with no caller-available blocks. This is a
+    point-in-time signal, not a guarantee that a later write cannot race with capacity loss. Any
+    state that cannot be positively confirmed resolves to ``UNKNOWN`` (fails closed).
     """
 
     name = "persistence"
@@ -82,21 +88,47 @@ def _check_persistence(database_path: str) -> ReadinessCheck:
             return ReadinessCheck(
                 name=name, status=CheckStatus.FAIL, detail="persistence store is not initialized"
             )
-        with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0) as connection:
+        if not path.is_file():
+            return ReadinessCheck(
+                name=name,
+                status=CheckStatus.FAIL,
+                detail="persistence store is not a regular file",
+            )
+        filesystem = os.statvfs(parent)
+        if filesystem.f_bavail <= 0 or filesystem.f_frsize <= 0:
+            return ReadinessCheck(
+                name=name,
+                status=CheckStatus.FAIL,
+                detail="data volume has no available capacity",
+            )
+        database_uri = f"{path.absolute().as_uri()}?mode=rw"
+        with sqlite3.connect(database_uri, uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA query_only = ON")
             rows = connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
-        present: set[str] = {str(row[0]) for row in rows}
-        if REQUIRED_TABLES - present:
-            return ReadinessCheck(
-                name=name, status=CheckStatus.FAIL, detail="persistence schema is incomplete"
-            )
+            present: set[str] = {str(row[0]) for row in rows}
+            if set(REQUIRED_SCHEMA) - present:
+                return ReadinessCheck(
+                    name=name, status=CheckStatus.FAIL, detail="persistence schema is incomplete"
+                )
+            for table, required_columns in REQUIRED_SCHEMA.items():
+                columns = {
+                    str(row[1])
+                    for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+                }
+                if required_columns - columns:
+                    return ReadinessCheck(
+                        name=name,
+                        status=CheckStatus.FAIL,
+                        detail="persistence schema is incomplete",
+                    )
         return ReadinessCheck(
             name=name,
             status=CheckStatus.PASS,
-            detail="persistence store initialized and volume writable",
+            detail="persistence store passed point-in-time availability checks",
         )
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, ValueError):
         return ReadinessCheck(
             name=name,
             status=CheckStatus.UNKNOWN,
