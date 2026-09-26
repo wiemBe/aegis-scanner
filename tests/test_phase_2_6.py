@@ -224,7 +224,9 @@ def test_prose_with_forbidden_token_is_downgraded() -> None:
 def test_prose_denying_controller_findings_is_downgraded() -> None:
     draft = _draft(
         executive_summary="No adjudicated facts were supplied, so there are no findings.",
-        methodology_and_limitations="None were provided; no substantive findings can be stated.",
+        methodology_and_limitations=(
+            "No such facts or evidence were provided. Consequently, nothing can be stated."
+        ),
         finding_remediations=[],
     )
     report = _assemble(_source(), draft)
@@ -237,7 +239,7 @@ def test_prose_denying_controller_findings_is_downgraded() -> None:
 def test_live_report_metadata_distinguishes_controller_fallback() -> None:
     draft = _draft(
         executive_summary="No adjudicated facts were supplied, so there are no findings.",
-        methodology_and_limitations="None were provided.",
+        methodology_and_limitations="No such facts were provided; nothing can be stated.",
         finding_remediations=[],
     )
     report = _assemble(_source(live_run=True), draft)

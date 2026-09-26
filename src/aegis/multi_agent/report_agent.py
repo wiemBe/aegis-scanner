@@ -384,10 +384,10 @@ def _prose_is_safe(text: str) -> bool:
 
 
 _NO_FINDING_CLAIMS = (
-    "no adjudicated fact",
-    "no finding",
-    "none were provided",
-    "no substantive finding",
+    re.compile(r"\bno\s+(?:adjudicated\s+|such\s+)?facts?\b"),
+    re.compile(r"\bno\s+(?:substantive\s+)?findings?\b"),
+    re.compile(r"\bnone\s+(?:were|was|have been)\s+provided\b"),
+    re.compile(r"\bnothing\s+can\s+be\s+stated\b"),
 )
 
 
@@ -395,7 +395,7 @@ def _prose_is_consistent(text: str, source: ReportSource) -> bool:
     """Reject model prose that directly contradicts controller-owned report facts."""
 
     lowered = text.lower()
-    if source.findings and any(claim in lowered for claim in _NO_FINDING_CLAIMS):
+    if source.findings and any(pattern.search(lowered) for pattern in _NO_FINDING_CLAIMS):
         return False
     if source.retests and ("no retest" in lowered or "retest was not" in lowered):
         return False
