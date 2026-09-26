@@ -7,6 +7,11 @@
 budgets, credential isolation, readiness semantics, cleanup, or any Phase 2.9 evidence or verdict.
 It is **not** a production-readiness certification.
 
+> **Subsequent update (WP5).** A digest-pinned company-private `llm-gateway` overlay and mandatory
+> rendered-config preflight now exist. Actual registry pull, endpoint/TLS/model validation, and
+> staging soak/failure evidence remain environment activation gates. See
+> [production-readiness-wp5.md](production-readiness-wp5.md).
+
 Built on WP1 HEAD `1279b09` (branch `codex/phase-2-9-live-adapter`).
 
 ---
@@ -127,17 +132,16 @@ NOT_READY (§5).
 - **Runtime digest pull** — no registry image is available to pull; validated only through the
   fail-closed preflight and rendered Compose configuration. Pull/verify of a live digest is
   **NOT_EVALUATED**.
-- **Complete provider-backed production path — NOT_READY / NOT_EVALUATED.** The only provider overlays
-  today are public-egress profiles (`docker-compose.provider.yml` forces the deprecated public OpenAI
-  profile; deepseek/ollama overlays are not the company-private model). A digest-pinned private-provider
-  `llm-gateway` production overlay does not exist and is not evaluated. Production is base-services-only.
+- **Provider-backed production path (historical WP2 state) — superseded by WP5.** WP2 had no
+  company-private overlay. WP5 now implements the digest-pinned gateway/ingress path and preflight;
+  environment pull/provider/staging validation remains NOT_EVALUATED.
 - **Existing pre-root `aegis-data` volume migration** — documented in runbook §6a (stop → back up →
   chown to `10001:10001` via a **pinned-digest** tool image → verify ownership → readiness → rollback),
   but **not executed** (NOT_EVALUATED).
 - **Load/throughput under the limits**, user-namespace/seccomp/AppArmor hardening, and image supply-
   chain signing of the base `Dockerfile` — not addressed here.
 
-## 6. Remaining blockers (unchanged by WP2)
+## 6. Remaining blockers at the WP2 checkpoint (historical)
 
 - **P1:** `G-OBS-1` (no application logging/metrics), `G-SHUT-1` (no graceful shutdown/drain).
 - **P2:** `G-BACKUP-1` (no volume backup/restore), `G-IR-1` (no incident-response runbook),
@@ -145,7 +149,8 @@ NOT_READY (§5).
 
 ## 7. Conservative status
 
-**NOT_PRODUCTION_READY.** WP2 removes the root-user, unbounded-resource, and mutable-image blockers on
-the base stack, but the P1/P2 set above remains open. Suitable for continued **staging validation**
-only. Neither the resource limits nor the digest pin is a security or capacity guarantee: limits bound
-containment, not load; a digest proves image *immutability*, not image *safety*.
+**Historical WP2 verdict: NOT_PRODUCTION_READY.** Later work packages close the listed repository
+gaps; see WP5 for the current deployment-path status. At this checkpoint the base stack was suitable
+only for continued **staging validation**. Neither the resource limits nor the digest pin is a
+security or capacity guarantee: limits bound containment, not load; a digest proves image
+*immutability*, not image *safety*.

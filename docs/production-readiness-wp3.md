@@ -5,6 +5,10 @@ alert-policy definitions for the control plane and lab API. It closes `G-OBS-1` 
 implement graceful shutdown (`G-SHUT-1`), the private-provider production overlay, or any Phase 3.0
 work, and it does not modify historical Phase 2.9 evidence.
 
+> **Subsequent update (WP5).** The private-provider deployment path and a read-only staging gate are
+> implemented; environment-specific pull, provider/TLS/model, observability-delivery, and staging
+> evidence are still required. See [production-readiness-wp5.md](production-readiness-wp5.md).
+
 Built on WP2-correction HEAD `30d93f0` (branch `codex/phase-2-9-live-adapter`).
 
 The post-review correction after `160c63e` closes three boundary defects found during independent
@@ -175,10 +179,10 @@ No external log aggregation, Prometheus scraping, or alert delivery is proven by
 - External log aggregation / retention / rotation backend.
 - Prometheus (or any) scraper and its storage/retention.
 - Alert manager, alert firing, and notification delivery.
-- Runtime digest pull and the provider-backed production path (carried over from WP2).
+- Runtime digest pull and, at the WP3 checkpoint, the provider-backed production path. WP5 later
+  implements the repository path; environment validation remains open.
 
 ## 8. Conservative status
 
-**NOT_PRODUCTION_READY.** WP3 closes `G-OBS-1`. The next required blocker is **`G-SHUT-1`** (graceful
-shutdown/drain), then a digest-pinned company-private provider/gateway production path, then final
-staging soak/failure validation.
+**Historical WP3 verdict: NOT_PRODUCTION_READY.** WP4 later closes `G-SHUT-1`; WP5 implements the
+private-provider path and staging gate. Environment-specific activation evidence remains required.

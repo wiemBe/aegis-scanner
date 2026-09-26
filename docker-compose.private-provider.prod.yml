@@ -1,0 +1,88 @@
+# Company-private OpenAI-compatible provider production overlay.
+#
+# Use only together with the base and immutable-image overlays:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#     -f docker-compose.private-provider.prod.yml up -d
+#
+# Required, non-secret deployment inputs are validated by
+# `python -m aegis.deploy.private_provider_preflight`. The bearer token is supplied as a read-only
+# host file and is visible only inside llm-gateway; it is never placed in a Compose environment,
+# rendered config, image, command line, control-plane process, or target network.
+
+services:
+  control-plane:
+    # Never inherit a local .env file into the production control plane. Every production value is
+    # declared below; a provider credential in either supported form still makes main.py fail closed.
+    env_file: !reset []
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_MODEL: "${AEGIS_PROVIDER_MODEL:?AEGIS_PROVIDER_MODEL is required}"
+      AI_ALLOWED_MODELS: "${AEGIS_PROVIDER_MODEL:?AEGIS_PROVIDER_MODEL is required}"
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      DATABASE_PATH: /data/aegis.db
+      ALLOWED_TARGET_HOSTS: lab-api
+      LAB_BASE_URL: http://lab-api:8001
+      LAB_OPENAPI_URL: http://lab-api:8001/openapi.json
+      SHUTDOWN_GRACE_SECONDS: "10"
+    networks: [security-lab, planner-rpc]
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+
+  llm-gateway:
+    build: !reset null
+    image: "${AEGIS_IMAGE:?AEGIS_IMAGE must be an immutable registry/repository@sha256 digest}"
+    command: >-
+      uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080 --no-access-log
+      --timeout-graceful-shutdown 12
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_BASE_URL: "${AEGIS_PROVIDER_BASE_URL:?AEGIS_PROVIDER_BASE_URL is required}"
+      AI_MODEL: "${AEGIS_PROVIDER_MODEL:?AEGIS_PROVIDER_MODEL is required}"
+      AI_ALLOWED_MODELS: "${AEGIS_PROVIDER_MODEL:?AEGIS_PROVIDER_MODEL is required}"
+      AI_AUTH_MODE: bearer
+      AI_AUTH_TOKEN_FILE: /run/secrets/aegis-provider-token
+      AI_RESPONSE_FORMAT: "${AEGIS_PROVIDER_RESPONSE_FORMAT:-json_schema}"
+      AI_SUPPORTS_SEED: "${AEGIS_PROVIDER_SUPPORTS_SEED:-true}"
+      AI_USE_EGRESS_PROXY: "false"
+      MODEL_TIMEOUT_SECONDS: "${MODEL_TIMEOUT_SECONDS:-60}"
+      MAX_COMPLETION_TOKENS: "${MAX_COMPLETION_TOKENS:-2048}"
+      MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-131072}"
+      MAX_TOKENS_PER_SCAN: "${MAX_TOKENS_PER_SCAN:-80000}"
+    volumes:
+      - type: bind
+        source: "${AEGIS_PROVIDER_TOKEN_SOURCE:?AEGIS_PROVIDER_TOKEN_SOURCE is required}"
+        target: /run/secrets/aegis-provider-token
+        read_only: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [planner-rpc, provider-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+networks:
+  planner-rpc:
+    internal: true
+  provider-egress:
+    # This is the only provider-reachable network. The gateway code pins HTTPS origin and path,
+    # rejects redirects, ignores ambient proxy variables, and never joins the target network.
+    internal: false

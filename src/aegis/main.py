@@ -25,6 +25,7 @@ from aegis.console_catalog import (
 )
 from aegis.engine.catalog import catalog_projection
 from aegis.engine.contracts import ENGINE_KERNEL_VERSION, SecurityEngine
+from aegis.extensions import load_extension_pack
 from aegis.models import EXECUTION_POLICY_VERSION, PLANNER_CONTRACT_VERSION, ScanCreate, ScanResult
 from aegis.multi_agent.benchmark import BenchmarkResultStore
 from aegis.multi_agent.lifecycle import LifecycleLedger
@@ -87,11 +88,13 @@ from aegis_zap.manifest import manifest_digest as zap_manifest_digest
 
 PACKAGE_DIR = Path(__file__).parent
 settings = get_settings()
+extension_runtime = load_extension_pack(settings.extension_manifest_path)
 # Structural enforcement: the control plane must never receive a provider credential. It reaches
 # the model only via the isolated llm-gateway. A credential mounted here is a misconfiguration.
-if settings.ai_auth_token is not None:
+if settings.ai_auth_token is not None or settings.ai_auth_token_file is not None:
     raise RuntimeError(
-        "Control plane must not be given AI_AUTH_TOKEN; mount it only on the llm-gateway service"
+        "Control plane must not be given a provider credential; mount it only on the "
+        "llm-gateway service"
     )
 store = ScanStore(settings.database_path)
 safety = SafetyController(settings)
@@ -274,6 +277,13 @@ async def multi_agent_console(request: Request) -> HTMLResponse:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "planner": planner.name}
+
+
+@app.get("/api/console/extensions")
+async def extension_catalog() -> dict[str, object]:
+    """Expose a non-secret inventory; execution authority remains in the compiled catalog."""
+
+    return extension_runtime.projection()
 
 
 @app.get("/ready", response_model=ReadinessReport)

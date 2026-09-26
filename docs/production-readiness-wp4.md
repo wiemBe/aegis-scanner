@@ -2,8 +2,9 @@
 
 Status: **CLOSED for the supported single-process/single-writer deployment**, subject to the test
 and real-Docker evidence recorded for this work package. This does not make the system production
-ready. The company-private digest-pinned provider/gateway path and final staging soak/failure
-validation remain open.
+ready. At the WP4 checkpoint the company-private digest-pinned provider/gateway path and final
+staging soak/failure validation were open; WP5 subsequently implements the repository path and
+observer, leaving environment-specific execution evidence open.
 
 ## Lifecycle and admission contract
 
@@ -92,7 +93,7 @@ incident response, and SQLite locking/tuning retain their recorded out-of-scope 
 paid provider call, private-provider overlay, prompt tuning, Phase 3.0 work, `.env.gateway` read, or
 historical Phase 2.9 evidence modification is part of WP4.
 
-Overall status: **NOT_PRODUCTION_READY**. Remaining required work is:
-
-1. digest-pinned company-private provider/gateway production path;
-2. final staging soak and failure validation.
+WP5 subsequently implements the digest-pinned company-private provider/gateway path and a read-only
+staging validation gate. Actual registry pull, endpoint/TLS/model verification, and staging soak/
+failure evidence remain environment activation work. See
+[production-readiness-wp5.md](production-readiness-wp5.md).

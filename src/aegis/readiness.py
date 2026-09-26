@@ -144,7 +144,11 @@ def _check_credential_isolation(settings: Settings) -> ReadinessCheck:
     """
 
     name = "credential_isolation"
-    if settings.ai_auth_token is not None or settings.deepseek_api_key is not None:
+    if (
+        settings.ai_auth_token is not None
+        or settings.ai_auth_token_file is not None
+        or settings.deepseek_api_key is not None
+    ):
         return ReadinessCheck(
             name=name,
             status=CheckStatus.FAIL,

@@ -344,8 +344,9 @@ treats any state it cannot positively confirm as **NOT_READY**:
   zero available capacity, read-write open failure, malformed schema or an ambiguous filesystem/
   SQLite result is `NOT_READY`. The probe is a point-in-time signal: it cannot guarantee that space
   or write availability will remain unchanged after the response.
-- `credential_isolation` — the control plane holds no provider credential (`AI_AUTH_TOKEN` /
-  `DEEPSEEK_API_KEY`). Only credential *presence* is inspected; the value is never read or emitted.
+- `credential_isolation` — the control plane holds no provider credential (`AI_AUTH_TOKEN`,
+  `AI_AUTH_TOKEN_FILE`, or `DEEPSEEK_API_KEY`). Only credential-source *presence* is inspected; the
+  value and file are never read or emitted.
 
 The base `docker-compose.yml` wires the `control-plane` service healthcheck to `/ready`, so a
 control plane that is up but not safe-to-serve is reported **unhealthy** to the orchestrator. Manual
@@ -454,43 +455,82 @@ any future change here must reopen the SQLite concurrency/locking evaluation.
 
 ## 6. Production (company private AI endpoint)
 
-Supply the real institutional details (endpoint, model, auth) — the provider is disabled until then:
+The supported provider-backed production path is the base stack plus the immutable-image and
+company-private provider overlays. Do not use the deprecated public-provider, DeepSeek, or Ollama
+overlays for this deployment.
 
-```dotenv
-# .env
-AI_PROVIDER=internal_openai_compatible
-AI_BASE_URL=https://<company-endpoint>
-AI_MODEL=<company-approved-model>
-AI_ALLOWED_MODELS=<company-approved-model>
-AI_AUTH_MODE=none|bearer
+Create the bearer token as a specific host file readable by container UID/GID `10001:10001`. Never
+put the token value in `.env`, `.env.gateway`, a shell variable, Compose, chat, or a commit:
+
+```bash
+sudo install -o 10001 -g 10001 -m 0400 /dev/stdin /opt/aegis/secrets/provider-token
+# Enter the token through the command's stdin, then close stdin. Do not put it in shell history.
 ```
 
-If `AI_AUTH_MODE=bearer`, put the credential only in an untracked `.env.gateway`:
+Export only non-secret deployment inputs. The image must be a fully qualified immutable digest;
+the endpoint must be one bare HTTPS origin; the allowlist contains exactly one approved model:
 
-```dotenv
-# .env.gateway  (mounted only into llm-gateway; never in .env, chat or a commit)
-AI_AUTH_TOKEN=<company-issued token>
+```bash
+export AEGIS_IMAGE=registry.example.com/security/aegis@sha256:<64-lowercase-hex>
+export AEGIS_DASHBOARD_IMAGE=registry.example.com/security/nginx@sha256:<64-lowercase-hex>
+export AEGIS_PROVIDER_BASE_URL=https://models.internal.company
+export AEGIS_PROVIDER_MODEL=<company-approved-model>
+export AEGIS_PROVIDER_TOKEN_SOURCE=/opt/aegis/secrets/provider-token
+
+# Mandatory: validates inputs, renders all layers, and proves image/credential/network isolation.
+# It does not read the credential file, pull an image, call the provider, or start containers.
+python -m aegis.deploy.private_provider_preflight
+
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml \
+  -f docker-compose.private-provider.prod.yml \
+  -f docker-compose.dashboard.yml \
+  -f docker-compose.dashboard.prod.yml \
+  up -d
 ```
 
-The control plane refuses to start if `AI_AUTH_TOKEN` is present in its own environment.
+The token file is mounted read-only only into `llm-gateway`. The control plane refuses to start and
+fails readiness if either `AI_AUTH_TOKEN` or `AI_AUTH_TOKEN_FILE` is present. The gateway joins the
+provider-egress network but never the target network; the control plane joins the target and
+internal RPC networks but never provider-egress. The optional dashboard binds only
+`127.0.0.1:8000`; exposing it beyond loopback requires a separately approved/authenticated ingress
+and is not provided here.
 
-## 6a. Deterministic base-image deploy + rollback (WP2 / G-ROLL-1)
+### Required staging activation gate
 
-> **Scope.** This section covers ONLY the deterministic, digest-pinned deployment of the two base
-> long-lived services, **`control-plane` and `lab-api`**. It does **not** stand up a model provider.
->
-> **The complete provider-backed production deployment path is NOT_READY / NOT_EVALUATED.** The only
-> provider overlays that exist today are the public-egress profiles: `docker-compose.provider.yml`
-> forces the **deprecated public OpenAI** profile (`AI_PROVIDER=openai_responses`), and
-> `docker-compose.deepseek.yml` / `docker-compose.ollama.yml` are likewise not the company-private
-> production model. **Do not** use `docker-compose.provider.yml` for the company-private endpoint. A
-> dedicated private-provider **production** overlay (digest-pinned `llm-gateway`, private
-> `AI_BASE_URL`, no public egress) has **not** been implemented or evaluated; until it is, treat
-> production as base-services-only and gate any provider rollout on that future work (§6, §7).
+Run the gate against the loopback dashboard ingress and retain the JSON reports outside Git:
+
+```bash
+# Five-minute healthy soak: every sample requires liveness, readiness, and metrics.
+python -m aegis.deploy.staging_gate --mode healthy --samples 60 --interval-seconds 5 \
+  --output artifacts/staging-healthy-soak.json
+
+# In a disposable staging environment, perform the approved platform-level persistence failure.
+# The application does not inject or automate destructive faults. While the fault is present:
+python -m aegis.deploy.staging_gate --mode not-ready --samples 12 --interval-seconds 5 \
+  --output artifacts/staging-fail-closed.json
+
+# Restore the platform dependency, restart if required, then prove recovery:
+python -m aegis.deploy.staging_gate --mode healthy --samples 12 --interval-seconds 5 \
+  --output artifacts/staging-recovered.json
+```
+
+All three commands must exit `0`. Also record the successful approved-image pull/start, gateway
+health, private TLS chain, exact provider-reported model identity, and one authorized synthetic
+acceptance run. Until these environment-specific checks exist, status is
+`DEPLOYMENT_PATH_READY / NOT YET PRODUCTION-VALIDATED`.
+
+## 6a. Deterministic image deploy + rollback (WP2 / WP5)
+
+> **Scope.** The base overlay pins `control-plane` and `lab-api`; the private-provider overlay pins
+> `llm-gateway` to the same digest and adds its isolated credential/network contract. The mandatory
+> private-provider preflight proves all three in the rendered configuration. Environment-specific
+> pull/start/provider/staging validation remains required as described in §6.
 
 The base stack builds `control-plane`/`lab-api` locally (`build: .`), which is fine for local/demo
 use but is **not** deterministic for production. The production overlay
-[`docker-compose.prod.yml`](docker-compose.prod.yml) removes that local-build fallback and pins both
+[`docker-compose.prod.yml`](../docker-compose.prod.yml) removes that local-build fallback and pins both
 services to a single **immutable image digest**, so a rollout — and its rollback — restore exact bits.
 
 - Reference form (required): `registry/repository@sha256:<64 lowercase hex characters>` with an
@@ -500,7 +540,8 @@ services to a single **immutable image digest**, so a rollout — and its rollba
   the overlay, in scripts, or in deploy logs. Registry auth is your own `docker login` (its credentials
   live in the Docker credential store).
 - Both services run non-root (`USER 10001:10001`) with `read_only` rootfs, `no-new-privileges`, and
-  the resource/restart limits from the base compose (mem `512m`/`256m`, cpus `1.0`/`0.5`, pids
+  all Linux capabilities dropped, plus the resource/restart limits from the base compose (mem
+  `512m`/`256m`, cpus `1.0`/`0.5`, pids
   `256`/`128`, `restart: unless-stopped`). These are containment ceilings, **not** a load-test SLO.
 
 **Record the current digest** (before changing anything):
@@ -518,7 +559,7 @@ timeout, render failure, invalid output):
 ```bash
 export AEGIS_IMAGE=registry.example.com/aegis@sha256:<64-hex>
 python -m aegis.deploy.preflight
-# Base services only — do NOT add docker-compose.provider.yml (see scope note above):
+# Base-services-only deployment (offline heuristic mode):
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 # Gate on readiness, never on /health:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T control-plane \
@@ -572,10 +613,11 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml -p "$PROJECT" ex
 #    docker compose -f docker-compose.yml -f docker-compose.prod.yml -p "$PROJECT" up -d
 ```
 
-Not covered (see [production-readiness-wp2.md](production-readiness-wp2.md)): runtime digest **pull**
-verification (NOT_EVALUATED — no registry image available to pull); the **provider-backed** production
-path incl. a private-provider/`llm-gateway` overlay (NOT_READY / NOT_EVALUATED); execution of the
-volume migration above (NOT_EVALUATED); and volume backup/restore automation.
+Not covered by repository-only verification: runtime digest pull/start from the operator's registry;
+private DNS/TLS/provider/model validation; execution of the volume migration above; platform log/
+metrics/alert delivery; and final staging soak/failure evidence. The provider-backed overlay and its
+fail-closed preflight are implemented in
+[production-readiness-wp5.md](production-readiness-wp5.md).
 
 ## 7. Quality gates
 

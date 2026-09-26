@@ -111,6 +111,7 @@ def test_service_retains_rootfs_hardening(service: str) -> None:
     spec = _base_service(service)
     assert spec.get("read_only") is True
     assert "no-new-privileges:true" in spec.get("security_opt", [])
+    assert spec.get("cap_drop") == ["ALL"]
     assert spec.get("tmpfs") == ["/tmp"]  # noqa: S108 - container tmpfs mount, not a host temp path
 
 

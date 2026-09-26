@@ -25,6 +25,7 @@ services:
     read_only: true
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     # Runtime resource controls (WP2 / G-LIMITS-1). Conservative ceilings for a synthetic lab: a
     # runaway scan cannot exhaust host memory/CPU, a fork bomb is capped, and a crash is restarted
     # (but a deliberate `docker stop` stays stopped). Tune per host; these are not a load-test SLO.
@@ -49,6 +50,7 @@ services:
     read_only: true
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     # Runtime resource controls (WP2 / G-LIMITS-1). The synthetic target API is stateless and tiny,
     # so its ceilings are lower than the control plane's.
     mem_limit: 256m

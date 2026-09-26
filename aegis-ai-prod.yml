@@ -1,0 +1,174 @@
+# Aegis AI — standalone Fedora/RHEL production stack (rootless Podman + SELinux)
+#
+# This file intentionally has no build context, mutable image tag, .env inheritance, privileged
+# container, host network, Docker/Podman socket, or provider credential in its environment. Both
+# images MUST be digest-pinned. The only host port is loopback, so a host TLS reverse proxy can
+# publish it deliberately without exposing the application container directly.
+#
+# Required operator environment:
+#   AEGIS_IMAGE=registry/repository@sha256:<64 lowercase hex>
+#   AEGIS_DASHBOARD_IMAGE=registry/repository@sha256:<64 lowercase hex>
+#   AEGIS_PROVIDER_BASE_URL=https://private-model.company.tld[:port]
+#   AEGIS_PROVIDER_MODEL=exact-model-id
+#   AEGIS_PROVIDER_TOKEN_SOURCE=/absolute/path/provider-token
+#   AEGIS_EXTENSION_MANIFEST_SOURCE=/absolute/path/aegis-extension.json
+#   AEGIS_NGINX_CONFIG_SOURCE=/absolute/path/dashboard-nginx.conf
+# Optional: AEGIS_UI_PORT=8000, MODEL_TIMEOUT_SECONDS=60, MAX_COMPLETION_TOKENS=2048
+#
+# Validate / deploy / observe / stop:
+#   podman compose -f aegis-ai-prod.yml config
+#   podman compose -p aegis-ai-prod -f aegis-ai-prod.yml pull
+#   podman compose -p aegis-ai-prod -f aegis-ai-prod.yml up -d
+#   curl --fail http://127.0.0.1:${AEGIS_UI_PORT:-8000}/ready
+#   podman compose -p aegis-ai-prod -f aegis-ai-prod.yml logs --tail=200
+#   podman compose -p aegis-ai-prod -f aegis-ai-prod.yml down
+# Full host preparation, SELinux ownership, systemd and rollback: docs/aegis-ai-prod-rhel.md
+
+services:
+  control-plane:
+    image: "${AEGIS_IMAGE:?set AEGIS_IMAGE to an immutable image digest}"
+    user: "10001:10001"
+    command: >-
+      uvicorn aegis.main:app --host 0.0.0.0 --port 8000 --no-access-log
+      --timeout-graceful-shutdown 12
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_MODEL: "${AEGIS_PROVIDER_MODEL:?set AEGIS_PROVIDER_MODEL}"
+      AI_ALLOWED_MODELS: "${AEGIS_PROVIDER_MODEL:?set AEGIS_PROVIDER_MODEL}"
+      LLM_GATEWAY_URL: http://llm-gateway:8080
+      EXTENSION_MANIFEST_PATH: /etc/aegis/extensions/manifest.json
+      DATABASE_PATH: /data/aegis.db
+      ALLOWED_TARGET_HOSTS: lab-api
+      LAB_BASE_URL: http://lab-api:8001
+      LAB_OPENAPI_URL: http://lab-api:8001/openapi.json
+      SHUTDOWN_GRACE_SECONDS: "10"
+      MAX_REQUESTS_PER_SCAN: "${MAX_REQUESTS_PER_SCAN:-8}"
+      MAX_ITERATIONS: "${MAX_ITERATIONS:-6}"
+      MAX_MODEL_CALLS: "${MAX_MODEL_CALLS:-6}"
+      MAX_TOKENS_PER_SCAN: "${MAX_TOKENS_PER_SCAN:-80000}"
+    volumes:
+      - aegis-data:/data
+      - "${AEGIS_EXTENSION_MANIFEST_SOURCE:?set AEGIS_EXTENSION_MANIFEST_SOURCE}:/etc/aegis/extensions/manifest.json:ro,z"
+    depends_on:
+      lab-api:
+        condition: service_healthy
+      llm-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [security-lab, planner-rpc]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  lab-api:
+    image: "${AEGIS_IMAGE:?set AEGIS_IMAGE to an immutable image digest}"
+    user: "10001:10001"
+    command: uvicorn lab_api.main:app --host 0.0.0.0 --port 8001 --no-access-log
+    expose: ["8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks: [security-lab]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    restart: unless-stopped
+
+  llm-gateway:
+    image: "${AEGIS_IMAGE:?set AEGIS_IMAGE to an immutable image digest}"
+    user: "10001:10001"
+    command: >-
+      uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080 --no-access-log
+      --timeout-graceful-shutdown 12
+    environment:
+      AI_PROVIDER: internal_openai_compatible
+      AI_BASE_URL: "${AEGIS_PROVIDER_BASE_URL:?set AEGIS_PROVIDER_BASE_URL}"
+      AI_MODEL: "${AEGIS_PROVIDER_MODEL:?set AEGIS_PROVIDER_MODEL}"
+      AI_ALLOWED_MODELS: "${AEGIS_PROVIDER_MODEL:?set AEGIS_PROVIDER_MODEL}"
+      AI_AUTH_MODE: bearer
+      AI_AUTH_TOKEN_FILE: /run/secrets/aegis-provider-token
+      AI_RESPONSE_FORMAT: "${AEGIS_PROVIDER_RESPONSE_FORMAT:-json_schema}"
+      AI_SUPPORTS_SEED: "${AEGIS_PROVIDER_SUPPORTS_SEED:-true}"
+      AI_USE_EGRESS_PROXY: "false"
+      EXTENSION_MANIFEST_PATH: /etc/aegis/extensions/manifest.json
+      MODEL_TIMEOUT_SECONDS: "${MODEL_TIMEOUT_SECONDS:-60}"
+      MAX_COMPLETION_TOKENS: "${MAX_COMPLETION_TOKENS:-2048}"
+      MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-131072}"
+      MAX_TOKENS_PER_SCAN: "${MAX_TOKENS_PER_SCAN:-80000}"
+    volumes:
+      - "${AEGIS_PROVIDER_TOKEN_SOURCE:?set AEGIS_PROVIDER_TOKEN_SOURCE}:/run/secrets/aegis-provider-token:ro,Z"
+      - "${AEGIS_EXTENSION_MANIFEST_SOURCE:?set AEGIS_EXTENSION_MANIFEST_SOURCE}:/etc/aegis/extensions/manifest.json:ro,z"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [planner-rpc, provider-egress]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  dashboard:
+    image: "${AEGIS_DASHBOARD_IMAGE:?set AEGIS_DASHBOARD_IMAGE to an immutable image digest}"
+    user: "101:101"
+    ports:
+      - "127.0.0.1:${AEGIS_UI_PORT:-8000}:8080"
+    volumes:
+      - "${AEGIS_NGINX_CONFIG_SOURCE:?set AEGIS_NGINX_CONFIG_SOURCE}:/etc/nginx/nginx.conf:ro,Z"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks: [dashboard-ingress, security-lab]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+networks:
+  security-lab:
+    internal: true
+  planner-rpc:
+    internal: true
+  provider-egress:
+    internal: false
+  dashboard-ingress:
+    internal: false
+
+volumes:
+  aegis-data:

@@ -1,5 +1,12 @@
 # Canonical project state
 
+Production deployment update (2026-09-26): the repository now contains the immutable,
+company-private provider/gateway overlay, gateway-only credential-file handling, a fail-closed
+rendered-Compose preflight, and a read-only staging soak/failure observer. Code/config status is
+`DEPLOYMENT_PATH_READY`; real registry pull, private endpoint/TLS/model validation, platform
+observability delivery, and staging soak/failure evidence remain `NOT_EVALUATED`. No external or
+production target authorization is added. See `docs/production-readiness-wp5.md`.
+
 Updated: 2026-09-22 (Europe/Istanbul)
 Phase: **1.7 Multi-Agent Evaluation Runtime — INITIAL AEGIS-BANK BOLA VERTICAL SLICE IMPLEMENTED,
 OFFLINE SYNTHETIC ACCEPTANCE ONLY, NOT a production or live-model GO. Lead, Surface and

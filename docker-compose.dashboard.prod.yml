@@ -1,0 +1,5 @@
+# Immutable production pin for the optional loopback-only dashboard ingress.
+# Use after docker-compose.dashboard.yml. A mutable nginx tag is permitted for local/demo use only.
+services:
+  dashboard:
+    image: "${AEGIS_DASHBOARD_IMAGE:?AEGIS_DASHBOARD_IMAGE must be an immutable registry/repository@sha256 digest}"

@@ -194,6 +194,20 @@ def test_not_ready_when_auth_token_present(tmp_path: Path) -> None:
     assert _check(report, "credential_isolation") is CheckStatus.FAIL
 
 
+def test_not_ready_when_auth_token_file_present(tmp_path: Path) -> None:
+    store = ScanStore(str(tmp_path / "aegis.db"))
+    store.initialize()
+
+    report = evaluate_readiness(
+        Settings(ai_auth_token_file="/run/secrets/provider"),  # noqa: S106 - path, not a secret
+        store,
+    )
+
+    assert report.ready is False
+    assert _check(report, "credential_isolation") is CheckStatus.FAIL
+    assert "/run/secrets/provider" not in report.model_dump_json()
+
+
 def test_not_ready_when_deepseek_key_present(tmp_path: Path) -> None:
     store = ScanStore(str(tmp_path / "aegis.db"))
     store.initialize()

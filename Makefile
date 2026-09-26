@@ -16,6 +16,9 @@ VBIN := $(VENV)/bin
 PYTEST := $(VBIN)/python -m pytest -p no:cacheprovider
 RANGE_IMAGE_TAG := aegis-range-phase29:2.9.0
 RANGE_DOCKERFILE := deploy/range/Dockerfile.phase-2-9
+MODE ?= healthy
+SAMPLES ?= 12
+CONTAINER_ENGINE ?= podman
 
 .DEFAULT_GOAL := help
 
@@ -61,6 +64,18 @@ test-artifact-empty: ## Prove the suite passes in an artifact-empty checkout (no
 
 .PHONY: check
 check: lint typecheck test ## The offline CI-equivalent: lint + typecheck + full suite (no secrets).
+
+.PHONY: production-preflight
+production-preflight: ## Prove the immutable private-provider Compose topology (no pull/start/call).
+	$(VBIN)/python -m aegis.deploy.private_provider_preflight
+
+.PHONY: aegis-ai-prod-preflight
+aegis-ai-prod-preflight: ## Prove standalone Fedora/RHEL prod; CONTAINER_ENGINE=podman|docker.
+	$(VBIN)/python -m aegis.deploy.aegis_ai_prod_preflight --engine "$(CONTAINER_ENGINE)"
+
+.PHONY: staging-gate
+staging-gate: ## Observe localhost readiness; MODE=healthy|not-ready SAMPLES=12 (read-only).
+	$(VBIN)/python -m aegis.deploy.staging_gate --mode "$(MODE)" --samples "$(SAMPLES)"
 
 # --- CONTAINER: local synthetic Docker range only (no public egress) ----------------------------- #
 

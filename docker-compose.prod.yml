@@ -18,7 +18,9 @@
 #   export AEGIS_IMAGE=registry.example.com/aegis@sha256:<64-hex>
 #   python -m aegis.deploy.preflight            # fail-closed validation + rendered-config proof
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-#     -f docker-compose.provider.yml up -d      # add the provider overlay for the private endpoint
+#     -f docker-compose.private-provider.prod.yml up -d
+# For a provider-backed deployment, run `python -m aegis.deploy.private_provider_preflight` instead;
+# it proves the application/gateway and dashboard image digests plus credential/network topology.
 services:
   control-plane:
     build: !reset null

@@ -28,8 +28,11 @@ Audited at commit parent `00ecf25` on branch `codex/phase-2-9-live-adapter`.
 > are explicitly **out of scope** — see §5a. They are not implemented and are no longer tracked as
 > remaining blockers.
 >
-> **Remaining required blockers:** a digest-pinned company-private provider/gateway production
-> path; final staging soak/failure validation. Overall status remains **NOT_PRODUCTION_READY**.
+> **Update (WP5).** The digest-pinned company-private provider/gateway path and a deterministic,
+> read-only staging validation gate are implemented. Actual registry pull, private provider/TLS/
+> model validation, and staging soak/failure evidence remain environment-specific activation gates.
+> See [production-readiness-wp5.md](production-readiness-wp5.md). Overall status remains
+> **NOT_PRODUCTION_VALIDATED** until those gates run in the target environment.
 
 ---
 
@@ -126,8 +129,8 @@ decision. They are **not implemented** and are **not** remaining blockers. Docum
 | G-IR-1 | **PLATFORM-OWNED / OUT_OF_SCOPE** | Application-specific incident response is not provided. Organizational/platform incident response applies externally and remains outside this repository. |
 | G-DBLOCK-1 | **ACCEPTED_CONSTRAINT / OUT_OF_SCOPE** | The deployment is strictly **single-replica, single-writer**. Horizontal scaling, multiple application workers, and shared concurrent writers are **unsupported**. Any future change to these constraints must **reopen** the SQLite concurrency/locking evaluation. |
 
-**Remaining required blockers after WP4:** (1) a digest-pinned company-private provider/gateway
-production path; (2) final staging soak/failure validation.
+**Repository-level blockers after WP5:** none known. Environment activation still requires registry
+pull/start, private endpoint/TLS/model validation, and final staging soak/failure evidence.
 
 ---
 

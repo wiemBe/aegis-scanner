@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from aegis.beast.contracts import BeastDecisionRequest, BeastDecisionResponse
+from aegis.extensions import EMPTY_EXTENSION_RUNTIME
 from aegis.models import (
     GatewayCandidateRequest,
     GatewayCandidateResponse,
@@ -374,10 +375,14 @@ async def generate_agent(request: AgentGatewayRequest) -> AgentGatewayResponse:
     if role is not _AGENT_TASK_ROLES[request.task_type]:
         raise HTTPException(status_code=422, detail={"code": "AGENT_TASK_ROLE_MISMATCH"})
     schema = output_type.model_json_schema()
-    system_contract = agent_system_prompt(role, request.task_type)
+    provider = get_provider()
+    # A few offline acceptance fixtures inject a minimal PlannerProvider test double. Treat an
+    # older double without the additive extension field exactly like extensions-disabled runtime.
+    extensions = getattr(provider, "extension_runtime", EMPTY_EXTENSION_RUNTIME)
+    system_contract = agent_system_prompt(role, request.task_type, extensions)
     projection = _agent_projection(request, role, output_type, schema, system_contract)
     try:
-        result = await get_provider().generate_agent(
+        result = await provider.generate_agent(
             role,
             request.task_type,
             request.context,

@@ -1,0 +1,8 @@
+{
+  "schema_version": "aegis-extension-v1",
+  "pack_id": "aegis.prod.default",
+  "pack_version": "1.0.0",
+  "prompt_fragments": [],
+  "agent_profiles": [],
+  "tool_bindings": []
+}

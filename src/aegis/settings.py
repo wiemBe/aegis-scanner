@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -57,6 +58,11 @@ class Settings(BaseSettings):
     # Bearer credential for the internal endpoint. It is mounted ONLY into the llm-gateway service
     # (via .env.gateway) and is never given to the control plane, which refuses to start with it.
     ai_auth_token: SecretStr | None = None
+    # Production deployments may mount the bearer token as a read-only file instead of exposing it
+    # in the container environment. The path itself is not a secret. Exactly one of
+    # AI_AUTH_TOKEN / AI_AUTH_TOKEN_FILE may be configured; the gateway reads at most 16 KiB and
+    # never includes the path or value in an exception.
+    ai_auth_token_file: str | None = None
     # Structured-output mode for internal_openai_compatible backends. Default json_schema keeps the
     # existing OpenAI strict-schema behaviour; json_object is for backends (e.g. DeepSeek) that only
     # support JSON mode — the strict schema is embedded in the prompt and locally re-validated.
@@ -74,6 +80,11 @@ class Settings(BaseSettings):
 
     # Control plane -> llm-gateway RPC over the internal planner-rpc network (no secret in transit).
     llm_gateway_url: str = "http://llm-gateway:8080"
+
+    # Optional declarative extension pack. The same read-only file is mounted into the control
+    # plane and gateway. It may specialize bounded prompts/agent profiles and alias only existing
+    # catalogued tools; it cannot load code, commands, URLs, credentials or new permissions.
+    extension_manifest_path: str | None = None
 
     # Honest LOCAL_LLM acceptance status shown on the dashboard. Configuration only; it is a label
     # driven by the recorded acceptance verdict, never by live scan behaviour, and it must NEVER be
@@ -173,6 +184,36 @@ class Settings(BaseSettings):
         if value is None or len(value.get_secret_value().encode()) < 32:
             raise RuntimeError("ZAP Active operator bootstrap secret unavailable")
         return value.get_secret_value()
+
+    def require_internal_auth_token(self) -> str:
+        """Resolve one bearer credential without leaking its value or source path.
+
+        Environment credentials remain supported for existing development/acceptance overlays.
+        The production overlay uses ``AI_AUTH_TOKEN_FILE`` so the credential is not present in
+        ``docker inspect`` output or the rendered Compose environment.
+        """
+
+        inline = self.ai_auth_token
+        token_file = self.ai_auth_token_file
+        if inline is not None and token_file is not None:
+            raise RuntimeError("configure exactly one internal provider credential source")
+        if inline is not None:
+            value = inline.get_secret_value().strip()
+        elif token_file is not None:
+            try:
+                path = Path(token_file)
+                if not path.is_absolute() or not path.is_file() or path.is_symlink():
+                    raise OSError
+                if path.stat().st_size > 16_384:
+                    raise OSError
+                value = path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                raise RuntimeError("internal provider credential file is unavailable") from None
+        else:
+            raise RuntimeError("internal provider bearer credential is unavailable")
+        if not value or "\x00" in value or len(value.encode("utf-8")) > 16_384:
+            raise RuntimeError("internal provider bearer credential is invalid")
+        return value
 
     def require_zap_active_runner_client_secret(self) -> str:
         value = self.zap_active_runner_client_secret
