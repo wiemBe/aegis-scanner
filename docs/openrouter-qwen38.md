@@ -75,8 +75,17 @@ docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
 ```
 
 The health endpoint proves process/config readiness; it intentionally does not spend OpenRouter
-credits. Run one authorized synthetic-lab scan to validate the live account, balance, model
-availability and structured-output route before accepting traffic.
+credits. Before accepting traffic, run the one authorized provider-only smoke call from a container
+attached to the `planner-rpc` network. It sends a single target-free planner request through the
+gateway and fails closed unless the deployed provider is `openrouter` on the exact pinned model:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
+  exec -T llm-gateway python scripts/openrouter_smoke.py
+```
+
+A `{"smoke": "PASS", ...}` line confirms the live account, balance, model availability and
+structured-output route with zero target requests and no credential echoed back.
 
 ## 4. Immutable Fedora/RHEL production deployment
 

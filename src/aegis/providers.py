@@ -8,7 +8,9 @@ never contains Ollama-specific, OpenAI-specific or company-specific request logi
       ├── DemoHeuristicProvider            (offline heuristic, provider_type "demo")
       ├── OllamaProvider                   (local/private Ollama runtime -> LOCAL_LLM)
       ├── InternalOpenAICompatibleProvider (company private endpoint -> INTERNAL_LLM; disabled)
-      ├── OpenRouterProvider               (OpenRouter Qwen3.8 27B; opt-in public egress)
+      │     └── PublicHostedOpenAICompatibleProvider (shared public-egress invariants base)
+      │           ├── DeepSeekProvider     (DeepSeek hosted API -> PUBLIC_LLM_DEEPSEEK)
+      │           └── OpenRouterProvider   (OpenRouter Qwen3.8 27B -> PUBLIC_LLM_OPENROUTER)
       └── OpenAIResponsesProvider          (deprecated public compatibility profile; disabled)
 
 Every provider fails closed on malformed JSON, schema violations, model mismatch, timeout,
@@ -55,7 +57,7 @@ from aegis.planner import (
     DemoPlanner,
     PlannerFailure,
 )
-from aegis.settings import Settings
+from aegis.settings import OPENROUTER_QWEN_MODEL, JsonResponseMode, Settings
 
 _JSON_CONTENT_TYPE = "application/json"
 
@@ -913,26 +915,37 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
             raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
 
-OPENROUTER_QWEN_MODEL = "qwen/qwen3.8-27b"
+class PublicHostedOpenAICompatibleProvider(InternalOpenAICompatibleProvider):
+    """Shared base for hosted, public-egress OpenAI-compatible providers (DeepSeek, OpenRouter).
 
+    The public providers all diverge from the internal endpoint in the same three ways: they skip
+    the internal placeholder-host guard and its ``AI_AUTH_TOKEN`` requirement, they resolve their
+    own gateway-only credential, and they may pin a fixed destination host and/or model. This base
+    centralizes the security invariants every such provider MUST enforce so a new one cannot
+    silently omit a guard: HTTPS-only origin, exact-allowlist membership, a credential visible only
+    to the gateway, no ambient proxy inheritance, and bounded output/per-call token ceilings. It
+    reuses the hardened HTTP client, strict structured-output handling and all local Pydantic
+    validation of :class:`InternalOpenAICompatibleProvider`.
 
-class OpenRouterProvider(InternalOpenAICompatibleProvider):
-    """OpenRouter adapter pinned to Qwen3.8 27B and privacy-preserving routing.
-
-    This is an explicit public-egress profile. The API key exists only in the gateway, the
-    destination origin and model are immutable, and each request requires an upstream endpoint
-    that supports every requested parameter. ZDR and data-collection denial are requested on every
-    call; the response is still validated locally against the strict planner schema.
+    Subclasses supply only what differs: :attr:`REQUIRED_HOST` (an exact host pin, enforced against
+    a real transport), :meth:`_validate_model_policy` (default: allowlist membership),
+    :meth:`_resolve_credential`, and optional request-shaping overrides. ``FORCE_RESPONSE_MODE`` /
+    ``FORCE_SUPPORTS_SEED`` let a subclass override the negotiated structured-output mode or pin
+    determinism claims off when the routed upstream cannot guarantee them.
     """
 
-    provider_type = "openrouter"
-    CHAT_PATH = "/api/v1/chat/completions"
+    #: When set, the configured ``AI_BASE_URL`` host must equal this exactly (real transport only).
+    REQUIRED_HOST: str | None = None
+    #: When set, forces the structured-output mode regardless of ``AI_RESPONSE_FORMAT``.
+    FORCE_RESPONSE_MODE: JsonResponseMode | None = None
+    #: When set, forces the seed-support flag (e.g. False for routed, non-deterministic upstreams).
+    FORCE_SUPPORTS_SEED: bool | None = None
 
     def __init__(
         self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
     ) -> None:
-        # Do not inherit the internal-provider credential or placeholder-host semantics. Retain its
-        # hardened HTTP client, strict structured-output handling and all local schema validation.
+        # Bypass InternalOpenAICompatibleProvider.__init__ (its placeholder-host guard and
+        # ai_auth_token requirement do not apply); go straight to the shared HTTP hardening.
         _HttpModelProvider.__init__(
             self,
             settings.ai_base_url,
@@ -943,35 +956,79 @@ class OpenRouterProvider(InternalOpenAICompatibleProvider):
             extension_manifest_path=settings.extension_manifest_path,
             transport=transport,
         )
-        if transport is None and self._host != "openrouter.ai":
-            raise ValueError("AI_PROVIDER=openrouter requires AI_BASE_URL=https://openrouter.ai")
-        self.model = settings.ai_model
-        if self.model != OPENROUTER_QWEN_MODEL:
+        if (
+            transport is None
+            and self.REQUIRED_HOST is not None
+            and self._host != self.REQUIRED_HOST
+        ):
             raise ValueError(
-                f"AI_PROVIDER=openrouter supports only the exact model {OPENROUTER_QWEN_MODEL}"
+                f"AI_PROVIDER={self.provider_type} requires an approved AI_BASE_URL host "
+                f"({self.REQUIRED_HOST})"
             )
+        self.model = settings.ai_model
         self._allowed_models = settings.allowed_model_set
-        if self._allowed_models != {OPENROUTER_QWEN_MODEL}:
-            raise ValueError("OpenRouter model allowlist must contain only the exact pinned model")
-        try:
-            self._token = settings.require_openrouter_api_key()
-        except RuntimeError:
-            raise ValueError(
-                "AI_PROVIDER=openrouter requires exactly one valid OPENROUTER_API_KEY or "
-                "OPENROUTER_API_KEY_FILE gateway credential source"
-            ) from None
+        self._validate_model_policy()
         self._auth_mode = "bearer"
+        self._token = self._resolve_credential(settings)
         self._temperature = settings.ai_temperature
         self._seed = settings.ai_seed
-        self._response_mode = "json_schema"
-        # Routed upstreams do not provide a stable determinism guarantee, so omit seed and do not
-        # record one in provenance even if an individual endpoint happens to accept it.
-        self._supports_seed = False
+        self._response_mode = self.FORCE_RESPONSE_MODE or settings.ai_response_format
+        self._supports_seed = (
+            settings.ai_supports_seed
+            if self.FORCE_SUPPORTS_SEED is None
+            else self.FORCE_SUPPORTS_SEED
+        )
         self._use_proxy = settings.ai_use_egress_proxy
         self._proxy_url = settings.provider_proxy_url
         self._verify = settings.provider_ca_bundle or True
         self._output_cap = settings.max_completion_tokens
         self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    def _validate_model_policy(self) -> None:
+        """Enforce the model policy. Default: the configured model is in the exact allowlist."""
+
+        if self.model not in self._allowed_models:
+            raise ValueError("Configured model is not in the exact allowlist")
+
+    def _resolve_credential(self, settings: Settings) -> str:
+        """Return the gateway-only bearer credential, or raise ValueError if unavailable."""
+
+        raise NotImplementedError
+
+
+class OpenRouterProvider(PublicHostedOpenAICompatibleProvider):
+    """OpenRouter adapter pinned to Qwen3.8 27B and privacy-preserving routing.
+
+    This is an explicit public-egress profile. The API key exists only in the gateway, the
+    destination origin and model are immutable, and each request requires an upstream endpoint
+    that supports every requested parameter. ZDR and data-collection denial are requested on every
+    call; the response is still validated locally against the strict planner schema. Routed
+    upstreams do not provide a stable determinism guarantee, so seed is omitted and never recorded
+    in provenance even if an individual endpoint happens to accept it.
+    """
+
+    provider_type = "openrouter"
+    CHAT_PATH = "/api/v1/chat/completions"
+    REQUIRED_HOST = "openrouter.ai"
+    FORCE_RESPONSE_MODE = "json_schema"
+    FORCE_SUPPORTS_SEED = False
+
+    def _validate_model_policy(self) -> None:
+        if self.model != OPENROUTER_QWEN_MODEL:
+            raise ValueError(
+                f"AI_PROVIDER=openrouter supports only the exact model {OPENROUTER_QWEN_MODEL}"
+            )
+        if self._allowed_models != {OPENROUTER_QWEN_MODEL}:
+            raise ValueError("OpenRouter model allowlist must contain only the exact pinned model")
+
+    def _resolve_credential(self, settings: Settings) -> str:
+        try:
+            return settings.require_openrouter_api_key()
+        except RuntimeError:
+            raise ValueError(
+                "AI_PROVIDER=openrouter requires exactly one valid OPENROUTER_API_KEY or "
+                "OPENROUTER_API_KEY_FILE gateway credential source"
+            ) from None
 
     def _payload(
         self,
@@ -989,7 +1046,7 @@ class OpenRouterProvider(InternalOpenAICompatibleProvider):
         return payload
 
 
-class DeepSeekProvider(InternalOpenAICompatibleProvider):
+class DeepSeekProvider(PublicHostedOpenAICompatibleProvider):
     """DeepSeek hosted OpenAI-compatible API (/chat/completions) for the beast adversary route.
 
     Public egress: the llm-gateway is the ONLY component that reaches api.deepseek.com. The control
@@ -1010,39 +1067,16 @@ class DeepSeekProvider(InternalOpenAICompatibleProvider):
     CHAT_PATH = "/chat/completions"
     _SUPPORTED_MODELS = frozenset({"deepseek-chat", "deepseek-reasoner"})
 
-    def __init__(
-        self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
-    ) -> None:
-        # Bypass InternalOpenAICompatibleProvider.__init__ (its placeholder-host guard and
-        # ai_auth_token requirement do not apply): go straight to the shared HTTP hardening.
-        _HttpModelProvider.__init__(
-            self,
-            settings.ai_base_url,
-            require_https=True,
-            timeout=settings.model_timeout_seconds,
-            body_limit=settings.max_response_bytes,
-            allowed_paths=(self.CHAT_PATH,),
-            extension_manifest_path=settings.extension_manifest_path,
-            transport=transport,
-        )
-        self.model = settings.ai_model
-        self._allowed_models = settings.allowed_model_set
-        if self.model not in self._allowed_models:
-            raise ValueError("Configured model is not in the exact allowlist")
+    def _validate_model_policy(self) -> None:
+        super()._validate_model_policy()
         if self.model not in self._SUPPORTED_MODELS:
             raise ValueError(f"Unsupported DeepSeek model: {self.model}")
+
+    def _resolve_credential(self, settings: Settings) -> str:
         key = settings.deepseek_api_key
         if key is None or not key.get_secret_value().strip():
             raise ValueError("AI_PROVIDER=deepseek requires DEEPSEEK_API_KEY")
-        self._auth_mode = "bearer"
-        self._token = key.get_secret_value()
-        self._temperature = settings.ai_temperature
-        self._seed = settings.ai_seed
-        self._use_proxy = settings.ai_use_egress_proxy
-        self._proxy_url = settings.provider_proxy_url
-        self._verify = settings.provider_ca_bundle or True
-        self._output_cap = settings.max_completion_tokens
-        self._per_call_token_ceiling = settings.max_tokens_per_scan
+        return key.get_secret_value()
 
     @property
     def _is_reasoner(self) -> bool:
