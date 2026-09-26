@@ -19,13 +19,17 @@ Audited at commit parent `00ecf25` on branch `codex/phase-2-9-live-adapter`.
 > valid Prometheus histogram accumulation, and availability-neutral observer lifecycle failures.
 > See [production-readiness-wp3.md](production-readiness-wp3.md).
 >
+> **Update (WP4).** `G-SHUT-1` is closed for the supported single-process deployment: typed process
+> lifecycle, fail-closed mutation admission/readiness, atomically registered controller work, and a
+> bounded cancellation/persistence path are implemented. See
+> [production-readiness-wp4.md](production-readiness-wp4.md).
+>
 > **Operator scope decision (P2 removed from the roadmap).** `G-BACKUP-1`, `G-IR-1`, and `G-DBLOCK-1`
 > are explicitly **out of scope** — see §5a. They are not implemented and are no longer tracked as
 > remaining blockers.
 >
-> **Remaining required blockers:** `G-SHUT-1` (graceful shutdown/drain); a digest-pinned
-> company-private provider/gateway production path; final staging soak/failure validation. Overall
-> status remains **NOT_PRODUCTION_READY**.
+> **Remaining required blockers:** a digest-pinned company-private provider/gateway production
+> path; final staging soak/failure validation. Overall status remains **NOT_PRODUCTION_READY**.
 
 ---
 
@@ -108,7 +112,7 @@ only into the `llm-gateway` service via an untracked `.env.gateway`
 | G-ROOT-1 | ✅ **Closed (WP2).** Base `control-plane`/`lab-api` now run non-root (`USER 10001:10001`). | [`Dockerfile`](../Dockerfile) |
 | G-LIMITS-1 | ✅ **Closed (WP2).** Explicit `mem_limit`/`cpus`/`pids_limit`/`restart` on both services. | [`docker-compose.yml`](../docker-compose.yml) |
 | G-OBS-1 | ✅ **Closed (WP3 + correction).** Secret-free closed-schema JSON logging + mathematically valid bounded internal `/metrics` + availability-neutral observer hooks + alert policy. | [`aegis_obs`](../src/aegis_obs/), [wp3](production-readiness-wp3.md) |
-| G-SHUT-1 | **OPEN (next blocker).** No graceful shutdown/drain. `lifespan` has no teardown after `yield` ([`main.py`](../src/aegis/main.py)); in-flight `BackgroundTasks` scans are cut on SIGTERM. Partially mitigated by `PROCESS_RESTART` reconciliation (§2). | `main.py` |
+| G-SHUT-1 | ✅ **Closed (WP4).** Typed lifecycle closes readiness/admission at drain start, atomically owns background work, waits 10s, then cancels and persists timed-out scans without false PASS. Compose/Uvicorn/Docker bounds are aligned. | [`process_lifecycle.py`](../src/aegis/process_lifecycle.py), [wp4](production-readiness-wp4.md) |
 | G-ROLL-1 | ✅ **Closed (WP2).** Immutable digest-pinned production overlay + fail-closed preflight. | [`docker-compose.prod.yml`](../docker-compose.prod.yml) |
 
 ### 5a. P2 — OUT OF SCOPE (operator scope decision)
@@ -122,8 +126,8 @@ decision. They are **not implemented** and are **not** remaining blockers. Docum
 | G-IR-1 | **PLATFORM-OWNED / OUT_OF_SCOPE** | Application-specific incident response is not provided. Organizational/platform incident response applies externally and remains outside this repository. |
 | G-DBLOCK-1 | **ACCEPTED_CONSTRAINT / OUT_OF_SCOPE** | The deployment is strictly **single-replica, single-writer**. Horizontal scaling, multiple application workers, and shared concurrent writers are **unsupported**. Any future change to these constraints must **reopen** the SQLite concurrency/locking evaluation. |
 
-**Remaining required blockers after WP3:** (1) `G-SHUT-1` graceful shutdown/drain; (2) a digest-pinned
-company-private provider/gateway production path; (3) final staging soak/failure validation.
+**Remaining required blockers after WP4:** (1) a digest-pinned company-private provider/gateway
+production path; (2) final staging soak/failure validation.
 
 ---
 

@@ -56,7 +56,17 @@ _REQUIRED_RECORD_KEYS: Final = frozenset(
 
 # The closed set of levels and events. Anything else is coerced to a safe default.
 _LEVELS: Final = frozenset({"INFO", "WARNING", "ERROR"})
-_EVENTS: Final = frozenset({"http_request", "http_error", "startup", "log_serialization_failed"})
+_EVENTS: Final = frozenset(
+    {
+        "http_request",
+        "http_error",
+        "startup",
+        "drain_started",
+        "drain_completed",
+        "drain_timeout",
+        "log_serialization_failed",
+    }
+)
 
 # Bounded allowlist of exception classes. Anything else is reported as the generic ``Exception`` —
 # the class *name* only, never ``str(exc)`` and never the message.

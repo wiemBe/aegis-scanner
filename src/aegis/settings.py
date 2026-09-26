@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Provider selector -> dashboard/audit mode label. The control plane maps AI_PROVIDER to a mode
@@ -109,9 +109,29 @@ class Settings(BaseSettings):
     # Local model inference is slower than a hosted API, so the ceilings are generous. Every scan
     # is still bounded by these hard limits.
     scan_timeout_seconds: float = Field(default=90.0, gt=0, le=600)
+    # Process shutdown first stops admission, then waits this long for controller-owned work.
+    # Docker/Uvicorn allow additional time for cancellation persistence and lifespan teardown.
+    shutdown_grace_seconds: float = Field(default=10.0, gt=0, le=120)
     request_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     model_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     max_response_bytes: int = Field(default=131072, ge=1024, le=1048576)
+
+    @field_validator("shutdown_grace_seconds", mode="before")
+    @classmethod
+    def validate_shutdown_grace(cls, value: object) -> object:
+        """Reject booleans and non-numeric values instead of accepting Python's bool-as-int."""
+
+        if isinstance(value, bool):
+            raise ValueError("shutdown grace must be numeric")
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate or candidate.lower() in {"true", "false"}:
+                raise ValueError("shutdown grace must be numeric")
+            try:
+                return float(candidate)
+            except ValueError:
+                raise ValueError("shutdown grace must be numeric") from None
+        return value
 
     # --- Phase 1.2 Nuclei integration (operator-enabled; OFF by default) -------------------------
     # Enabling only lets the controller talk to the isolated nuclei-runner over the internal

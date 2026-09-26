@@ -78,7 +78,7 @@ exports a Prometheus/OpenMetrics text body at an internal-only `GET /metrics`.
 | `aegis_http_in_flight_requests` | gauge | `service` |
 | `aegis_process_start_timestamp_seconds` | gauge | `service` |
 | `aegis_readiness_ready` | gauge | `service` |
-| `aegis_readiness_check` | gauge | `service, check` (`persistence`, `credential_isolation`) |
+| `aegis_readiness_check` | gauge | `service, check` (`process_lifecycle`, `persistence`, `credential_isolation`) |
 | `aegis_scan_completions_total` | counter | `service, status` (controller terminal status) |
 
 Histogram buckets (seconds): `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`.

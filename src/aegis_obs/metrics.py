@@ -33,7 +33,16 @@ DURATION_BUCKETS: Final[tuple[float, ...]] = (
 )
 
 # The fixed readiness checks mirrored from aegis.readiness.REQUIRED_SCHEMA / the readiness report.
-READINESS_CHECKS: Final[tuple[str, ...]] = ("persistence", "credential_isolation")
+READINESS_CHECKS: Final[tuple[str, ...]] = (
+    "process_lifecycle",
+    "persistence",
+    "credential_isolation",
+)
+
+PROCESS_STATES: Final[tuple[str, ...]] = ("STARTING", "SERVING", "DRAINING", "STOPPED")
+LIFECYCLE_EVENTS: Final[frozenset[str]] = frozenset(
+    {"drain_started", "drain_completed", "drain_timeout"}
+)
 
 # Controller-owned terminal scan statuses (bounded enumeration). Anything else collapses to OTHER.
 SCAN_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
@@ -78,6 +87,8 @@ class MetricsRegistry:
         self._ready = 0
         self._ready_checks: dict[str, int] = {name: 0 for name in READINESS_CHECKS}
         self._scan_completions: dict[str, int] = {}
+        self._process_state = "STARTING"
+        self._lifecycle_events: dict[str, int] = {}
 
     # --- cardinality control -------------------------------------------------------------------
 
@@ -134,6 +145,17 @@ class MetricsRegistry:
         with self._lock:
             self._scan_completions[label] = self._scan_completions.get(label, 0) + 1
 
+    def set_process_state(self, state: str) -> None:
+        bounded = state if state in PROCESS_STATES else "STOPPED"
+        with self._lock:
+            self._process_state = bounded
+
+    def record_lifecycle_event(self, event: str) -> None:
+        if event not in LIFECYCLE_EVENTS:
+            return
+        with self._lock:
+            self._lifecycle_events[event] = self._lifecycle_events.get(event, 0) + 1
+
     # --- introspection (tests) -----------------------------------------------------------------
 
     def route_label_count(self) -> int:
@@ -150,6 +172,8 @@ class MetricsRegistry:
                 + 1  # ready
                 + len(self._ready_checks)
                 + len(self._scan_completions)
+                + len(PROCESS_STATES)
+                + len(self._lifecycle_events)
             )
 
     # --- rendering -----------------------------------------------------------------------------
@@ -173,6 +197,8 @@ class MetricsRegistry:
             ready = self._ready
             ready_checks = dict(self._ready_checks)
             scan_completions = dict(self._scan_completions)
+            process_state = self._process_state
+            lifecycle_events = dict(self._lifecycle_events)
 
         lines.append("# HELP aegis_http_requests_total Total HTTP requests received.")
         lines.append("# TYPE aegis_http_requests_total counter")
@@ -239,5 +265,17 @@ class MetricsRegistry:
         for status, value in sorted(scan_completions.items()):
             labels = _labels((("service", svc), ("status", status)))
             lines.append(f"aegis_scan_completions_total{labels} {_fmt(value)}")
+
+        lines.append("# HELP aegis_process_state Current typed process lifecycle state.")
+        lines.append("# TYPE aegis_process_state gauge")
+        for state in PROCESS_STATES:
+            labels = _labels((("service", svc), ("state", state)))
+            lines.append(f"aegis_process_state{labels} {1 if state == process_state else 0}")
+
+        lines.append("# HELP aegis_lifecycle_events_total Bounded process lifecycle events.")
+        lines.append("# TYPE aegis_lifecycle_events_total counter")
+        for event, value in sorted(lifecycle_events.items()):
+            labels = _labels((("service", svc), ("event", event)))
+            lines.append(f"aegis_lifecycle_events_total{labels} {_fmt(value)}")
 
         return "\n".join(lines) + "\n"

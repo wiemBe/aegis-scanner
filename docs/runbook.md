@@ -363,6 +363,51 @@ docker compose -f docker-compose.yml exec -T control-plane \
 
 Full detail: [production-readiness-wp3.md](production-readiness-wp3.md).
 
+## 5c. Graceful shutdown and bounded drain
+
+The control plane has four typed lifecycle states: `STARTING`, `SERVING`, `DRAINING`, `STOPPED`.
+Only `SERVING` admits new scans or other state-creating mutations. At SIGTERM/lifespan shutdown it
+enters `DRAINING` first, so `/ready` immediately returns 503 with the fixed lifecycle reason and new
+work returns `503 {"detail":"SERVICE_DRAINING"}`. `/health`, read-only GET endpoints, `/metrics`,
+and authenticated emergency stop/logout operations remain available while the HTTP server still
+accepts connections. Do not use `/health` for routing.
+
+The base-stack timing contract is:
+
+- application work grace: `SHUTDOWN_GRACE_SECONDS=10` (valid range `>0` through `120` seconds;
+  booleans, negative, zero, empty and non-numeric values fail configuration validation);
+- Uvicorn graceful shutdown timeout: 12 seconds;
+- Compose `stop_grace_period`: 15 seconds.
+
+Do not set the outer bounds below the application grace. Controller-owned scan creation and task
+registration are one admission operation. Work completed within 10 seconds keeps its ordinary
+persistence/audit path. At timeout the task is cancelled; scan cancellation is persisted, followed
+by the fixed `SHUTDOWN_DRAIN_TIMEOUT` terminal guard. Existing independently verified findings may
+remain `FAIL`; all other timed-out scans are `INCOMPLETE`, never `PASS`. If persistence itself is
+unavailable, the next startup's existing `PROCESS_RESTART` reconciliation closes stale
+`QUEUED`/`RUNNING` work conservatively.
+
+Operator procedure:
+
+```bash
+# Observe readiness before stopping.
+docker compose exec -T control-plane python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/ready').status)"
+
+# Send SIGTERM and allow the 15-second Compose stop bound.
+time docker compose stop control-plane
+
+# Restart and require readiness before routing traffic.
+docker compose up -d control-plane
+docker compose exec -T control-plane python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/ready').read().decode())"
+```
+
+Inspect only bounded lifecycle logs (`drain_started`, `drain_completed`, `drain_timeout`) and the
+fixed-label `aegis_process_state` / `aegis_lifecycle_events_total` metrics. Never infer completion
+from container exit alone; inspect the persisted scan terminal status and audit trail. Full design
+and validation scope: [production-readiness-wp4.md](production-readiness-wp4.md).
+
 **Structured logs.** Both services emit bounded, secret-free JSON to **stdout** (schema
 `obslog-v1`). Records contain only: `schema_version, timestamp_utc, level, service, event,
 request_id, method, route (normalized template or UNMATCHED), status_code, status_class,

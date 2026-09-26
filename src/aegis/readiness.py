@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from aegis.settings import Settings
 from aegis.storage import ScanStore
 
-READINESS_CONTRACT_VERSION = "readiness-v1"
+READINESS_CONTRACT_VERSION = "readiness-v2"
 
 # The persisted table/column contracts the control plane requires before it can accept a scan or
 # serve the audit trail. Kept in lock-step with ``ScanStore.initialize()``.
@@ -155,7 +155,30 @@ def _check_credential_isolation(settings: Settings) -> ReadinessCheck:
     )
 
 
-def evaluate_readiness(settings: Settings, store: ScanStore) -> ReadinessReport:
+def _check_process_lifecycle(process_state: str) -> ReadinessCheck:
+    """Ready only while admission is explicitly SERVING."""
+
+    if process_state == "SERVING":
+        return ReadinessCheck(
+            name="process_lifecycle",
+            status=CheckStatus.PASS,
+            detail="process is serving and accepting work",
+        )
+    details = {
+        "STARTING": "process is starting and not accepting work",
+        "DRAINING": "process is draining and not accepting work",
+        "STOPPED": "process is stopped and not accepting work",
+    }
+    return ReadinessCheck(
+        name="process_lifecycle",
+        status=CheckStatus.FAIL,
+        detail=details.get(process_state, "process lifecycle is unknown and not accepting work"),
+    )
+
+
+def evaluate_readiness(
+    settings: Settings, store: ScanStore, *, process_state: str = "SERVING"
+) -> ReadinessReport:
     """Deterministically decide whether the control plane is safe to serve.
 
     Ready only when every *required* check is ``PASS``; any ``FAIL`` or ``UNKNOWN`` — including a
@@ -165,6 +188,7 @@ def evaluate_readiness(settings: Settings, store: ScanStore) -> ReadinessReport:
     checks = [
         _check_persistence(store.database_path),
         _check_credential_isolation(settings),
+        _check_process_lifecycle(process_state),
     ]
     ready = all(check.status is CheckStatus.PASS for check in checks if check.required)
     return ReadinessReport(ready=ready, checks=checks)

@@ -3,7 +3,7 @@ services:
     build: .
     # --no-access-log: Uvicorn's default access log can expose raw paths/query strings; the app emits
     # a bounded, secret-free structured request log instead (WP3 / G-OBS-1).
-    command: uvicorn aegis.main:app --host 0.0.0.0 --port 8000 --no-access-log
+    command: uvicorn aegis.main:app --host 0.0.0.0 --port 8000 --no-access-log --timeout-graceful-shutdown 12
     env_file:
       - path: .env
         required: false
@@ -32,6 +32,9 @@ services:
     cpus: 1.0
     pids_limit: 256
     restart: unless-stopped
+    stop_grace_period: 15s
+    environment:
+      SHUTDOWN_GRACE_SECONDS: "10"
 
   lab-api:
     build: .

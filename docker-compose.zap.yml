@@ -22,7 +22,7 @@
 
 services:
   control-plane:
-    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000
+    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000 --no-access-log --timeout-graceful-shutdown 12
     environment:
       ZAP_ENABLED: "true"
       ZAP_RUNNER_URL: http://zap-runner:8092

@@ -8,8 +8,8 @@ from pathlib import Path
 from time import monotonic
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
@@ -63,6 +63,7 @@ from aegis.operator import (
 )
 from aegis.operator_session import OperatorSessionStore
 from aegis.planner import build_planner
+from aegis.process_lifecycle import ProcessLifecycle, ProcessState, ServiceDraining
 from aegis.readiness import ReadinessReport, evaluate_readiness
 from aegis.safety import SafetyController
 from aegis.screenshots import ScreenshotStore
@@ -96,6 +97,14 @@ store = ScanStore(settings.database_path)
 safety = SafetyController(settings)
 planner = build_planner(settings)
 service = ScanService(settings, store, planner, safety)
+process_lifecycle = ProcessLifecycle(
+    grace_seconds=settings.shutdown_grace_seconds,
+    logger=obs_logger,
+    metrics=obs_metrics,
+)
+# Direct ASGI transports used by offline tests do not run lifespan. Production lifespan resets this
+# to STARTING before initialization and then explicitly returns to SERVING.
+process_lifecycle.mark_serving()
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
 beast_store = BeastStore(settings.database_path)
@@ -153,6 +162,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Replace Uvicorn's raw access log (which can expose paths/query strings) with our bounded,
     # secret-free structured request log. Defence in depth alongside `--no-access-log` in Compose.
     disable_uvicorn_access_log()
+    process_lifecycle.start()
     store.initialize()
     beast_store.initialize()
     multi_agent_store.initialize()
@@ -161,8 +171,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     report_agent_queue.initialize()
     lifecycle_ledger.initialize()
     target_store.initialize()
+    process_lifecycle.mark_serving()
     obs_logger.log(service="control-plane", event="startup", level="INFO", request_id="-")
-    yield
+    try:
+        yield
+    finally:
+        await process_lifecycle.drain()
 
 
 app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
@@ -176,8 +190,28 @@ async def security_headers(
     # Observability wraps the request: it validates/normalizes the request id (into
     # request.state.request_id), records bounded metrics, and emits at most one structured log line.
     # It re-raises any downstream error unchanged, so the security headers below are intact.
+    async def admitted_call_next(inner_request: Request) -> Response:
+        drain_safe = inner_request.url.path in {
+            "/api/zap-active/stop",
+            "/api/zap-active/operator/logout",
+        } or (
+            inner_request.url.path.startswith("/api/beast/runs/")
+            and inner_request.url.path.endswith("/stop")
+        )
+        if (
+            inner_request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and process_lifecycle.state is not ProcessState.SERVING
+            and not drain_safe
+        ):
+            return JSONResponse(status_code=503, content={"detail": ServiceDraining.code})
+        return await call_next(inner_request)
+
     response = await observe_request(
-        request, call_next, service="control-plane", registry=obs_metrics, logger=obs_logger
+        request,
+        admitted_call_next,
+        service="control-plane",
+        registry=obs_metrics,
+        logger=obs_logger,
     )
     request_id = request.state.request_id
     response.headers["Content-Security-Policy"] = (
@@ -247,7 +281,7 @@ async def ready(response: Response) -> ReadinessReport:
     # Readiness is distinct from the liveness stub above: it fails closed (503) whenever the
     # control plane is not in a safe-to-serve state (persistence lost, schema absent, or a
     # forbidden provider credential present). Orchestrators gate on this signal, not on /health.
-    report = evaluate_readiness(settings, store)
+    report = evaluate_readiness(settings, store, process_state=process_lifecycle.state.value)
     # Mirror the verdict into the readiness gauges. This observation never changes the verdict: a
     # metrics/logging failure cannot convert a failed check to PASS (the report is returned as-is).
     obs_metrics.set_readiness(
@@ -271,12 +305,18 @@ async def metrics_endpoint() -> PlainTextResponse:
 
 
 @app.post("/api/scans", response_model=ScanResult, status_code=202)
-async def create_scan(request: ScanCreate, background_tasks: BackgroundTasks) -> ScanResult:
+async def create_scan(request: ScanCreate) -> ScanResult:
     try:
-        result = service.create(request)
+        result = process_lifecycle.create_and_submit(
+            create=lambda: service.create(request),
+            work_id=lambda scan: scan.id,
+            work_factory=lambda scan: service.run(scan.id),
+            on_timeout=lambda scan: service.mark_shutdown_timeout(scan.id),
+        )
+    except ServiceDraining:
+        raise HTTPException(status_code=503, detail=ServiceDraining.code) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    background_tasks.add_task(service.run, result.id)
     return result
 
 
@@ -612,11 +652,14 @@ async def zap_active_activate(
 
 
 @app.post("/api/zap-active/run", status_code=202)
-async def zap_active_run(background_tasks: BackgroundTasks, request: Request) -> dict[str, object]:
+async def zap_active_run(request: Request) -> dict[str, object]:
     _operator(request, mutate=True)
     if zap_active.session.state != "ARMED":
         raise HTTPException(status_code=409, detail="NO_ARMED_SESSION")
-    background_tasks.add_task(_zap_active_execute)
+    try:
+        process_lifecycle.submit(work_id="zap-active-session", work_factory=_zap_active_execute)
+    except ServiceDraining:
+        raise HTTPException(status_code=503, detail=ServiceDraining.code) from None
     return zap_active.view()
 
 
@@ -665,13 +708,18 @@ async def beast_issue_lease(request: LeaseRequest) -> dict[str, object]:
 
 @app.post("/api/beast/runs", status_code=202)
 async def beast_create_run(
-    request: BeastRunRequest, background_tasks: BackgroundTasks
+    request: BeastRunRequest,
 ) -> dict[str, object]:
     try:
-        run = beast.create_run(request)
+        run = process_lifecycle.create_and_submit(
+            create=lambda: beast.create_run(request),
+            work_id=lambda created: created.run_id,
+            work_factory=lambda created: beast.run(created.run_id),
+        )
+    except ServiceDraining:
+        raise HTTPException(status_code=503, detail=ServiceDraining.code) from None
     except BeastRejected as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
-    background_tasks.add_task(beast.run, run.run_id)
     return run.model_dump(mode="json")
 
 
@@ -1278,9 +1326,7 @@ class AssessmentCreate(BaseModel):
 
 
 @app.post("/api/console/assessments", status_code=202)
-async def console_create_assessment(
-    request: AssessmentCreate, background_tasks: BackgroundTasks
-) -> dict[str, object]:
+async def console_create_assessment(request: AssessmentCreate) -> dict[str, object]:
     """Typed assessment creation that references a stable inventory target id and enforces its
     stored scope. Execution stays controller-side; a request for a disabled target, an unknown
     target, or a profile the backend cannot execute for that target fails closed with an auditable
@@ -1305,8 +1351,15 @@ async def console_create_assessment(
         request.target_id == "synthetic-bank-api"
         and request.profile_id == "aegis-native-bola-synthetic"
     ):
-        result = service.create(ScanCreate())
-        background_tasks.add_task(service.run, result.id)
+        try:
+            result = process_lifecycle.create_and_submit(
+                create=lambda: service.create(ScanCreate()),
+                work_id=lambda scan: scan.id,
+                work_factory=lambda scan: service.run(scan.id),
+                on_timeout=lambda scan: service.mark_shutdown_timeout(scan.id),
+            )
+        except ServiceDraining:
+            raise HTTPException(status_code=503, detail=ServiceDraining.code) from None
         return {
             "run_id": result.id,
             "target_id": request.target_id,

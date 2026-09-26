@@ -1005,6 +1005,26 @@ class ScanService:
                 },
             )
 
+    def mark_shutdown_timeout(self, scan_id: str) -> None:
+        """Persist a conservative terminal state after the process drain bound expires.
+
+        This mirrors PROCESS_RESTART reconciliation: already-verifiable findings remain FAIL;
+        everything else is INCOMPLETE.  A timed-out scan can therefore never become PASS merely
+        because shutdown interrupted it.
+        """
+
+        result = self.store.get(scan_id)
+        if result is None:
+            return
+        result.findings = self.verifier.verify(
+            result.hypotheses, result.evidence, result.variant, scan_id=result.id
+        )
+        result.status = ScanStatus.FAIL if result.findings else ScanStatus.INCOMPLETE
+        result.stop_reason = "SHUTDOWN_DRAIN_TIMEOUT"
+        result.terminal_reason = "SHUTDOWN_DRAIN_TIMEOUT"
+        result.completed_at = datetime.now(UTC)
+        self._audit(result, "SHUTDOWN_DRAIN_TIMEOUT", {})
+
     # --- Phase 1.2: controlled Nuclei integration ----------------------------------------------
 
     def _create_capability_scan(self, request: ScanCreate) -> ScanResult:

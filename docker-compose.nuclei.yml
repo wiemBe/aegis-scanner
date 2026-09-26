@@ -20,7 +20,7 @@
 
 services:
   control-plane:
-    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000
+    command: uvicorn aegis.main:app --host 10.213.47.10 --port 8000 --no-access-log --timeout-graceful-shutdown 12
     environment:
       NUCLEI_ENABLED: "true"
       NUCLEI_RUNNER_URL: http://nuclei-runner:8090
