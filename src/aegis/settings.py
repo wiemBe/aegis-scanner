@@ -21,6 +21,11 @@ PROVIDER_MODE_LABELS: dict[str, str] = {
     "openrouter": "PUBLIC_LLM_OPENROUTER",
 }
 
+# The single OpenRouter model this project pins. Defined here (the lightweight settings module) so
+# both the provider and the fail-closed readiness config check share one canonical identifier; the
+# provider re-exports it for backward compatibility.
+OPENROUTER_QWEN_MODEL = "qwen/qwen3.8-27b"
+
 ProviderName = Literal[
     "demo",
     "ollama",
@@ -128,6 +133,14 @@ class Settings(BaseSettings):
     max_candidates_per_generation: int = Field(default=3, ge=1, le=3)
     max_tokens_per_scan: int = Field(default=80000, ge=1, le=200000)
     max_completion_tokens: int = Field(default=2048, ge=128, le=8192)
+    # Operator-configurable hard ceilings for a single multi-agent campaign/run. They bound the
+    # cumulative model spend across every agent in one run, above and beyond the per-scan and
+    # per-agent budgets. A public paid provider (DeepSeek/OpenRouter) makes an over-large or
+    # mis-set global budget a real cost risk, so a campaign whose configured global budget exceeds
+    # these ceilings fails closed at construction. Generous defaults leave the calibrated per-phase
+    # budgets untouched while blocking runaway spend.
+    max_tokens_per_campaign: int = Field(default=200_000, ge=1_000, le=1_000_000)
+    max_model_calls_per_campaign: int = Field(default=40, ge=1, le=100)
     # Local model inference is slower than a hosted API, so the ceilings are generous. Every scan
     # is still bounded by these hard limits.
     scan_timeout_seconds: float = Field(default=90.0, gt=0, le=600)

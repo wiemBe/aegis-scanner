@@ -4,16 +4,55 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 
 from aegis.multi_agent.contracts import AgentBudgetLedger, BudgetLimit, BudgetUsage
+from aegis.settings import Settings, get_settings
 
 
 class AgentBudgetExceeded(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class CampaignCeiling:
+    """Operator-configurable hard upper bound on a single campaign/run's global model spend.
+
+    A campaign's global :class:`BudgetLimit` may be set anywhere in the codebase (each runtime
+    supplies its own calibrated default). This ceiling is the deployment-wide backstop: no run may
+    be configured to spend more model calls or tokens than the operator permits, which matters most
+    for the paid public-egress providers (DeepSeek/OpenRouter) where a mis-set budget is real money.
+    """
+
+    tokens: int
+    model_calls: int
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> CampaignCeiling:
+        return cls(
+            tokens=settings.max_tokens_per_campaign,
+            model_calls=settings.max_model_calls_per_campaign,
+        )
+
+
 class AtomicBudget:
-    def __init__(self, run_id: str, global_limit: BudgetLimit) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        global_limit: BudgetLimit,
+        *,
+        ceiling: CampaignCeiling | None = None,
+    ) -> None:
+        # Fail closed if the configured global budget exceeds the operator campaign ceiling. This is
+        # the single chokepoint every runtime's AtomicBudget passes through, so no campaign can be
+        # constructed to spend beyond the deployment-wide bound. The ceiling defaults to the process
+        # settings; pass an explicit one in tests or to tighten a specific run.
+        ceiling = ceiling or CampaignCeiling.from_settings(get_settings())
+        if global_limit.tokens > ceiling.tokens:
+            raise AgentBudgetExceeded("CAMPAIGN_TOKEN_CEILING")
+        if global_limit.model_calls > ceiling.model_calls:
+            raise AgentBudgetExceeded("CAMPAIGN_MODEL_CALL_CEILING")
+        self.ceiling = ceiling
         self.global_ledger = AgentBudgetLedger(run_id=run_id, limit=global_limit)
         self.agent_ledgers: dict[str, AgentBudgetLedger] = {}
         self._started = time.monotonic()

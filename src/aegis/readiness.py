@@ -21,13 +21,20 @@ import os
 import sqlite3
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis.settings import Settings
+from aegis.settings import OPENROUTER_QWEN_MODEL, Settings
 from aegis.storage import ScanStore
 
-READINESS_CONTRACT_VERSION = "readiness-v2"
+READINESS_CONTRACT_VERSION = "readiness-v3"
+
+# Providers that reach a real model endpoint over TLS. The offline ``demo`` provider needs no
+# endpoint and is exempt from the endpoint-coherence checks below.
+_HTTPS_ENDPOINT_PROVIDERS = frozenset(
+    {"internal_openai_compatible", "openai_responses", "deepseek", "openrouter"}
+)
 
 # The persisted table/column contracts the control plane requires before it can accept a scan or
 # serve the audit trail. Kept in lock-step with ``ScanStore.initialize()``.
@@ -161,6 +168,77 @@ def _check_credential_isolation(settings: Settings) -> ReadinessCheck:
     )
 
 
+def _check_provider_configuration(settings: Settings) -> ReadinessCheck:
+    """Reject an incoherent model-provider configuration before any traffic is admitted.
+
+    The control plane is given the non-secret provider selector, model and allowlist (never the
+    credential — that stays in the gateway), so it can prove at ``/ready`` time that the deployed
+    configuration is internally consistent. Without this a mismatch such as a model absent from the
+    exact allowlist, a missing or non-HTTPS endpoint, or an OpenRouter profile that is not pinned to
+    the exact model/host would pass readiness and only fail on the first (possibly paid) live call.
+    The offline demo provider needs no endpoint and always passes. Any inconsistency fails closed.
+    """
+
+    name = "provider_configuration"
+    provider = settings.ai_provider
+    if provider == "demo":
+        return ReadinessCheck(
+            name=name,
+            status=CheckStatus.PASS,
+            detail="offline demo provider requires no model endpoint",
+        )
+
+    model = settings.ai_model.strip()
+    if not model:
+        return ReadinessCheck(
+            name=name, status=CheckStatus.FAIL, detail="AI_MODEL is not configured"
+        )
+    if model not in settings.allowed_model_set:
+        return ReadinessCheck(
+            name=name,
+            status=CheckStatus.FAIL,
+            detail="AI_MODEL is not present in the exact AI_ALLOWED_MODELS allowlist",
+        )
+
+    if provider in _HTTPS_ENDPOINT_PROVIDERS:
+        parsed = urlparse(settings.ai_base_url)
+        if parsed.scheme != "https":
+            return ReadinessCheck(
+                name=name,
+                status=CheckStatus.FAIL,
+                detail="selected provider requires an https AI_BASE_URL",
+            )
+        if not parsed.hostname:
+            return ReadinessCheck(
+                name=name, status=CheckStatus.FAIL, detail="AI_BASE_URL has no host"
+            )
+        if provider == "openrouter":
+            if model != OPENROUTER_QWEN_MODEL:
+                return ReadinessCheck(
+                    name=name,
+                    status=CheckStatus.FAIL,
+                    detail="openrouter requires the exact pinned model",
+                )
+            if settings.allowed_model_set != {OPENROUTER_QWEN_MODEL}:
+                return ReadinessCheck(
+                    name=name,
+                    status=CheckStatus.FAIL,
+                    detail="openrouter allowlist must contain only the pinned model",
+                )
+            if parsed.hostname != "openrouter.ai":
+                return ReadinessCheck(
+                    name=name,
+                    status=CheckStatus.FAIL,
+                    detail="openrouter requires AI_BASE_URL host openrouter.ai",
+                )
+
+    return ReadinessCheck(
+        name=name,
+        status=CheckStatus.PASS,
+        detail="provider configuration is internally consistent",
+    )
+
+
 def _check_process_lifecycle(process_state: str) -> ReadinessCheck:
     """Ready only while admission is explicitly SERVING."""
 
@@ -194,6 +272,7 @@ def evaluate_readiness(
     checks = [
         _check_persistence(store.database_path),
         _check_credential_isolation(settings),
+        _check_provider_configuration(settings),
         _check_process_lifecycle(process_state),
     ]
     ready = all(check.status is CheckStatus.PASS for check in checks if check.required)

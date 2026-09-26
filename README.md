@@ -49,6 +49,9 @@ egress or leak a credential (full map in [Phase 0.3](docs/phase-0.3.md)):
     ├── DemoHeuristicProvider            (offline heuristic, no model)
     ├── OllamaProvider                   (native /api/chat, LOCAL_LLM)
     ├── InternalOpenAICompatibleProvider (company /chat/completions, INTERNAL_LLM)
+    │     └── PublicHostedOpenAICompatibleProvider (shared public-egress invariants base)
+    │           ├── DeepSeekProvider     (DeepSeek hosted API, PUBLIC_LLM_DEEPSEEK)
+    │           └── OpenRouterProvider   (OpenRouter qwen/qwen3.8-27b, PUBLIC_LLM_OPENROUTER)
     └── OpenAIResponsesProvider          (deprecated public profile; disabled)
   ```
 
@@ -79,9 +82,12 @@ source change.
 | `DEMO_HEURISTIC` | `demo` | offline heuristic rules (no model — never call this "AI") | none |
 | `LOCAL_LLM` | `ollama` | private Ollama (`qwen3:4b` dev; `qwen3:8b` / `foundation-sec:8b-q4` GO under [Phase 0.8](docs/phase-0.8.md)) | gateway → Ollama only |
 | `INTERNAL_LLM` | `internal_openai_compatible` | company private OpenAI-compatible endpoint | gateway → company endpoint only |
+| `PUBLIC_LLM_DEEPSEEK` | `deepseek` | DeepSeek hosted API (explicit opt-in public egress) | gateway → `api.deepseek.com` via CONNECT proxy |
+| `PUBLIC_LLM_OPENROUTER` | `openrouter` | OpenRouter `qwen/qwen3.8-27b` (explicit opt-in public egress) | gateway → `openrouter.ai` via CONNECT proxy |
 
-The deprecated public OpenAI Responses path is retained as a **disabled** compatibility profile and
-must not be used as a default.
+The two public-egress modes are **never selected implicitly** — they require the matching opt-in
+Compose overlay and a gateway-only credential. The deprecated public OpenAI Responses path is
+retained as a **disabled** compatibility profile and must not be used as a default.
 
 ---
 

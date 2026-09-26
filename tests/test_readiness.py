@@ -23,7 +23,7 @@ from aegis.readiness import (
     ReadinessReport,
     evaluate_readiness,
 )
-from aegis.settings import Settings
+from aegis.settings import OPENROUTER_QWEN_MODEL, Settings
 from aegis.storage import ScanStore
 
 _PLACEHOLDER_CREDENTIAL = "placeholder-not-a-real-credential-000000"
@@ -244,6 +244,75 @@ def test_report_never_contains_credential_value(tmp_path: Path) -> None:
     report = evaluate_readiness(Settings(ai_auth_token=_PLACEHOLDER_CREDENTIAL), store)
 
     assert _PLACEHOLDER_CREDENTIAL not in report.model_dump_json()
+
+
+# --- Provider configuration coherence ------------------------------------------------------------
+
+
+def _openrouter_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "ai_provider": "openrouter",
+        "ai_base_url": "https://openrouter.ai",
+        "ai_model": OPENROUTER_QWEN_MODEL,
+        "ai_allowed_models": OPENROUTER_QWEN_MODEL,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_demo_provider_configuration_is_ready(tmp_path: Path) -> None:
+    store = ScanStore(str(tmp_path / "aegis.db"))
+    store.initialize()
+
+    report = evaluate_readiness(Settings(), store)
+
+    assert _check(report, "provider_configuration") is CheckStatus.PASS
+
+
+def test_coherent_openrouter_configuration_is_ready(tmp_path: Path) -> None:
+    store = ScanStore(str(tmp_path / "aegis.db"))
+    store.initialize()
+
+    # No credential on the control plane, so credential_isolation still passes.
+    report = evaluate_readiness(_openrouter_settings(), store)
+
+    assert report.ready is True
+    assert _check(report, "provider_configuration") is CheckStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        _openrouter_settings(ai_model="qwen/qwen3-27b", ai_allowed_models="qwen/qwen3-27b"),
+        _openrouter_settings(
+            ai_allowed_models=f"{OPENROUTER_QWEN_MODEL},openrouter/auto",
+        ),
+        _openrouter_settings(ai_base_url="http://openrouter.ai"),
+        _openrouter_settings(ai_base_url="https://example.invalid"),
+        Settings(
+            ai_provider="deepseek",
+            ai_base_url="https://api.deepseek.com",
+            ai_model="deepseek-chat",
+            ai_allowed_models="deepseek-reasoner",
+        ),
+        Settings(
+            ai_provider="internal_openai_compatible",
+            ai_base_url="http://internal-ai.example",
+            ai_model="internal-model",
+            ai_allowed_models="internal-model",
+        ),
+    ],
+)
+def test_incoherent_provider_configuration_fails_closed(
+    tmp_path: Path, settings: Settings
+) -> None:
+    store = ScanStore(str(tmp_path / "aegis.db"))
+    store.initialize()
+
+    report = evaluate_readiness(settings, store)
+
+    assert report.ready is False
+    assert _check(report, "provider_configuration") is CheckStatus.FAIL
 
 
 # --- Endpoint contract (200 READY / 503 NOT_READY) -----------------------------------------------
