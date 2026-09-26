@@ -64,6 +64,25 @@ GATEWAY_SERVICE = "llm-gateway"
 EGRESS_PROXY_SERVICE = "egress-proxy"
 # Per-call output ceiling passed to the gateway (it clamps again provider-side).
 PER_CALL_OUTPUT_TOKENS = PER_CALL_OUTPUT_CEILING
+COMPOSE_PROJECT_MAX_LENGTH = 63
+
+
+def _compose_project_name(campaign_id: str) -> str:
+    """Return a deterministic, collision-resistant Docker Compose project name.
+
+    Compose accepts only lowercase ASCII letters/digits, hyphens and underscores. The canonical
+    Phase 2.9 campaign id contains a dot (``phase-2.9``), so passing it through verbatim makes every
+    real live build fail before a stack can start. Normal-size ids retain their random campaign
+    suffix; unusually long ids retain uniqueness through a digest of the full, unsanitized id.
+    """
+
+    raw = f"aegis-p29-live-ds-{campaign_id}".lower()
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", raw).strip("-_")
+    if len(normalized) <= COMPOSE_PROJECT_MAX_LENGTH:
+        return normalized
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    prefix = normalized[: COMPOSE_PROJECT_MAX_LENGTH - len(digest) - 1].rstrip("-_")
+    return f"{prefix}-{digest}"
 
 
 # --------------------------------------------------------------------------- #
@@ -216,6 +235,34 @@ class ComposeResult:
     stderr: str = ""
 
 
+def _compose_failure_diagnostic(code: str, result: ComposeResult) -> dict[str, Any]:
+    """Build a bounded, value-free diagnostic without transporting compose output.
+
+    Compose stdout/stderr is intentionally not persisted: build tools may echo environment-derived
+    values. Instead, recognize a small allowlist of useful error classes and record only booleans,
+    the return code and a fixed diagnostic code.
+    """
+
+    combined = f"{result.stderr}\n{result.stdout}".lower()
+    if "invalid project name" in combined:
+        category = "COMPOSE_INVALID_PROJECT_NAME"
+    elif "no such file or directory" in combined:
+        category = "COMPOSE_BUILD_INPUT_MISSING"
+    elif "failed to solve" in combined:
+        category = "COMPOSE_BUILD_SOLVE_FAILED"
+    elif "timeout" in combined or "timed out" in combined:
+        category = "COMPOSE_BUILD_TIMEOUT"
+    else:
+        category = "COMPOSE_COMMAND_FAILED"
+    return {
+        "code": code,
+        "diagnostic_code": category,
+        "returncode": result.returncode,
+        "stdout_present": bool(result.stdout),
+        "stderr_present": bool(result.stderr),
+    }
+
+
 # A compose runner: (argv, stdin, timeout) -> ComposeResult; the default uses shell=False docker.
 # Tests inject a fake to exercise the whole path with no docker daemon and no provider call.
 ComposeRunner = Callable[[list[str], str | None, int], ComposeResult]
@@ -295,8 +342,7 @@ class Phase29GatewayStack:
 
     @property
     def project(self) -> str:
-        # Compose project names are lowercased and constrained; the campaign id already is.
-        return f"aegis-p29-live-ds-{self.campaign_id}".lower()
+        return _compose_project_name(self.campaign_id)
 
     def _dc(
         self, *args: str, stdin: str | None = None, timeout: int = 300
@@ -733,6 +779,9 @@ def run_live_campaign(
             preflight["gateway_build_rc"] = built.returncode
             # A non-zero build must abort before `up` or any provider dispatch.
             if built.returncode != 0:
+                live_model.failure_diagnostics.append(
+                    _compose_failure_diagnostic("GATEWAY_BUILD_FAILED", built)
+                )
                 raise LiveCampaignError("GATEWAY_BUILD_FAILED")
         up = stack.up()
         preflight["gateway_up"] = up.returncode == 0

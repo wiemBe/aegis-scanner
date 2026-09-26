@@ -9,6 +9,7 @@ dry-run path stays exactly as before.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ from aegis.multi_agent.phase_2_9_live_gateway import (
     Phase29LiveModelError,
     Phase29ProjectionError,
     Phase29ProjectionShapeError,
+    _compose_project_name,
     assert_phase29_projection_clean,
     assert_phase29_projection_shape,
     guard_is_armed_for_live,
@@ -121,7 +123,10 @@ class FakeCompose:
         last = argv[-1]
         if "build" in argv:
             self.build_calls += 1
-            return ComposeResult(1 if self.fail_build else 0)
+            return ComposeResult(
+                1 if self.fail_build else 0,
+                stderr="invalid project name" if self.fail_build else "",
+            )
         if "up" in argv:
             return ComposeResult(1 if self.fail_up else 0)
         if "down" in argv:
@@ -593,11 +598,42 @@ class _TripwirePath:
 def test_stack_uses_unique_project_name_and_compose_files() -> None:
     fake = FakeCompose()
     stack = Phase29GatewayStack(campaign_id="phase-2.9-consolidated-abc123", runner=fake)
-    assert stack.project == "aegis-p29-live-ds-phase-2.9-consolidated-abc123"
+    assert stack.project == "aegis-p29-live-ds-phase-2-9-consolidated-abc123"
     stack.up()
     argv = fake.argv_log[-1]
     assert "-p" in argv and stack.project in argv
     assert "docker-compose.yml" in argv and "docker-compose.deepseek.yml" in argv
+
+
+def test_compose_project_name_is_legal_deterministic_and_unique() -> None:
+    campaign_id = "Phase-2.9/Consolidated:abc123"
+    project = _compose_project_name(campaign_id)
+    assert project == _compose_project_name(campaign_id)
+    assert re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project)
+    assert "." not in project and "/" not in project and ":" not in project
+    assert len(project) <= live_gateway.COMPOSE_PROJECT_MAX_LENGTH
+    assert project != _compose_project_name("Phase-2.9/Consolidated:def456")
+
+
+def test_long_compose_project_name_preserves_collision_resistance() -> None:
+    left = _compose_project_name("phase-2.9-" + "x" * 200 + "-left")
+    right = _compose_project_name("phase-2.9-" + "x" * 200 + "-right")
+    assert len(left) <= live_gateway.COMPOSE_PROJECT_MAX_LENGTH
+    assert re.fullmatch(r"[a-z0-9][a-z0-9_-]*", left)
+    assert left != right
+
+
+def test_every_stack_command_uses_one_normalized_project_name() -> None:
+    fake = FakeCompose()
+    stack = Phase29GatewayStack(campaign_id="phase-2.9-consolidated-abc123", runner=fake)
+    stack.build()
+    stack.up()
+    stack.teardown()
+    compose_commands = [argv for argv in fake.argv_log if len(argv) > 1 and argv[1] == "compose"]
+    assert compose_commands
+    for argv in compose_commands:
+        project_index = argv.index("-p") + 1
+        assert argv[project_index] == stack.project
 
 
 # --------------------------------------------------------------------------- #
@@ -658,6 +694,15 @@ def test_build_failure_stops_before_up(tmp_path: Path) -> None:
     assert not any("up" in a for a in fake.argv_log)  # never reached `up`
     assert fake.step_index == 0
     assert fake.down_calls == 1
+    assert acceptance["failure_diagnostics"] == [
+        {
+            "code": "GATEWAY_BUILD_FAILED",
+            "diagnostic_code": "COMPOSE_INVALID_PROJECT_NAME",
+            "returncode": 1,
+            "stdout_present": False,
+            "stderr_present": True,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
