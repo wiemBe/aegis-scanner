@@ -10,6 +10,15 @@ services:
     depends_on:
       lab-api:
         condition: service_healthy
+    # Readiness gate: /ready fails closed (503) when persistence is lost or a provider credential is
+    # present, so the orchestrator never routes to or gates a rollout on an unready control plane.
+    # urlopen raises on the 503, which marks the container unhealthy — exactly the intended signal.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
     networks: [security-lab]
     read_only: true
     tmpfs: [/tmp]

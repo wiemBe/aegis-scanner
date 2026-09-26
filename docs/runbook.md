@@ -325,6 +325,37 @@ docker compose -f docker-compose.yml -f docker-compose.ollama.yml exec -T llm-ga
 import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:11434/api/version',timeout=6).read())"
 ```
 
+## 5a. Control-plane readiness gate (fail-closed)
+
+The control plane exposes two distinct probes:
+
+- `GET /health` — **liveness**. Answers `200 {"status":"ok"}` as soon as the process is up. Use it
+  only to detect a hung/dead process.
+- `GET /ready` — **readiness**, fail-closed. Answers `200` with `{"ready": true, ...}` only when the
+  control plane is safe to serve, and `503` with `{"ready": false, ...}` otherwise. Route production
+  traffic and gate rollouts on this, never on `/health`.
+
+`/ready` runs deterministic, side-effect-free checks (it never writes and opens the database
+read-only) and treats any state it cannot positively confirm as **NOT_READY**:
+
+- `persistence` — the `aegis-data` volume is writable and the SQLite schema
+  (`scans`, `audit_events`, `audit_access_log`) is present. Fails closed if the volume detaches, the
+  disk fills, the file is removed, or the schema is absent after startup.
+- `credential_isolation` — the control plane holds no provider credential (`AI_AUTH_TOKEN` /
+  `DEEPSEEK_API_KEY`). Only credential *presence* is inspected; the value is never read or emitted.
+
+The base `docker-compose.yml` wires the `control-plane` service healthcheck to `/ready`, so a
+control plane that is up but not safe-to-serve is reported **unhealthy** to the orchestrator. Manual
+check:
+
+```bash
+# 200 + {"ready": true, ...} when safe to serve; 503 + {"ready": false, ...} otherwise.
+docker compose -f docker-compose.yml exec -T control-plane \
+  python -c "import urllib.request,sys; \
+    r=urllib.request.urlopen('http://127.0.0.1:8000/ready'); print(r.status, r.read().decode())" \
+  || echo 'NOT_READY (503) — control plane is failing closed as designed'
+```
+
 ## 6. Production (company private AI endpoint)
 
 Supply the real institutional details (endpoint, model, auth) — the provider is disabled until then:

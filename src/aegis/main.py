@@ -62,6 +62,7 @@ from aegis.operator import (
 )
 from aegis.operator_session import OperatorSessionStore
 from aegis.planner import build_planner
+from aegis.readiness import ReadinessReport, evaluate_readiness
 from aegis.safety import SafetyController
 from aegis.screenshots import ScreenshotStore
 from aegis.service import ScanService
@@ -229,6 +230,17 @@ async def multi_agent_console(request: Request) -> HTMLResponse:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "planner": planner.name}
+
+
+@app.get("/ready", response_model=ReadinessReport)
+async def ready(response: Response) -> ReadinessReport:
+    # Readiness is distinct from the liveness stub above: it fails closed (503) whenever the
+    # control plane is not in a safe-to-serve state (persistence lost, schema absent, or a
+    # forbidden provider credential present). Orchestrators gate on this signal, not on /health.
+    report = evaluate_readiness(settings, store)
+    if not report.ready:
+        response.status_code = 503
+    return report
 
 
 @app.post("/api/scans", response_model=ScanResult, status_code=202)
