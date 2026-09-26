@@ -420,10 +420,15 @@ def assemble_report(
     generated_at = generated_at or now_utc()
     downgraded = False
     model_contributions = 0
+    # The current live Phase 2.9 projection deliberately carries only campaign/finding ids. That is
+    # insufficient grounding for global narrative, so live executive/methodology prose is always
+    # controller fallback until a separately-reviewed fact-bearing projection is introduced.
+    global_model_prose_allowed = not source.live_run
 
     # Executive summary + methodology: use model prose only if present AND token-clean.
     if (
         model_output is not None
+        and global_model_prose_allowed
         and _prose_is_safe(model_output.executive_summary)
         and _prose_is_consistent(model_output.executive_summary, source)
     ):
@@ -434,6 +439,7 @@ def assemble_report(
         downgraded = downgraded or model_output is not None
     if (
         model_output is not None
+        and global_model_prose_allowed
         and _prose_is_safe(model_output.methodology_and_limitations)
         and _prose_is_consistent(model_output.methodology_and_limitations, source)
     ):

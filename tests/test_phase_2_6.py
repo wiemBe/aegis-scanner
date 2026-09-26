@@ -247,6 +247,16 @@ def test_live_report_metadata_distinguishes_controller_fallback() -> None:
     assert report.generation_mode == "LIVE_CONTROLLER_FALLBACK"
 
 
+def test_live_global_prose_is_fallback_until_fact_projection_exists() -> None:
+    clean_but_ungrounded = _draft(finding_remediations=[])
+    report = _assemble(_source(live_run=True), clean_but_ungrounded)
+    assert report.model_prose_used is False
+    assert report.model_prose_downgraded is True
+    assert report.generation_mode == "LIVE_CONTROLLER_FALLBACK"
+    assert report.executive_summary.startswith("This report transports controller-adjudicated")
+    assert report.methodology_and_limitations.startswith("Methodology and limitations are")
+
+
 def test_malformed_output_none_falls_back_to_controller_prose() -> None:
     report = _assemble(_source(), None)
     assert report.model_prose_used is False
