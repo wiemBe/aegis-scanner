@@ -1576,9 +1576,13 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
   campaign selects the **double for `--dry-run`** and the **live adapter only for an armed
   `--execute-live`**. The dry-run path is unchanged.
 - The DeepSeek credential is mounted into the `llm-gateway` service only (`.env.gateway`, never read
-  by this process). A **value-free** boolean probe establishes the control-plane env is key-free; the
-  stronger claim that the key lives ONLY in the gateway is **`NOT_EVALUATED`** (it is not inferred
-  from the single control-plane probe). The five typed calls
+  by this process). A **runtime per-service, value-free** proof now establishes that the credential
+  lives ONLY in the gateway: each service is probed for the boolean presence of `AI_AUTH_TOKEN`
+  (never its value) and checked against the required placement — present in `llm-gateway`, absent
+  from `control-plane`, `lab-api` and `egress-proxy`; any failed/ambiguous probe, a credential in a
+  forbidden service, or a missing gateway credential aborts **before** the first provider call.
+  `provider_key_only_in_gateway` is therefore an observed boolean (True only when fully proven), no
+  longer `NOT_EVALUATED`. The five typed calls
   (`LEAD_ORCHESTRATOR/DELEGATE_ADVERSARY_SIMULATION`, `RECON_AGENT/PLAN_ADVERSARY_SIMULATION`,
   `RECON_AGENT/RECOMMEND_ADVERSARY_REMEDIATION`, `RECON_AGENT/PLAN_ADVERSARY_SIMULATION` retest,
   `REPORT_AGENT/GENERATE_ASSESSMENT_REPORT`) execute from the control-plane side of the internal
@@ -1607,8 +1611,11 @@ AUTHORIZED_INVOCATION`. It reuses the proven Phase 2.2/2.3 isolated topology:
   (rc 0) is emitted only when every controller/range/gateway/artifact/budget/typed gate is strictly
   true.
 - Secret isolation is reported **only from what is runtime-established**: `control_plane_key_free`
-  (value-free probe), `provider_key_only_in_gateway = NOT_EVALUATED`, and an evidence-derived
-  `recorded_evidence_credential_free` scan. The prior hard-coded `host_output_key_free=True` claim is
+  (value-free probe), `provider_key_only_in_gateway` (the runtime per-service proof above — True only
+  when proven, else `NOT_EVALUATED`), a `per_service_credential_probe` record (booleans + return
+  codes only), and an evidence-derived `recorded_evidence_credential_free` scan. Observed success now
+  additionally requires the `credential_isolation_proven` gate. The prior hard-coded
+  `host_output_key_free=True` claim is
   removed. Sanitized projections exclude credentials, keys, sentinels, raw headers/payloads/response
   bodies, ground-truth predicates and authoritative verdict/severity, and each of the five calls must
   match a **task-specific allowlisted projection shape** (unexpected keys fail before dispatch). A
@@ -1648,6 +1655,58 @@ place and mock-verified, the implementation is **`LIVE_READY` for exactly one se
 bounded Phase 2.9 paid campaign**. This is **not** a LIVE GO: until that single campaign executes and
 its evidence is independently adjudicated, `phase_2_9_live_provider_status = NOT_EVALUATED` remains
 unchanged and no live claim is derived.
+
+**Live DeepSeek staging observation (2026-09-26) — `LIVE_OBSERVED_PENDING_HUMAN_ADJUDICATION`, not a
+LIVE GO.** One separately-authorized bounded paid campaign was run and observed (campaign
+`phase-2.9-consolidated-131efda36856`, evidence
+`artifacts/phase-2.9-live-20260926T082237Z/evidence-phase-2.9-consolidated-131efda36856/`, historical
+— do not modify): exact `deepseek-v4-pro` identity confirmed; 5/5 provider calls succeeded; **8,858**
+total provider tokens (≤ 15,000); all seven live acceptance gates true; zero false checks; gateway
+and range cleanup succeeded with zero Docker leftovers; inner and outer SHA-256 manifests verified.
+The final report was safely downgraded to `LIVE_CONTROLLER_FALLBACK`. This is an observation pending
+independent human adjudication; `phase_2_9_live_provider_status` stays `NOT_EVALUATED` and no LIVE GO
+or production readiness is claimed. **No model fine-tuning or training was performed** — the agents
+are governed entirely by prompts, typed contracts and the controller.
+
+**Production-promotion hardening applied after staging (2026-09-26; no paid call in this task).**
+- **Post-cleanup report finalization.** The controller-authoritative report is now assembled ONLY
+  after the cleanup ledger + range teardown complete (the REPORT stage runs/persists the REPORT_AGENT
+  job and retains the draft; exactly one REPORT_AGENT provider call). The final report reflects the
+  ACTUAL cleanup: success → `COMPLETE` / `cleanup.succeeded=true`; controller-cleanup failure, failed
+  range teardown, or an UNKNOWN leftover query → `PARTIAL` with visible failures and never a cleanup
+  success. The immutable artifact bundle + SHA-256 manifest cover this post-cleanup report; no model
+  call occurs during finalization; dry-run/offline behavior is unchanged and deterministic.
+- **Runtime per-service credential isolation** (see the live-path bullets above): a value-free proof
+  that `AI_AUTH_TOKEN` is present ONLY in `llm-gateway` and absent from `control-plane`, `lab-api` and
+  `egress-proxy`; any leak/failed/ambiguous/missing probe aborts before the first provider call, and
+  `provider_key_only_in_gateway` is now an observed boolean gated by `credential_isolation_proven`.
+  The host still never reads `.env.gateway` and control-plane still receives no credential.
+- **Candidate fact-bearing REPORT_AGENT projection — `PROVIDER_EVAL_NOT_RUN` /
+  `HUMAN_ADJUDICATION_REQUIRED`, NOT activated.** Staging showed the current live projection
+  (`campaign_id` + `finding_id` only) is insufficient for grounded global narrative, so production
+  correctly stays on controller fallback. A strict, versioned `Phase29ReportFactProjectionV1`
+  (`src/aegis/multi_agent/report_fact_projection.py`) carries ONLY controller-supplied, non-secret
+  facts (schema version, campaign id, authorized scope ref, finding id/title/category, scenario id,
+  controller-supplied state/severity, verification provenance, registered-remediation summary, retest
+  state/provenance, and cleanup fixed to `PENDING_CONTROLLER_FINALIZATION`); it can carry no
+  credentials/refs, keys/bearer values, authorization refs, raw headers/payloads/response bodies,
+  cookies, target URLs, sentinels/digests, ground-truth answer keys, secret hashes, arbitrary/
+  unbounded evidence, raw provider output, or a cleanup success before cleanup runs (`extra='forbid'`,
+  bounded lists). The REPORT_AGENT output schema still has NO field that can change state, severity,
+  verdict, provenance, cleanup or PASS/FAIL, and the controller re-derives every authoritative fact.
+  A provider-free evaluation corpus (`tests/test_phase_2_9_report_fact_projection.py`, 18 cases:
+  confirmed+retest-PASS, retest-UNKNOWN, cleanup pending, cleanup failure at final assembly, no
+  findings, hypothesis-only, unknown/invented finding id, invented causal chain, unsupported
+  remediation id, secret-shaped input, raw-header/payload injection, prompt-injection, prose denying
+  findings / asserting unsupported PASS-FAIL / changing severity / claiming cleanup success while
+  pending / stale-evidence reuse, and a live-run downgrade) drives the REAL assembler and separates
+  the five output classes (schema-valid / projection-safe / semantically-grounded /
+  controller-authoritative-final / downgraded-controller-fallback). Every output is
+  controller-authoritative; the eval also SURFACES that the current assembler's prose guards are
+  narrower than the grounding classifier — those gaps are exactly why the candidate is **not**
+  activated and requires a separate provider evaluation + human adjudication before any live use.
+- **No NOT_EVALUATED dimension is converted to PASS without direct evidence**, and no general
+  production readiness or broad security coverage is claimed.
 
 **Stop condition.** Do not execute the paid campaign without separate explicit authorization; do not
 start Phase 3.0.
