@@ -3,8 +3,8 @@ import type { EventRecord, Evidence, Finding, RunDetail as RunDetailData } from 
 import { Empty, Kv, Pill, RunStatePill } from './components'
 import { elapsed, findingStateView, runStateView, short, time, when } from './format'
 
-type Tab = 'Overview' | 'Activity' | 'Findings' | 'Evidence' | 'Cleanup' | 'Report'
-const TABS: Tab[] = ['Overview', 'Activity', 'Findings', 'Evidence', 'Cleanup', 'Report']
+type Tab = 'Overview' | 'Activity' | 'Transcript' | 'Findings' | 'Evidence' | 'Cleanup' | 'Report'
+const TABS: Tab[] = ['Overview', 'Activity', 'Transcript', 'Findings', 'Evidence', 'Cleanup', 'Report']
 
 const actorTone = (actor: EventRecord['actor_type']) =>
   actor === 'VERIFIER' ? 'success' : actor === 'CONTROLLER' ? 'neutral' : actor === 'AI_PLANNER' ? 'warning' : 'neutral'
@@ -111,6 +111,7 @@ export function RunDetailView({
 
         {tab === 'Overview' && <Overview detail={detail} findingCount={runFindings.length} />}
         {tab === 'Activity' && <Activity events={events} />}
+        {tab === 'Transcript' && <Transcript detail={detail} findings={runFindings} />}
         {tab === 'Findings' && <FindingsPanel findings={runFindings} />}
         {tab === 'Evidence' && <EvidencePanel evidence={evidence} />}
         {tab === 'Cleanup' && <Cleanup />}
@@ -204,6 +205,97 @@ function Activity({ events }: { events: EventRecord[] }) {
           <span className="addr mono">{short(event.scan_id, 14)}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+// Debug transcript for the normal (non-BEAST) assessment path: the AI proposes a typed hypothesis,
+// the controller executes it deterministically, and the independent verifier concludes. This frames
+// that input -> AI -> result chain for debugging, plus the full structured event stream with raw
+// evidence refs per step. No raw response bodies or credentials (the backend already redacts them).
+function Transcript({ detail, findings }: { detail: RunDetailData; findings: Finding[] }) {
+  const { events } = detail
+  return (
+    <div className="stack">
+      <div className="panel">
+        <div className="panel-head">
+          <h3>AI reasoning chain</h3>
+          <span className="sub">hypothesis → controller execution → deterministic evidence → verifier</span>
+        </div>
+        {findings.length === 0 ? (
+          <p className="muted">
+            No confirmed finding for this run. The planner's candidates and the controller/verifier
+            steps are in the event transcript below.
+          </p>
+        ) : (
+          <div className="transcript">
+            {findings.map((f) => (
+              <div className="turn" key={f.id}>
+                <div className="turn-head">
+                  <strong>{f.title}</strong>
+                  <Pill tone={f.status === 'REMEDIATED' ? 'success' : 'critical'}>{f.severity}</Pill>
+                  <span className="sub mono">{f.vulnerability_class}</span>
+                </div>
+                <div className="io ai">
+                  <span className="io-label">AI HYPOTHESIS</span>
+                  <div className="io-body">
+                    <div className="io-line">{f.ai_hypothesis || '—'}</div>
+                  </div>
+                </div>
+                <div className="io input">
+                  <span className="io-label">CONTROLLER EXECUTION</span>
+                  <div className="io-body">
+                    <div className="io-line">{f.controller_execution || '—'}</div>
+                    <div className="io-line">
+                      <span className="muted">Operation:</span>{' '}
+                      <span className="mono">{f.affected_operation}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="io result">
+                  <span className="io-label">DETERMINISTIC EVIDENCE → VERIFIER</span>
+                  <div className="io-body">
+                    <div className="io-line">{f.deterministic_evidence || '—'}</div>
+                    <div className="io-line">
+                      <span className="muted">Verifier:</span> {f.verifier_conclusion || '—'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-head">
+          <h3>Event transcript</h3>
+          <span className="sub">{events.length} structured event(s) · raw detail per step</span>
+        </div>
+        {events.length === 0 ? (
+          <p className="muted">No structured events were recorded for this run.</p>
+        ) : (
+          <div className="transcript">
+            {events.map((event) => (
+              <div className="turn" key={event.event_id}>
+                <div className="turn-head">
+                  <Pill tone={actorTone(event.actor_type)}>{event.actor_type.replaceAll('_', ' ')}</Pill>
+                  <strong>{event.stage.replaceAll('_', ' ')}</strong>
+                  <span className="sub mono">{event.event_type}</span>
+                  <span className="sub mono">{time(event.timestamp)}</span>
+                </div>
+                <div className="io-line">{event.summary}</div>
+                {event.evidence_refs?.length > 0 && (
+                  <details className="turn-raw">
+                    <summary>Evidence refs ({event.evidence_refs.length})</summary>
+                    <pre className="codeblock">{JSON.stringify(event.evidence_refs, null, 2)}</pre>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

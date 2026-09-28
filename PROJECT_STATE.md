@@ -18,6 +18,14 @@ brief. Offline-accepted (`tests/test_beast_toolbox.py` 9/9 + unchanged `tests/te
 image rebuild + the Phase 1.4 live matrix. No paid/live model call was made. Provenance:
 `third_party/README.md`; increment: `docs/phase-1.4-b-beast-toolbox.md`.
 
+Console debug transcript + run ledger (2026-09-28): the operator console gained a per-turn AI
+transcript (input → decision → result) for both the disposable BEAST run panel and the normal
+assessment run detail (new Transcript tab), built from already-persisted run detail (no model-path
+change; no chain-of-thought stored). Completed assessments are appended fail-soft to a persisted run
+ledger (`run-ledger.csv`/`.jsonl` next to the SQLite DB, keyed by `date-<FQDN|API|IP>`) via new
+`aegis.run_ledger`; `GET /api/console/runs.csv` + an Export CSV button download it. Tests:
+`tests/test_run_ledger.py` (8), console 16/16; ruff+mypy+tsc+eslint clean.
+
 Updated: 2026-09-22 (Europe/Istanbul)
 Phase: **1.7 Multi-Agent Evaluation Runtime — INITIAL AEGIS-BANK BOLA VERTICAL SLICE IMPLEMENTED,
 OFFLINE SYNTHETIC ACCEPTANCE ONLY, NOT a production or live-model GO. Lead, Surface and

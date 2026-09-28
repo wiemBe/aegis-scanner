@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis import scm_verifier, zap_verifier
+from aegis import run_ledger, scm_verifier, zap_verifier
 from aegis.beast.contracts import BeastRunRequest, LeaseRequest
 from aegis.beast.controller import BeastController, BeastRejected
 from aegis.beast.store import BeastStore
@@ -115,6 +115,9 @@ process_lifecycle = ProcessLifecycle(
 process_lifecycle.mark_serving()
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 screenshot_store = ScreenshotStore(Path(settings.database_path).parent / "screenshots")
+# Persisted run ledger (one CSV/JSONL row per completed assessment), next to the SQLite database so
+# it shares the same durability. Written fail-soft; served by GET /api/console/runs.csv.
+run_ledger_dir = Path(settings.database_path).parent
 beast_store = BeastStore(settings.database_path)
 multi_agent_store = MultiAgentStore(settings.database_path)
 # Phase 2.4 controller-owned single-agent vs multi-agent benchmark result store (read-only surface).
@@ -787,6 +790,21 @@ async def console_runs(limit: int = Query(default=50, ge=1, le=100)) -> dict[str
     }
 
 
+@app.get("/api/console/runs.csv")
+async def console_runs_csv() -> Response:
+    """Download the persisted run ledger as CSV (one row per completed assessment, keyed by
+    date + target FQDN/API/IP). Redacted: only projected run/target fields, never bodies."""
+
+    return Response(
+        content=run_ledger.read_csv(run_ledger_dir),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{run_ledger.download_filename()}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.get("/api/console/runs/{scan_id}")
 async def console_run(scan_id: str) -> dict[str, object]:
     scan = store.get(scan_id)
@@ -1341,6 +1359,33 @@ class AssessmentCreate(BaseModel):
     profile_id: str = Field(min_length=3, max_length=100)
 
 
+def _record_run_ledger(scan_id: str, target: dict[str, object], profile_id: str) -> None:
+    """Append one completed run to the persisted ledger. Fail-soft: never affects the run."""
+
+    try:
+        scan = store.get(scan_id)
+        if scan is None:
+            return
+        projection = _scan_projection(scan, [])
+        run_ledger.append(run_ledger_dir, run_ledger.build_row(projection, target, profile_id))
+    except Exception:  # noqa: BLE001 - a ledger write must never break or fail a run
+        obs_logger.log(
+            service="control-plane",
+            event="run_ledger_write_failed",
+            level="WARN",
+            request_id="-",
+        )
+
+
+async def _run_and_record(scan_id: str, target: dict[str, object], profile_id: str) -> None:
+    """Execute the assessment, then record it to the run ledger regardless of outcome."""
+
+    try:
+        await service.run(scan_id)
+    finally:
+        _record_run_ledger(scan_id, target, profile_id)
+
+
 @app.post("/api/console/assessments", status_code=202)
 async def console_create_assessment(request: AssessmentCreate) -> dict[str, object]:
     """Typed assessment creation that references a stable inventory target id and enforces its
@@ -1371,7 +1416,7 @@ async def console_create_assessment(request: AssessmentCreate) -> dict[str, obje
             result = process_lifecycle.create_and_submit(
                 create=lambda: service.create(ScanCreate()),
                 work_id=lambda scan: scan.id,
-                work_factory=lambda scan: service.run(scan.id),
+                work_factory=lambda scan: _run_and_record(scan.id, target, request.profile_id),
                 on_timeout=lambda scan: service.mark_shutdown_timeout(scan.id),
             )
         except ServiceDraining:
