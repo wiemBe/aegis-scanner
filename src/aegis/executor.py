@@ -10,6 +10,7 @@ from aegis.models import PlannedRequest, RequestEvidence
 from aegis.safety import SafetyController
 from aegis.settings import Settings
 from aegis.surface import Variant
+from aegis.user_agent import DEFAULT_BROWSER_USER_AGENT
 
 SENSITIVE_KEYS = {
     "authorization",
@@ -64,7 +65,7 @@ class TestExecutor:
         variant: Variant,
     ) -> RequestEvidence:
         url = self.safety.approve_request(base_url, request, variant)
-        headers = {"User-Agent": "Aegis-AI-Security-Lab/0.2"}
+        headers = {"User-Agent": DEFAULT_BROWSER_USER_AGENT}
         if request.credential_profile != "anonymous":
             headers["Authorization"] = (
                 f"Bearer {self.settings.credentials[request.credential_profile]}"

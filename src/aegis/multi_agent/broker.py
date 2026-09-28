@@ -19,6 +19,7 @@ from aegis.multi_agent.contracts import (
     ObservationType,
 )
 from aegis.multi_agent.registry import authorize
+from aegis.user_agent import DEFAULT_BROWSER_USER_AGENT
 from aegis_range.inventory import RANGE_TARGETS
 
 _CREDENTIALS = {
@@ -72,7 +73,7 @@ class ControlledToolBroker:
     async def _get(
         self, application_id: str, origin: str, path: str, alias: str | None
     ) -> httpx.Response:
-        headers = {"User-Agent": "Aegis-Multi-Agent-Runtime/1.7"}
+        headers = {"User-Agent": DEFAULT_BROWSER_USER_AGENT}
         if alias is not None:
             secret = _CREDENTIALS.get(alias)
             if secret is None:
