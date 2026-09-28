@@ -151,6 +151,21 @@ class BeastObservation(StrictModel):
     artifact_previews: dict[str, str] = Field(default_factory=dict)
 
 
+class BeastToolDescriptor(StrictModel):
+    """Non-authoritative note that a tool is installed in the disposable sandbox image.
+
+    This is environment context surfaced to the model, never a suggested, scripted or allow-listed
+    command. The model still authors the exact command_text itself and may use any installed tool or
+    shell syntax; the target boundary (GET/HEAD/OPTIONS, byte/rate budget) is what actually bounds
+    reachability, not this list.
+    """
+
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,39}$")
+    category: str = Field(min_length=2, max_length=48)
+    purpose: str = Field(min_length=3, max_length=200)
+    source: str = Field(min_length=3, max_length=120)
+
+
 class BeastCommandDecision(StrictModel):
     decision_type: Literal["command"]
     hypothesis: str = Field(min_length=3, max_length=1000)
@@ -194,6 +209,10 @@ class BeastDecisionRequest(StrictModel):
     objective_evidence_sufficient: bool
     decision_requirements: list[str]
     observations: list[BeastObservation]
+    # Controller-owned note of tools present in the sandbox image. Advisory only: the model chooses
+    # its own command_text and the target boundary owns reachability. Defaulted so older callers and
+    # replayed envelopes remain valid.
+    available_tools: list[BeastToolDescriptor] = Field(default_factory=list)
 
 
 class BeastDecisionResponse(StrictModel):

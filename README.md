@@ -376,6 +376,7 @@ GO verdicts are scoped to the synthetic lab — never production or broad-covera
 | [1.2](docs/phase-1.2-nuclei-integration.md) | Controlled Nuclei profile (one signed template) | GO (one synthetic capability) |
 | [1.3](docs/phase-1.3-zap-passive-openapi.md) | Passive-only ZAP OpenAPI profile | GO (one passive capability) |
 | [1.4](docs/phase-1.4-beast-mode.md) | BEAST MODE disposable adversary sandbox | Synthetic-lab only |
+| [1.4-B](docs/phase-1.4-b-beast-toolbox.md) | BEAST sandbox toolbox: AKCA + curated HexStrike web-recon (tool surface only) | Offline-accepted; live NOT_EVALUATED |
 | [1.5](docs/phase-1.5-zap-active-reflected-xss.md) | Narrow active reflected-XSS ZAP profile (single-use lease) | **GO** (one rule, one endpoint) |
 | [1.6](docs/phase-1.6-aegis-vulnerable-application-range.md) | Vulnerable application range: 4 apps, 19 scenarios, 3 chains | Catalog increment |
 | [1.7](docs/phase-1.7-multi-agent-runtime.md) | Multi-agent runtime (Lead/Surface/Auth; [recon](docs/phase-1.7-controlled-recon.md), injection/chain) | Offline-accepted; live 1.7-A **NO-GO** (`PROVIDER_MODEL_MISMATCH`) |
@@ -396,6 +397,8 @@ The canonical, always-current status is [`PROJECT_STATE.md`](PROJECT_STATE.md).
   [WP4](docs/production-readiness-wp4.md) · [WP5](docs/production-readiness-wp5.md) ·
   [gap audit](docs/production-readiness-gap-audit-wp1.md)
 - **Threat model** — [docs/threat-model-tool-integrations.md](docs/threat-model-tool-integrations.md)
+- **Third-party provenance** — [third_party/README.md](third_party/README.md) (AKCA, HexStrike-AI;
+  BEAST sandbox toolbox [Phase 1.4-B](docs/phase-1.4-b-beast-toolbox.md))
 - **Tool integration internals** — Nuclei
   ([supply chain](docs/nuclei-template-supply-chain.md), [isolation](docs/nuclei-runner-isolation.md),
   [ops](docs/nuclei-operations.md), [evidence](docs/nuclei-evidence-and-verification.md)); ZAP

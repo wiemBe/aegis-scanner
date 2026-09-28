@@ -7,6 +7,17 @@ rendered-Compose preflight, and a read-only staging soak/failure observer. Code/
 observability delivery, and staging soak/failure evidence remain `NOT_EVALUATED`. No external or
 production target authorization is added. See `docs/production-readiness-wp5.md`.
 
+Phase 1.4-B update (2026-09-28): the BEAST disposable sandbox image now installs `akca`
+(github:akha-security/akca@v0.2.4, Apache-2.0) plus curated HexStrike-orchestrated web-recon tools
+`katana` and `httpx` (ProjectDiscovery, MIT), all pinned by SHA-256. HexStrike-AI's *autonomous MCP
+engine is deliberately not wired in* — only its tool surface is adopted, driven by the existing
+controller + `qwen3:8b`. No Phase 1.4 boundary changed (GET/HEAD/OPTIONS gateway, verifier authority,
+isolation, cleanup, audit); the controller adds an advisory-only `available_tools` note to the model
+brief. Offline-accepted (`tests/test_beast_toolbox.py` 9/9 + unchanged `tests/test_phase_1_4.py`
+8/8; Ruff + mypy clean); **live in-sandbox behaviour is NOT_EVALUATED** and requires an operator
+image rebuild + the Phase 1.4 live matrix. No paid/live model call was made. Provenance:
+`third_party/README.md`; increment: `docs/phase-1.4-b-beast-toolbox.md`.
+
 Updated: 2026-09-22 (Europe/Istanbul)
 Phase: **1.7 Multi-Agent Evaluation Runtime — INITIAL AEGIS-BANK BOLA VERTICAL SLICE IMPLEMENTED,
 OFFLINE SYNTHETIC ACCEPTANCE ONLY, NOT a production or live-model GO. Lead, Surface and

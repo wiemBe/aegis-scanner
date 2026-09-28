@@ -34,6 +34,7 @@ from aegis.beast.contracts import (
 from aegis.beast.inventory import LAUNCHABLE_BEAST_TARGETS, target
 from aegis.beast.observe import decision_requirements, evidence_sufficient, normalize
 from aegis.beast.store import BeastStore
+from aegis.beast.toolbox import sandbox_toolbox
 from aegis.beast.verifier import BeastVerifier
 from aegis.settings import Settings
 
@@ -359,6 +360,7 @@ class BeastController:
                         run.scenario_id, run.observations
                     ),
                     observations=run.observations,
+                    available_tools=sandbox_toolbox(),
                 )
                 model_result = BeastDecisionResponse.model_validate(
                     await self._post(
