@@ -54,6 +54,7 @@ from aegis.multi_agent.contracts import (
 )
 from aegis.multi_agent.injection import HOSTILE_INSTRUCTION_MARKERS
 from aegis.multi_agent.registry import authorize
+from aegis.user_agent import DEFAULT_BROWSER_USER_AGENT
 from aegis_range.inventory import RANGE_TARGETS
 
 if TYPE_CHECKING:
@@ -1099,7 +1100,7 @@ class ReconBroker:
             transport=self._transports.get(application_id),
         ) as client:
             return await client.get(
-                path, headers={"User-Agent": "Aegis-Recon-Agent/1.7C"}
+                path, headers={"User-Agent": DEFAULT_BROWSER_USER_AGENT}
             )
 
     def _require_role(self, task: AgentTask) -> None:

@@ -33,6 +33,7 @@ from aegis.multi_agent.contracts import (
     StrictModel,
 )
 from aegis.multi_agent.registry import authorize
+from aegis.user_agent import DEFAULT_BROWSER_USER_AGENT
 from aegis_range.inventory import RANGE_TARGETS
 
 # Target-controlled text that must always remain data. Recon flags these but never obeys them.
@@ -229,7 +230,7 @@ class InjectionBroker:
             transport=self._transports.get(application_id),
         ) as client:
             return await client.get(
-                path, params=params, headers={"User-Agent": "Aegis-Multi-Agent-Runtime/1.7B"}
+                path, params=params, headers={"User-Agent": DEFAULT_BROWSER_USER_AGENT}
             )
 
     async def recon(
