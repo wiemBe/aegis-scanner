@@ -384,9 +384,14 @@ function HomeView({
   }
   return (
     <div className="stack">
-      <div className="page-head">
-        <h1>Runs</h1>
-        <p>Current and recent assessments.</p>
+      <div className="page-head with-action">
+        <div>
+          <h1>Runs</h1>
+          <p>Current and recent assessments.</p>
+        </div>
+        <a className="btn" href="/api/console/runs.csv" download>
+          Export CSV
+        </a>
       </div>
 
       {activeRuns.length > 0 && (
@@ -644,9 +649,14 @@ function ReportsView({ runs, onOpen }: { runs: Run[]; onOpen: (id: string) => vo
   const completed = runs.filter((r) => r.status !== 'RUNNING' && r.status !== 'QUEUED')
   return (
     <div>
-      <div className="page-head">
-        <h1>Reports</h1>
-        <p>Evidence reports for completed assessments.</p>
+      <div className="page-head with-action">
+        <div>
+          <h1>Reports</h1>
+          <p>Evidence reports for completed assessments.</p>
+        </div>
+        <a className="btn" href="/api/console/runs.csv" download>
+          Export CSV
+        </a>
       </div>
       {completed.length === 0 ? (
         <Empty title="No reports yet" copy="Completed assessments produce an evidence report you can open here." />

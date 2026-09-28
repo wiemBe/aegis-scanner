@@ -336,6 +336,24 @@ describe('Findings, run detail and honest states', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'Cleanup' }))
     expect(await screen.findByText(/disposable containers or networks/)).toBeInTheDocument()
   })
+
+  it('shows the AI input/decision transcript for a normal run', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(await screen.findByText(/scan-aaaaaaaaaaaa/))
+    fireEvent.click(await screen.findByRole('tab', { name: 'Transcript' }))
+    expect(await screen.findByText('AI reasoning chain')).toBeInTheDocument()
+    expect(screen.getByText('AI HYPOTHESIS')).toBeInTheDocument()
+    expect(screen.getByText('CONTROLLER EXECUTION')).toBeInTheDocument()
+    expect(screen.getByText('Event transcript')).toBeInTheDocument()
+  })
+
+  it('offers a CSV export of the run ledger on the Runs page', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    const link = screen.getByRole('link', { name: 'Export CSV' })
+    expect(link).toHaveAttribute('href', '/api/console/runs.csv')
+  })
 })
 
 describe('Credential safety', () => {

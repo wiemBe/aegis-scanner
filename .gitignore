@@ -95,3 +95,7 @@ Thumbs.db
 .claude/
 deploy/sqlmap-runner/*.whl
 deploy/range/wheels/
+
+# Persisted run ledger (written next to the SQLite database at runtime; not source).
+run-ledger.csv
+run-ledger.jsonl

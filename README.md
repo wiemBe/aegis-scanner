@@ -168,6 +168,15 @@ The console provides Mission Control, Runs, Findings, Audit, Evidence, Integrati
 Health. All projections are redacted: findings stay verifier-owned; API evidence cards exclude
 response bodies and credentials; browser screenshots are disabled by default.
 
+Each run detail also has a **Transcript** tab — a debug view of the AI input → decision → result
+chain (the planner's hypothesis, the controller's execution, and the deterministic evidence/verifier
+outcome), plus the full structured event stream with raw evidence refs per step. A **BEAST Sandbox**
+panel (shown only when BEAST is enabled) provides the same per-turn transcript for the disposable
+adversary sandbox behind its typed-phrase activation gate. Completed runs are appended to a persisted
+**run ledger** (`run-ledger.csv` / `.jsonl`, next to the SQLite database, keyed by
+`date-<FQDN|API|IP>`); **Export CSV** on the Runs/Reports pages downloads it (`GET
+/api/console/runs.csv`).
+
 Reference: [console architecture](docs/operator-console-architecture.md),
 [event envelope](docs/audit-event-envelope.md),
 [troubleshooting](docs/operator-console-troubleshooting.md).
