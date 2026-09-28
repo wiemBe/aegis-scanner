@@ -406,3 +406,24 @@ pre.evidence-json {
 .link-btn:disabled { color: var(--faint); cursor: not-allowed; }
 
 @media (max-width: 640px) { .form-grid { grid-template-columns: 1fr; } }
+
+/* BEAST model transcript: input → AI decision → sandbox result, per turn. */
+.transcript { display: flex; flex-direction: column; gap: 14px; }
+.turn { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 12px 14px; }
+.turn-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.turn-head .sub { color: var(--muted); font-size: 12px; }
+.io { position: relative; padding: 8px 10px 8px 12px; border-left: 3px solid var(--border-strong); border-radius: var(--radius-sm); margin-bottom: 8px; background: var(--raised); }
+.io.input { border-left-color: var(--muted); }
+.io.ai { border-left-color: var(--action); }
+.io.result { border-left-color: var(--success); }
+.io-label { display: inline-block; font-size: 10px; letter-spacing: 0.08em; font-weight: 700; color: var(--faint); margin-bottom: 6px; }
+.io-body { display: flex; flex-direction: column; gap: 6px; }
+.io-line { font-size: 13px; color: var(--text); }
+.io-line .muted { color: var(--muted); }
+.io-list { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.io-list li { font-size: 12.5px; }
+.codeblock { margin: 6px 0 0; padding: 9px 11px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word; overflow-x: auto; max-height: 320px; }
+.turn-raw { margin-top: 8px; }
+.turn-raw summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.turn-raw summary:hover { color: var(--text); }
+.turn-raw .codeblock { max-height: 260px; }

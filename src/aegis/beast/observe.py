@@ -5,6 +5,7 @@ import re
 from typing import Any
 
 from aegis.beast.contracts import BeastDecisionRequest, BeastObservation, CommandResult
+from aegis.beast.toolbox import SANDBOX_TOOLBOX_BOUNDARY_NOTE
 
 _PATH = re.compile(r"/(?:api|lab)/[A-Za-z0-9_./{}?=&%:-]+")
 
@@ -171,6 +172,19 @@ def render_decision_brief(request: BeastDecisionRequest) -> str:
             f"time remaining: {request.remaining_time_seconds}s"
         ),
         f"Synthetic public accounts (only credentials you may use): {accounts}",
+    ]
+    if request.available_tools:
+        lines.append("")
+        lines.append(
+            "Installed sandbox tools (advisory — you may use these or any other installed tool or "
+            "shell syntax; this is not a required or suggested command):"
+        )
+        lines.extend(
+            f"  - {tool.name} ({tool.category}): {tool.purpose}"
+            for tool in request.available_tools
+        )
+        lines.append(f"  note: {SANDBOX_TOOLBOX_BOUNDARY_NOTE}")
+    lines += [
         "",
         "Evidence sufficient to STOP now: "
         + (

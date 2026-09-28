@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "Pinned provenance for every externally fetched binary in the BEAST_ADVERSARY_SANDBOX_V1 image.",
+    "This file is the human- and test-facing source of truth; deploy/beast-sandbox/Dockerfile must",
+    "ADD each asset with the matching sha256. tests/test_beast_toolbox.py asserts they stay in sync.",
+    "SHA-256 values are the upstream release checksums (verified 2026-09-28). Distro packages",
+    "(curl, httpie, ffuf, sqlmap, nmap) are pinned by the base image + apt and are not listed here."
+  ],
+  "tools": {
+    "nuclei": {
+      "version": "3.11.1",
+      "category": "template-scanner",
+      "source": "github:projectdiscovery/nuclei",
+      "asset": "zip",
+      "sha256": {
+        "linux_amd64": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+        "linux_arm64": "8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07"
+      }
+    },
+    "akca": {
+      "version": "0.2.4",
+      "category": "dast-scanner",
+      "source": "github:akha-security/akca",
+      "license": "Apache-2.0",
+      "asset": "binary",
+      "sha256": {
+        "linux_amd64": "265b1cb00a8ed7b8d5cfd4adcccd2e6929afb64f5f2bd2503310d6a53f230017",
+        "linux_arm64": "401f4561bbaf7a7a88c3e5e1543cbab049a40ee1358e873dc4dd9f451626446a"
+      }
+    },
+    "katana": {
+      "version": "1.7.0",
+      "category": "web-crawler",
+      "source": "github:projectdiscovery/katana",
+      "license": "MIT",
+      "asset": "zip",
+      "sha256": {
+        "linux_amd64": "fe1142d92f418549338ea46d67a472124878482e225d279e9a42700c75d76a4d",
+        "linux_arm64": "9a6885fe9fda850129b110e0f079d42529b0693dd81b59c316f04084935300f0"
+      }
+    },
+    "httpx": {
+      "version": "1.12.0",
+      "category": "http-prober",
+      "source": "github:projectdiscovery/httpx",
+      "license": "MIT",
+      "asset": "zip",
+      "sha256": {
+        "linux_amd64": "9d8439e8b6c9aa7d1e2314817a392e00d5178da3af5652f7475f88868f418f76",
+        "linux_arm64": "fd7b123c1dfbc3d69f19f524e4eebcd6ec06b9a6cbd56813c76f11645197331e"
+      }
+    }
+  }
+}

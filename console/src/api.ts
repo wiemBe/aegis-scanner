@@ -197,6 +197,130 @@ export type ConsoleConfig = {
   zap_active?: { enabled?: boolean }
 }
 
+// BEAST disposable adversary sandbox (Phase 1.4 / 1.4-B). Deliberately gated: the browser can only
+// preflight, type the exact confirmation phrase, request a lease + run, poll it, and emergency-stop.
+// The controller owns target scope, the typed-phrase gate, the verifier and all cleanup.
+export type BeastConfig = {
+  enabled: boolean
+  mode: string
+  available_mode: string | null
+  profile_id: string
+  required_model: string
+  synthetic_lab_only: boolean
+  target_refs: string[]
+  technical_subtitle: string
+  boundary_description: string
+}
+
+export type BeastResourceEnvelope = {
+  total_wall_time_seconds: number
+  per_command_timeout_seconds: number
+  max_commands: number
+  max_request_rate_per_second: number
+  max_target_connections: number
+} & Record<string, number>
+
+export type BeastTargetView = {
+  target_ref: string
+  name: string
+  origin: string
+  base_path: string
+  environment: string
+  allowed_methods: string[]
+  allowed_path_prefix: string
+  prohibited_operations: string[]
+  synthetic_data_only: boolean
+  health: string
+  expected_impact: string
+  max_blast_radius: string
+}
+
+export type BeastPreflight = {
+  profile_id: string
+  mode: string
+  target: BeastTargetView
+  enabled_capabilities: string[]
+  enabled_engines: string[]
+  resources: BeastResourceEnvelope
+  automatic_expiry_seconds: number
+  emergency_stop: string
+  technical_subtitle: string
+  boundary_description: string
+}
+
+export type BeastLease = {
+  lease_id: string
+  state: string
+  target_ref: string
+  profile_id: string
+  capability_set: string[]
+  expires_at: string
+}
+
+// The AI's authored command for one turn (exact text preserved; never rewritten by the controller).
+export type BeastCommand = {
+  command_id: string
+  parent_command_id: string | null
+  sequence: number
+  command_text: string
+  expected_intent: string
+  hypothesis_reference: string
+}
+
+// The bounded, normalized result the AI sees back — never a raw credentialed response body.
+export type BeastObservation = {
+  observation_id: string
+  command_id: string
+  sequence: number
+  summary: string
+  command_text: string
+  facts: Record<string, unknown>
+  stdout: string
+  stderr: string
+  artifact_previews: Record<string, string>
+}
+
+// One model call: the structured decision plus provenance (tokens, timing, digest) for debugging.
+export type BeastModelCall = {
+  sequence: number
+  model: string
+  usage: Record<string, number>
+  metadata: Record<string, unknown>
+  decision_type: string
+  input_observation_ids: string[]
+}
+
+export type BeastRunView = {
+  run_id: string
+  lease_id: string
+  target_ref: string
+  scenario_id: string
+  state: string
+  model: string
+  stop_reason: string | null
+  workspace_destroyed: boolean
+  cleanup_verified: boolean
+  emergency_stopped: boolean
+  commands: BeastCommand[]
+  observations: BeastObservation[]
+  model_calls: BeastModelCall[]
+  verifier_conclusion: Record<string, unknown> | null
+  created_at: string
+  completed_at: string | null
+}
+
+export type BeastEvent = {
+  sequence: number
+  event_id: string
+  run_id: string
+  event_type: string
+  actor_type: string
+  timestamp: string
+  details: Record<string, unknown>
+}
+
+export type BeastRunDetail = { run: BeastRunView; events: BeastEvent[] }
+
 const jsonHeaders = { Accept: 'application/json' }
 
 export async function getJSON<T>(path: string): Promise<T> {
@@ -244,4 +368,23 @@ export const consoleApi = {
       '/api/console/assessments',
       body,
     ),
+  // BEAST disposable adversary sandbox. Every call maps to a controller-enforced boundary.
+  beastConfig: () => getJSON<BeastConfig>('/api/beast/config'),
+  beastPreflight: (targetRef: string) =>
+    getJSON<BeastPreflight>(`/api/beast/preflight/${encodeURIComponent(targetRef)}`),
+  beastIssueLease: (body: {
+    operator_id: string
+    actor_type: 'OPERATOR'
+    target_ref: string
+    profile_id: string
+    confirmation: string
+  }) => postJSON<BeastLease>('/api/beast/leases', body),
+  beastCreateRun: (body: { lease_id: string; scenario_id: string }) =>
+    postJSON<BeastRunView>('/api/beast/runs', body),
+  beastRun: (runId: string) =>
+    getJSON<BeastRunDetail>(`/api/beast/runs/${encodeURIComponent(runId)}`),
+  beastStop: (runId: string, operatorId: string) =>
+    postJSON<BeastRunView>(`/api/beast/runs/${encodeURIComponent(runId)}/stop`, {
+      operator_id: operatorId,
+    }),
 }

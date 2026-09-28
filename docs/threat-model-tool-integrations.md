@@ -100,3 +100,26 @@ Residual risk: this is a single-tenant synthetic-lab container/process sandbox, 
 multi-tenant production isolation product. The narrow authenticated RPC relay is strictly required on
 the adversary network; the child can reach its listener but cannot authenticate. Phase 1.4 grants no
 staging or production authority.
+
+## Phase 1.4-B — sandbox toolbox expansion (AKCA + curated HexStrike web-recon)
+
+Phase 1.4-B ([increment doc](phase-1.4-b-beast-toolbox.md)) adds `akca`, `katana` and `httpx` to the
+disposable sandbox image and an advisory `available_tools` note to the model brief. It changes the
+installed binary set and the brief text only; every Phase 1.4 boundary (B1–B12 above) is unchanged.
+The integration adopts HexStrike-AI's *tool surface*, not its autonomous MCP engine.
+
+| # | Threat | Mitigation / evidence |
+| --- | --- | --- |
+| BT1 | HexStrike's autonomous engine becomes a second, unbounded decider with its own LLM egress | The engine/MCP server is never installed or run; the only decider stays the controller + `qwen3:8b` outside the sandbox, over the existing isolated route. The sandbox has no model route or credential environment (B2/B3). Only self-contained CLI binaries are added. |
+| BT2 | A new tool reaches a host it should not (raw sockets, alternate target, internet) | Added tools inherit the Phase 1.4 boundary unchanged: dropped capabilities (no NET_RAW), only the internal `beast-adversary` network, static DNS, and the exact target gateway forwarding GET/HEAD/OPTIONS under byte/rate/connection budgets. Raw-socket/exploit tools are inert; `test_controller_transmits_the_toolbox_without_widening_scope` asserts the forwarded session stays `["GET","HEAD","OPTIONS"]` on `/lab/beast/vulnerable`. |
+| BT3 | The advisory tool note becomes a command allow-list, a scripted command, or misdescribes reachability | The note is rendered as advisory context restating the gateway constraint; the model still authors `command_text` itself. Raw-socket/exploit tools are excluded from the advisory list. Tests: `test_render_brief_lists_tools_and_the_boundary_note`, `test_advisory_toolbox_excludes_rawsocket_and_exploit_tools`. |
+| BT4 | Supply-chain drift: an unpinned or tampered tool binary enters the image | Every fetched asset is pinned by version + SHA-256 in `tools.lock.json` and installed via `ADD --checksum` (build fails on mismatch). `test_tools_lock_shas_are_pinned_in_the_dockerfile` and `test_new_tools_are_copied_into_the_image` fail closed on manifest/Dockerfile drift; `test_every_advertised_tool_is_actually_installed` rejects advertising a tool the image does not contain. |
+| BT5 | Added tool self-confirms a finding via exit code or prose | Unchanged from B9: the model can only command or stop; the deterministic `BeastVerifier` alone owns `CONFIRMED`/`PASS`/`VERIFIED`. Tool output is untrusted data normalised into bounded facts. |
+| BT6 | License/redistribution obligation for vendored tooling is unmet | Only pinned upstream releases are fetched (no source vendored). Upstream MIT/Apache-2.0 license texts and provenance are retained under `third_party/`; `test_third_party_provenance_and_licenses_present` enforces their presence. |
+
+Residual risks: `akca`, `katana` and `httpx` are third-party binaries fetched from GitHub releases at
+build time and trusted after checksum verification; their runtime behaviour inside the sandbox is
+bounded by the Phase 1.4 boundary, not independently audited. The advisory tool note is AI-facing
+guidance, not an enforcement mechanism — enforcement remains the target gateway and verifier. Live
+in-sandbox behaviour of the new tools is NOT_EVALUATED until the operator runs the Phase 1.4 live
+matrix against the rebuilt image.

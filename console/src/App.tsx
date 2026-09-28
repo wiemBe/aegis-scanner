@@ -14,6 +14,7 @@ import { findingStateView, short, when } from './format'
 import { AddTarget } from './AddTarget'
 import { NewAssessment } from './NewAssessment'
 import { RunDetailView } from './RunDetail'
+import { BeastConsole } from './Beast'
 
 type Route =
   | { name: 'home' }
@@ -24,6 +25,7 @@ type Route =
   | { name: 'targets' }
   | { name: 'reports' }
   | { name: 'audit' }
+  | { name: 'beast' }
   | { name: 'debug' }
 
 const DEV = import.meta.env.DEV
@@ -44,6 +46,8 @@ function parseHash(): Route {
       return { name: 'reports' }
     case 'audit':
       return { name: 'audit' }
+    case 'beast':
+      return { name: 'beast' }
     case 'debug':
       return DEV ? { name: 'debug' } : { name: 'home' }
     default:
@@ -218,6 +222,14 @@ export function App() {
               {item.label}
             </button>
           ))}
+          {config?.beast?.enabled && (
+            <button
+              className={`nav-item ${navActive(['beast']) ? 'active' : ''}`}
+              onClick={() => go('#/beast')}
+            >
+              BEAST Sandbox
+            </button>
+          )}
           {DEV && (
             <button
               className={`nav-item ${navActive(['debug']) ? 'active' : ''}`}
@@ -291,6 +303,8 @@ export function App() {
             <ReportsView runs={runs} onOpen={(id) => go(`#/runs/${id}`)} />
           ) : route.name === 'audit' ? (
             <AuditView />
+          ) : route.name === 'beast' ? (
+            <BeastConsole />
           ) : route.name === 'debug' && DEV ? (
             <DebugView health={health} config={config} />
           ) : (
