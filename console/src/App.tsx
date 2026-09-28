@@ -491,6 +491,7 @@ function TargetsView({
   onTargetUpdated: (t: TargetEntry) => void
 }) {
   const [adding, setAdding] = useState(false)
+  const [editing, setEditing] = useState<TargetEntry>()
   const [detail, setDetail] = useState<TargetEntry>()
   const [busy, setBusy] = useState<string>()
 
@@ -581,6 +582,9 @@ function TargetsView({
                   <td className="target-actions">
                     <button className="link-btn" onClick={() => setDetail(target)}>View</button>
                     {!target.synthetic && (
+                      <button className="link-btn" onClick={() => setEditing(target)}>Edit</button>
+                    )}
+                    {!target.synthetic && (
                       <button
                         className="link-btn"
                         disabled={busy === target.target_ref}
@@ -638,6 +642,18 @@ function TargetsView({
           onCreated={(created) => {
             onTargetCreated(created)
             setAdding(false)
+          }}
+        />
+      )}
+
+      {editing && (
+        <AddTarget
+          editTarget={editing}
+          onClose={() => setEditing(undefined)}
+          onCreated={() => setEditing(undefined)}
+          onUpdated={(updated) => {
+            onTargetUpdated(updated)
+            setEditing(undefined)
           }}
         />
       )}

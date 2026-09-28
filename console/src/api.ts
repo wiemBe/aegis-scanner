@@ -342,6 +342,19 @@ export async function postJSON<T>(path: string, body: Record<string, unknown>): 
   return response.json() as Promise<T>
 }
 
+export async function putJSON<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: { ...jsonHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(problem.detail ?? `Request failed (${response.status})`)
+  }
+  return response.json() as Promise<T>
+}
+
 export const consoleApi = {
   config: () => getJSON<ConsoleConfig>('/api/console/config'),
   runs: () => getJSON<{ items: Run[]; count: number }>('/api/console/runs?limit=50'),
@@ -357,6 +370,10 @@ export const consoleApi = {
     postJSON<ScopePreview>('/api/console/targets/preview', body as Record<string, unknown>),
   createTarget: (body: TargetCreate) =>
     postJSON<TargetEntry>('/api/console/targets', body as Record<string, unknown>),
+  // Edit an operator-onboarded target's scope in place (synthetic/seeded targets are not editable
+  // and the controller returns 404). Re-validated and re-normalized exactly like creation.
+  updateTarget: (ref: string, body: TargetCreate) =>
+    putJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}`, body as Record<string, unknown>),
   disableTarget: (ref: string) =>
     postJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}/disable`, {}),
   enableTarget: (ref: string) =>

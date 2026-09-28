@@ -55,7 +55,10 @@ services:
       nofile: {soft: 256, hard: 256}
     stop_grace_period: 5s
     expose: ["3128", "3129"]
-    environment: {}
+    environment:
+      # Shared runner<->guard control credential. Supplied from the operator shell / .env; the
+      # guard refuses to boot without it (>=32 bytes). Never given to ZAP or projected anywhere.
+      AEGIS_ZAP_GUARD_CONTROL_SECRET: ${AEGIS_ZAP_GUARD_CONTROL_SECRET:?set AEGIS_ZAP_GUARD_CONTROL_SECRET (>=32 bytes) in .env or the operator shell}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3129/health')"]
       interval: 3s
@@ -86,7 +89,10 @@ services:
       nofile: {soft: 1024, hard: 1024}
     stop_grace_period: 10s
     expose: ["8092"]
-    environment: {}
+    environment:
+      # The runner presents this exact secret to the guard's control port; it must match the
+      # value given to zap-scope-guard. Popped from the environment at boot, never forwarded to ZAP.
+      AEGIS_ZAP_GUARD_CONTROL_SECRET: ${AEGIS_ZAP_GUARD_CONTROL_SECRET:?set AEGIS_ZAP_GUARD_CONTROL_SECRET (>=32 bytes) in .env or the operator shell}
     depends_on:
       zap-scope-guard:
         condition: service_healthy

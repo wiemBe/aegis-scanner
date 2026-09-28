@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -14,9 +15,14 @@ from zap_runner.server import serve
 LISTEN_HOST = "0.0.0.0"  # noqa: S104 - reachable only on the internal zap-rpc network
 LISTEN_PORT = 8092
 GUARD_HOST = "zap-scope-guard"
+# Shared runner<->guard control credential. Popped from the environment at boot (so it is never
+# left for the ZAP child to read) and presented to the guard's control port. When empty — only the
+# in-process legacy fixture whose guard has no secret — the guard admits the read unauthenticated.
+GUARD_CONTROL_ENV = "AEGIS_ZAP_GUARD_CONTROL_SECRET"
 
 
 def main() -> int:
+    guard_control = (os.environ.pop(GUARD_CONTROL_ENV, "") or "").strip()
     manifest = load_manifest(MANIFEST_PATH)
     java = manifest.engine.java.platforms.get(machine_arch())  # type: ignore[call-overload]
     paths = RunnerPaths(
@@ -33,7 +39,7 @@ def main() -> int:
         manifest=manifest,
         manifest_digest=manifest_digest(MANIFEST_PATH),
         paths=paths,
-        guard=GuardClient(paths.guard_control_url),
+        guard=GuardClient(paths.guard_control_url, control_secret=guard_control),
     )
     attest(state)
     sys.stderr.write(

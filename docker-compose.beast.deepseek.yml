@@ -1,0 +1,11 @@
+# Run BEAST's disposable adversary sandbox driven by the DeepSeek gateway instead of local qwen3:8b.
+#
+# The Phase 1.4 BEAST overlay hardcodes BEAST_REQUIRED_MODEL=qwen3:8b (the model it was validated
+# with). This override re-points the required-model gate at the deployment's DeepSeek model so BEAST
+# activates on the same provider as the rest of the stack. The adversary's turn planning therefore
+# goes to the public DeepSeek API (via the gateway → CONNECT proxy); the disposable sandbox itself
+# still holds no model route or credential. Include AFTER docker-compose.beast.yml so this key wins.
+services:
+  control-plane:
+    environment:
+      BEAST_REQUIRED_MODEL: ${BEAST_REQUIRED_MODEL:-deepseek-v4-pro}

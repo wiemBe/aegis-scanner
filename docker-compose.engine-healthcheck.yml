@@ -1,0 +1,19 @@
+# Healthcheck reconciliation overlay.
+#
+# The Nuclei / ZAP / BEAST engine overlays rebind the control plane's Uvicorn to its fixed
+# security-lab address (10.213.47.10) instead of 0.0.0.0, so that a runner sharing an engine RPC
+# network cannot reach a listening control-plane port. The base control-plane /ready healthcheck
+# (added later by WP1) still probes 127.0.0.1:8000, which is no longer a listening address — so the
+# container is marked unhealthy even though the app is serving, and anything that depends_on it
+# (the dashboard) never starts.
+#
+# Re-point the healthcheck at the actual bound address. Include this file LAST, after any engine
+# overlay, whenever the control plane is bound to 10.213.47.10.
+services:
+  control-plane:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://10.213.47.10:8000/ready')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
