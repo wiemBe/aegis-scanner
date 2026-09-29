@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
 
+from aegis_obs.logging import bounded_exception_label
+
 
 class ProcessState(StrEnum):
     STARTING = "STARTING"
@@ -170,9 +172,14 @@ class ProcessLifecycle:
             self._work.pop(task, None)
         # Retrieve failures so a background exception cannot become an unhandled-task warning.
         try:
-            task.exception()
-        except (asyncio.CancelledError, Exception):  # noqa: S110 - task is already isolated
-            pass
+            failure = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - observer path must remain no-raise
+            self._observe_error("BACKGROUND_TASK_INSPECTION_FAILED", exc)
+            return
+        if failure is not None:
+            self._observe_error("BACKGROUND_TASK_FAILED", failure)
 
     async def drain(self) -> DrainResult:
         """Transition to DRAINING once, wait a bounded interval, then stop."""
@@ -211,10 +218,10 @@ class ProcessLifecycle:
                 if tracked is not None and tracked.on_timeout is not None:
                     try:
                         tracked.on_timeout(tracked.work_id)
-                    except Exception:  # noqa: S110 - restart reconciliation is the fallback
+                    except Exception as exc:
                         # Persistence failures remain recoverable via PROCESS_RESTART; never mask
                         # the original shutdown path with a callback or observer exception.
-                        pass
+                        self._observe_error("SHUTDOWN_TIMEOUT_CALLBACK_FAILED", exc)
         else:
             self._observe_event("drain_completed")
 
@@ -257,4 +264,20 @@ class ProcessLifecycle:
             if self._metrics is not None:
                 self._metrics.set_process_state(state.value)
         except Exception:  # noqa: S110 - observer failure is availability-neutral
+            pass
+
+    def _observe_error(self, code: str, exc: BaseException) -> None:
+        """Record a bounded error label without exception text, locals, paths, or work payloads."""
+
+        try:
+            if self._logger is not None:
+                self._logger.log(
+                    service="control-plane",
+                    event="background_error",
+                    level="ERROR",
+                    request_id="-",
+                    code=code,
+                    exception_class=bounded_exception_label(exc),
+                )
+        except Exception:  # noqa: BLE001, S110 - observers never affect lifecycle state
             pass

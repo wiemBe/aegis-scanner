@@ -101,15 +101,22 @@ docker run --rm --network none -v "$PWD:/workspace" -w /workspace \
 Never enable runtime updates, mount a template directory, add a credential/proxy variable or expose
 the runner port. Any engine/template/signature mismatch is a stop condition, not an upgrade prompt.
 
-## Phase 1.4 — BEAST MODE disposable adversary sandbox
+## Phase 1.4 — Disposable assessment toolbox (formerly BEAST MODE)
 
-Prerequisites: Docker/Compose, local Ollama, and the already-approved `qwen3:8b` digest. Never use
-`AI_PROVIDER=demo`, a mock gateway or staging/production for Phase 1.4 acceptance. Generate fresh
-boundary tokens in the shell without printing or persisting them, then combine the base, Ollama and
-Beast overlays:
+The disposable sandbox is no longer a separate operator mode: it is reached from the normal
+assessment flow (`New Assessment` → an operator-facing TOOLBOX profile such as
+`OUTSIDE_IN_WEB_DISCOVERY_V1` or `SQLMAP_AUTHORIZED_WEB_V1`) and its runs appear in the normal Runs
+list. The activation ceremony is unchanged: server preflight, the operator-only typed
+`ASSESS <target name>` confirmation phrase, a single-use lease, and emergency stop. The adversary
+runs on the model the operator selected in the console (gateway allowlist governs selection; there
+is deliberately no fixed required-model gate).
+
+Prerequisites: Docker/Compose and a provider with a real adversary route (local Ollama, DeepSeek or
+OpenRouter). Never use `AI_PROVIDER=demo`, a mock gateway or staging/production for Phase 1.4
+acceptance. The `./start.sh --full-lab` launcher includes the toolbox overlay automatically (use
+`--no-toolbox` to exclude it). To combine overlays by hand:
 
 ```bash
-export AI_MODEL=qwen3:8b
 export BEAST_SUPERVISOR_TOKEN="$(openssl rand -hex 32)"
 export BEAST_BOUNDARY_TOKEN="$(openssl rand -hex 32)"
 docker compose -f docker-compose.yml -f docker-compose.ollama.yml \
@@ -117,9 +124,10 @@ docker compose -f docker-compose.yml -f docker-compose.ollama.yml \
 ```
 
 Confirm `control-plane`, `llm-gateway`, `lab-api`, `beast-target-gateway`, `beast-sandbox` and
-`beast-rpc-relay` are healthy. The sandbox health must report bash, Python, curl, httpie, jq,
-openssl, nmap, ffuf, sqlmap and Nuclei. Do not add a host mount, Docker socket, external network,
-published sandbox port or extra capability.
+`beast-rpc-relay` are healthy. The sandbox health (`GET /api/console/toolbox/health`) must report
+every advertised tool (bash, Python, curl, httpie, jq, openssl, nmap, ffuf, gobuster, sqlmap, Nuclei,
+katana, httpx, akca) READY. Do not add a host mount, Docker socket, external network, published
+sandbox port or extra capability.
 
 Run the full live matrix inside the control-plane container. It performs five vulnerable and five
 patched trials for each of four scenarios and fails rather than substituting commands:
@@ -143,7 +151,7 @@ docker exec ai-security-lab-control-plane-1 python scripts/phase_1_4_boundary_ac
   --output /data/phase-1.4-boundary-acceptance.json
 ```
 
-The red `STOP BEAST MODE` action must be tested during a live command/model run. STOPPED must remain
+The red emergency-stop action must be tested during a live command/model run. STOPPED must remain
 terminal, the workspace must be destroyed, and preflight must reject reactivation until an operator
 POSTs `/api/beast/targets/{target_ref}/restore` and the deterministic health probe succeeds.
 

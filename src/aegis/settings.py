@@ -21,10 +21,29 @@ PROVIDER_MODE_LABELS: dict[str, str] = {
     "openrouter": "PUBLIC_LLM_OPENROUTER",
 }
 
-# The single OpenRouter model this project pins. Defined here (the lightweight settings module) so
-# both the provider and the fail-closed readiness config check share one canonical identifier; the
-# provider re-exports it for backward compatibility.
+# The small, reviewed OpenRouter model catalog. Defined here (the lightweight settings module) so
+# the provider, runtime selector and fail-closed readiness check share one canonical allowlist.
+# Arbitrary model ids and provider URLs are still rejected.
 OPENROUTER_QWEN_MODEL = "qwen/qwen3.8-27b"
+OPENROUTER_DEEPSEEK_FLASH_MODEL = "deepseek/deepseek-v4-flash"
+# The four synchronous GLM 5.3 routes reviewed for live scans. OpenRouter's ``:batch`` routes are
+# intentionally excluded because they are asynchronous and cannot reliably complete inside the
+# live model-call timeout. Aliases, ":free" routes and unlisted ids stay rejected.
+OPENROUTER_GLM_5_3_MODELS = frozenset(
+    {
+        "z-ai/glm-5.3",
+        "z-ai/glm-5.3-flash",
+        "z-ai/glm-5.3-flashx",
+        "z-ai/glm-5.3-prime",
+    }
+)
+OPENROUTER_APPROVED_MODELS = frozenset(
+    {
+        OPENROUTER_QWEN_MODEL,
+        OPENROUTER_DEEPSEEK_FLASH_MODEL,
+        *OPENROUTER_GLM_5_3_MODELS,
+    }
+)
 
 ProviderName = Literal[
     "demo",
@@ -46,6 +65,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "Aegis AI Security Lab"
+    # Safe diagnostic tracing is enabled by default for this operator-run lab. The structured
+    # logger has a closed schema and never records bodies, headers, credentials, target URLs or raw
+    # model output, so increasing step visibility does not widen the data-exposure boundary.
+    debug_logging: bool = True
 
     # --- Provider selection (provider-agnostic control plane) -----------------------------------
     # demo                       -> offline DemoHeuristic planner, no gateway, no egress.
@@ -270,14 +293,15 @@ class Settings(BaseSettings):
             raise RuntimeError("ZAP Active runner client credential unavailable")
         return value.get_secret_value()
 
-    # --- Phase 1.4 disposable AI adversary sandbox (OFF by default) -----------------------------
+    # --- Phase 1.4 disposable assessment toolbox (OFF by default) --------------------------------
     # The controller sends command text as opaque JSON to the supervisor. This shared RPC token is
     # mounted only in those two controller components and is stripped from every shell environment.
+    # The adversary runs on the operator's currently selected gateway model; there is deliberately
+    # no fixed required-model setting anymore (identity is checked per decision at run time).
     beast_enabled: bool = False
     beast_supervisor_url: str = "http://beast-rpc-relay:8094"
     beast_supervisor_token: SecretStr | None = None
     beast_lease_seconds: int = Field(default=600, ge=30, le=900)
-    beast_required_model: str = "qwen3:8b"
 
     def require_zap_active_lease_secret(self) -> str:
         """Return the signing secret, or refuse to operate. Never logged and never returned to an

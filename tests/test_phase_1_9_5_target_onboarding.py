@@ -110,6 +110,22 @@ def test_authorized_internal_private_target_is_allowed() -> None:
     assert scope_preview(request)["authorized_scope"] == ["10.4.1.20"]
 
 
+def test_ip_target_projects_the_network_assessment_profile(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    request = TargetCreate.model_validate(
+        {
+            "target_type": "IP_CIDR",
+            "display_name": "Internal Admin Host",
+            "environment": "INTERNAL",
+            "authorization_reference": "CHG-2001",
+            "authorization_attested": True,
+            "addresses": ["10.4.1.20"],
+        }
+    )
+    record = store.create(request)
+    assert record.projection()["supported_profile_ids"] == ["IP_NETWORK_ASSESSMENT_V1"]
+
+
 def test_duplicate_origin_detection() -> None:
     with pytest.raises(TargetValidationError) as exc:
         scope_preview(_website(origins=["example.company.com", "https://example.company.com"]))
@@ -133,9 +149,7 @@ def test_wildcard_requires_explicit_authorization() -> None:
     with pytest.raises(TargetValidationError) as exc:
         scope_preview(_website(wildcard_subdomains=["*.company.com"]))
     assert exc.value.code == "WILDCARD_REQUIRES_EXPLICIT_AUTHORIZATION"
-    ok = scope_preview(
-        _website(wildcard_subdomains=["*.company.com"], wildcard_authorized=True)
-    )
+    ok = scope_preview(_website(wildcard_subdomains=["*.company.com"], wildcard_authorized=True))
     assert "*.company.com" in ok["authorized_scope"]
 
 
@@ -254,6 +268,54 @@ def test_disabled_target_preserves_record_and_frees_scope(tmp_path: Path) -> Non
     assert store.get(record.id) is not None
 
 
+def test_edit_updates_complete_record_and_rechecks_duplicate_scope(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.create(_website(origins=["https://one.company.com"]))
+    store.create(_website(display_name="Second", origins=["https://two.company.com"]))
+
+    updated = store.update_scope(
+        first.id,
+        _website(
+            target_type="API",
+            display_name="Renamed API",
+            environment="STAGING",
+            owner="platform-security@company.com",
+            origins=["https://api.company.com"],
+            openapi_url="https://api.company.com/openapi.json",
+            credential_reference="vault://api/token",
+            description="Updated description",
+        ),
+        operator_id="editor",
+    )
+    assert updated is not None
+    assert updated.target_type == "API"
+    assert updated.display_name == "Renamed API"
+    assert updated.environment == "STAGING"
+    assert updated.owner == "platform-security@company.com"
+    assert updated.openapi_url == "https://api.company.com/openapi.json"
+    assert updated.credential_reference == "vault://api/token"
+    assert updated.description == "Updated description"
+    assert updated.attested_by == "editor"
+
+    with pytest.raises(TargetValidationError) as exc:
+        store.update_scope(first.id, _website(origins=["https://two.company.com"]))
+    assert exc.value.code == "DUPLICATE_ORIGIN"
+    # A rejected update never changes the persisted record.
+    assert store.get(first.id).origins == ["https://api.company.com"]  # type: ignore[union-attr]
+
+
+def test_delete_removes_only_requested_operator_record(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    first = store.create(_website(origins=["https://one.company.com"]))
+    second = store.create(_website(display_name="Second", origins=["https://two.company.com"]))
+
+    deleted = store.delete(first.id)
+    assert deleted is not None and deleted.id == first.id
+    assert store.get(first.id) is None
+    assert store.get(second.id) is not None
+    assert store.delete(first.id) is None
+
+
 # --- endpoints ------------------------------------------------------------------------------------
 
 
@@ -297,6 +359,53 @@ async def test_create_target_rejects_embedded_credentials_with_bounded_reason(
         )
     assert response.status_code == 422
     assert response.json()["detail"] == "EMBEDDED_CREDENTIALS_FORBIDDEN"
+
+
+async def test_update_and_delete_target_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _use_temp_store(tmp_path, monkeypatch)
+    async with await _client() as client:
+        created = (
+            await client.post("/api/console/targets", json=_website().model_dump(mode="json"))
+        ).json()
+        update = _website(
+            display_name="Renamed Company Site",
+            owner="security@company.com",
+            description="Edited through the console",
+            origins=["https://new.company.com"],
+        )
+        updated_response = await client.put(
+            f"/api/console/targets/{created['target_ref']}",
+            json=update.model_dump(mode="json"),
+        )
+        deleted_response = await client.delete(f"/api/console/targets/{created['target_ref']}")
+        missing_response = await client.delete(f"/api/console/targets/{created['target_ref']}")
+
+    assert updated_response.status_code == 200
+    updated = updated_response.json()
+    assert updated["name"] == "Renamed Company Site"
+    assert updated["owner"] == "security@company.com"
+    assert updated["description"] == "Edited through the console"
+    assert updated["origins"] == ["https://new.company.com"]
+    assert deleted_response.status_code == 204
+    assert deleted_response.content == b""
+    assert store.get(created["target_ref"]) is None
+    assert missing_response.status_code == 404
+
+
+async def test_seeded_target_cannot_be_updated_or_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_temp_store(tmp_path, monkeypatch)
+    async with await _client() as client:
+        updated = await client.put(
+            "/api/console/targets/synthetic-bank-api",
+            json=_website().model_dump(mode="json"),
+        )
+        deleted = await client.delete("/api/console/targets/synthetic-bank-api")
+    assert updated.status_code == 404
+    assert deleted.status_code == 404
 
 
 async def test_onboarded_target_appears_in_new_assessment_selector(
@@ -354,12 +463,45 @@ async def test_assessment_uses_stable_target_id_and_native_path(
             json={
                 "target_id": "synthetic-bank-api",
                 "profile_id": "aegis-native-bola-synthetic",
+                "request_budget": 4,
+                "max_duration_minutes": 1,
             },
         )
     assert response.status_code == 202
     body = response.json()
     assert body["target_id"] == "synthetic-bank-api"
     assert body["run_id"]
+    assert body["request_budget"] == 4
+    assert body["time_budget_ms"] == 60_000
+
+
+async def test_assessment_rejects_limits_above_controller_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_temp_store(tmp_path, monkeypatch)
+    async with await _client() as client:
+        too_many_requests = await client.post(
+            "/api/console/assessments",
+            json={
+                "target_id": "synthetic-bank-api",
+                "profile_id": "aegis-native-bola-synthetic",
+                "request_budget": 9,
+                "max_duration_minutes": 1,
+            },
+        )
+        too_long = await client.post(
+            "/api/console/assessments",
+            json={
+                "target_id": "synthetic-bank-api",
+                "profile_id": "aegis-native-bola-synthetic",
+                "request_budget": 4,
+                "max_duration_minutes": 2,
+            },
+        )
+    assert too_many_requests.status_code == 422
+    assert too_many_requests.json()["detail"] == "REQUEST_BUDGET_EXCEEDS_POLICY"
+    assert too_long.status_code == 422
+    assert too_long.json()["detail"] == "DURATION_EXCEEDS_POLICY"
 
 
 async def test_company_target_engine_profile_is_unavailable_in_default_deployment(

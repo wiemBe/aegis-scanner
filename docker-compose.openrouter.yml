@@ -1,14 +1,13 @@
 # Opt-in OpenRouter/Qwen3.8 27B gateway overlay.
 #
-# Development:
-#   export OPENROUTER_API_KEY_SOURCE="$PWD/.secrets/openrouter-api-key"
+# Development: set OPENROUTER_API_KEY in the untracked .env.gateway file, then run
 #   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build -d
 #
 # Production adds immutable application and proxy images:
 #   docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
 #     -f docker-compose.prod.yml -f docker-compose.openrouter.prod.yml up -d
 #
-# The API key is a read-only file visible only to llm-gateway. The gateway has no target-network
+# The untracked credential env file is loaded only by llm-gateway. The gateway has no target-network
 # access and can reach the public network only through Squid; Squid permits CONNECT solely to
 # openrouter.ai:443 and cannot decrypt the request or see its Authorization header.
 
@@ -16,8 +15,14 @@ services:
   control-plane:
     environment:
       AI_PROVIDER: openrouter
+      DEBUG_LOGGING: ${AEGIS_DEBUG_LOGGING:-true}
+      # Non-secret provider metadata used only by the fail-closed readiness check. The control
+      # plane still sends model traffic through LLM_GATEWAY_URL and never receives the API key.
+      AI_BASE_URL: https://openrouter.ai
       AI_MODEL: qwen/qwen3.8-27b
-      AI_ALLOWED_MODELS: qwen/qwen3.8-27b
+      # Must equal OPENROUTER_APPROVED_MODELS exactly — the readiness check and the provider both
+      # fail closed on any other set. Full GLM 5.3 family (base, Flash, FlashX, Prime + batch).
+      AI_ALLOWED_MODELS: "qwen/qwen3.8-27b,deepseek/deepseek-v4-flash,z-ai/glm-5.3,z-ai/glm-5.3-flash,z-ai/glm-5.3-flashx,z-ai/glm-5.3-prime"
       LLM_GATEWAY_URL: http://llm-gateway:8080
       EXTENSION_MANIFEST_PATH: /etc/aegis/extensions/manifest.json
     volumes:
@@ -34,12 +39,17 @@ services:
     command: >-
       uvicorn aegis.gateway:app --host 0.0.0.0 --port 8080 --no-access-log
       --timeout-graceful-shutdown 12
+    env_file:
+      - path: .env.gateway
+        required: false
     environment:
       AI_PROVIDER: openrouter
+      DEBUG_LOGGING: ${AEGIS_DEBUG_LOGGING:-true}
       AI_BASE_URL: https://openrouter.ai
       AI_MODEL: qwen/qwen3.8-27b
-      AI_ALLOWED_MODELS: qwen/qwen3.8-27b
-      OPENROUTER_API_KEY_FILE: /run/secrets/openrouter-api-key
+      # Must equal OPENROUTER_APPROVED_MODELS exactly — the readiness check and the provider both
+      # fail closed on any other set. Full GLM 5.3 family (base, Flash, FlashX, Prime + batch).
+      AI_ALLOWED_MODELS: "qwen/qwen3.8-27b,deepseek/deepseek-v4-flash,z-ai/glm-5.3,z-ai/glm-5.3-flash,z-ai/glm-5.3-flashx,z-ai/glm-5.3-prime"
       AI_RESPONSE_FORMAT: json_schema
       AI_SUPPORTS_SEED: "false"
       AI_USE_EGRESS_PROXY: "true"
@@ -50,7 +60,6 @@ services:
       MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-131072}"
       MAX_TOKENS_PER_SCAN: "${MAX_TOKENS_PER_SCAN:-80000}"
     volumes:
-      - "${OPENROUTER_API_KEY_SOURCE:?set OPENROUTER_API_KEY_SOURCE to an absolute key-file path}:/run/secrets/openrouter-api-key:ro,Z"
       - "${AEGIS_EXTENSION_MANIFEST_SOURCE:-./deploy/extensions/manifest.json}:/etc/aegis/extensions/manifest.json:ro,z"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]

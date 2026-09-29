@@ -53,6 +53,7 @@ from aegis.container_acceptance.docker_cli import (
     count_by_label,
     docker,
     image_id,
+    isolated_subnet,
     name_present,
 )
 from aegis.multi_agent.adversary_simulation import AdvAgentJob
@@ -433,7 +434,8 @@ class ContainerOpsRange:
         self._network = f"aegis-p29-{run_id}"
         self._container = f"aegis-p29-ops-{run_id}"
         created = docker(
-            "network", "create", "--internal", "--label", self.label, self._network, timeout=30
+            "network", "create", "--internal", "--subnet",
+            isolated_subnet(self.label, "phase29"), "--label", self.label, self._network, timeout=30
         )
         if created.returncode != 0:
             raise ContainerRangeError(f"NETWORK_CREATE_FAILED:{created.stderr.strip()[:120]}")

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from aegis.container_acceptance.contracts import CleanupProof, ContainerAcceptanceError
-from aegis.container_acceptance.docker_cli import count_by_label, docker
+from aegis.container_acceptance.docker_cli import count_by_label, docker, isolated_subnet
 from aegis.container_acceptance.images import require_pinned
 
 SHOP_ALIAS = "aegis-shop"
@@ -55,7 +55,8 @@ class InternalRange:
         self._network = f"aegis-p28-{run_id}"
         self._shop = f"aegis-p28-shop-{run_id}"
         created = docker(
-            "network", "create", "--internal", "--label", self.label, self._network, timeout=30
+            "network", "create", "--internal", "--subnet",
+            isolated_subnet(self.label, "phase28"), "--label", self.label, self._network, timeout=30
         )
         if created.returncode != 0:
             raise ContainerAcceptanceError(f"NETWORK_CREATE_FAILED:{created.stderr.strip()[:120]}")

@@ -256,6 +256,27 @@ async def test_lifecycle_observability_is_fixed_label_and_secret_free() -> None:
     assert SECRET_SENTINEL not in rendered
 
 
+async def test_background_task_failure_is_logged_without_exception_message() -> None:
+    output = io.StringIO()
+    lifecycle = ProcessLifecycle(
+        grace_seconds=0.1,
+        logger=StructuredLogger(stream=output),
+    )
+    lifecycle.mark_serving()
+
+    async def failed_work() -> None:
+        raise RuntimeError(SECRET_SENTINEL)
+
+    lifecycle.submit(work_id=SECRET_SENTINEL, work_factory=failed_work)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)  # let the task's done callback emit the diagnostic record
+    observed = output.getvalue()
+    assert '"event":"background_error"' in observed
+    assert '"code":"BACKGROUND_TASK_FAILED"' in observed
+    assert '"exception_class":"RuntimeError"' in observed
+    assert SECRET_SENTINEL not in observed
+
+
 def test_compose_shutdown_bounds_align_and_hardening_remains() -> None:
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     control = compose["services"]["control-plane"]

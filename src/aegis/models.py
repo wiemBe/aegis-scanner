@@ -660,6 +660,10 @@ class ScanResult(BaseModel):
     retest_objectives: list[RetestObjective] = Field(default_factory=list)
     decisions: list[PlannerDecision] = Field(default_factory=list)
     usage: BudgetUsage = Field(default_factory=BudgetUsage)
+    # Optional operator-selected ceilings. They can only narrow deployment/capability policy and
+    # are persisted with the run so restart/reconciliation never silently restores larger limits.
+    request_budget: int | None = Field(default=None, ge=1, le=100_000)
+    time_budget_ms: int | None = Field(default=None, ge=1_000, le=86_400_000)
     verification: Verification | None = None
     stop_reason: str | None = None
     planner_contract_version: int = PLANNER_CONTRACT_VERSION
@@ -715,3 +719,5 @@ class ScanCreate(StrictModel):
     # the controller resolves it (unknown references are rejected before any engine traffic).
     capability: str | None = Field(default=None, pattern=r"^[a-z0-9_]{3,100}$")
     target_ref: str | None = Field(default=None, pattern=r"^[a-z0-9-]{3,64}$")
+    request_budget: int | None = Field(default=None, ge=1, le=100_000)
+    time_budget_ms: int | None = Field(default=None, ge=1_000, le=86_400_000)

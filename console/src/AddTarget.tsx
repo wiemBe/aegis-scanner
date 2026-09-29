@@ -7,7 +7,7 @@ type Props = {
   onClose: () => void
   onCreated: (target: TargetEntry) => void
   // When present the form edits an existing operator-onboarded target in place (PUT) instead of
-  // creating a new one. Synthetic/seeded targets are not editable and are never passed here.
+  // creating a new one. Catalog-seeded targets are immutable and are never passed here.
   editTarget?: TargetEntry
   onUpdated?: (target: TargetEntry) => void
 }
@@ -50,10 +50,11 @@ function reason(code: string): string {
 
 export function AddTarget({ onClose, onCreated, editTarget, onUpdated }: Props) {
   const editing = Boolean(editTarget)
-  // Prefill from the existing record's redacted projection. The authorized scope is re-entered as
-  // origins/addresses; owner is not projected, and the authorization attestation is always re-taken.
+  // Prefill from the existing record's safe structured projection. Authorization attestation is
+  // deliberately re-taken for every scope change.
   const isNetworkEdit = editTarget?.target_type === 'IP_CIDR'
-  const scopeText = editTarget?.authorized_scope.join('\n') ?? ''
+  const originText = (editTarget?.origins ?? editTarget?.authorized_scope.filter((scope) => !scope.startsWith('*.')) ?? []).join('\n')
+  const addressText = (editTarget?.addresses ?? (isNetworkEdit ? editTarget?.authorized_scope : []) ?? []).join('\n')
 
   const [targetType, setTargetType] = useState<TargetType>(editTarget?.target_type ?? 'WEBSITE')
   const [displayName, setDisplayName] = useState(editTarget?.name ?? '')
@@ -62,20 +63,20 @@ export function AddTarget({ onClose, onCreated, editTarget, onUpdated }: Props) 
       ? (editTarget!.environment as (typeof ENVIRONMENTS)[number])
       : 'PRODUCTION',
   )
-  const [owner, setOwner] = useState('')
+  const [owner, setOwner] = useState(editTarget?.owner ?? '')
   const [authRef, setAuthRef] = useState(editTarget?.authorization_reference ?? '')
   const [description, setDescription] = useState(editTarget?.description ?? '')
   const [attested, setAttested] = useState(false)
 
-  const [origins, setOrigins] = useState(isNetworkEdit ? '' : scopeText)
-  const [wildcards, setWildcards] = useState('')
-  const [wildcardAuthorized, setWildcardAuthorized] = useState(false)
-  const [openapiUrl, setOpenapiUrl] = useState('')
+  const [origins, setOrigins] = useState(isNetworkEdit ? '' : originText)
+  const [wildcards, setWildcards] = useState((editTarget?.wildcard_subdomains ?? []).map((domain) => `*.${domain}`).join('\n'))
+  const [wildcardAuthorized, setWildcardAuthorized] = useState(Boolean(editTarget?.wildcard_subdomains?.length))
+  const [openapiUrl, setOpenapiUrl] = useState(editTarget?.openapi_url ?? '')
   const [credentialReference, setCredentialReference] = useState(editTarget?.credential_reference ?? '')
   const [allowedPaths, setAllowedPaths] = useState(editTarget?.allowed_path_prefixes.join('\n') ?? '')
   const [excludedPaths, setExcludedPaths] = useState(editTarget?.excluded_path_prefixes.join('\n') ?? '')
-  const [addresses, setAddresses] = useState(isNetworkEdit ? scopeText : '')
-  const [cidrAuthorized, setCidrAuthorized] = useState(false)
+  const [addresses, setAddresses] = useState(isNetworkEdit ? addressText : '')
+  const [cidrAuthorized, setCidrAuthorized] = useState(Boolean(editTarget?.addresses?.some((address) => address.includes('/'))))
 
   const [preview, setPreview] = useState<ScopePreview>()
   const [error, setError] = useState<string>()

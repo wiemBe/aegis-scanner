@@ -1,5 +1,47 @@
 # Canonical project state
 
+Assessment console redesign (2026-09-29): the New Assessment flow is now a scanner-style
+three-step wizard — authorized target → categorized scan-template gallery (Discovery /
+Vulnerabilities / Web applications) → one configure & launch workspace with Settings / Credentials /
+Checks / Advanced tabs and a run-plan sidebar. The gallery offers a `Complete Assessment`
+multi-scan card that runs every compatible template sequentially against one authorized target:
+`ToolboxCampaign` for all-TOOLBOX targets (one profile-bound lease per scan, typed
+`ASSESS <target name>` phrase, sequential scan queue with emergency stop) and `StandardCampaign`
+for mixed/native targets. Two new operator-facing TOOLBOX profiles
+(`TOOLBOX_INFORMATION_EXPOSURE_V1`, `TOOLBOX_BOLA_READONLY_V1`) were added to the console catalog
+and bound in `TOOLBOX_PROFILE_SCENARIOS` (the frontend keeps an identical map); the embedded
+toolbox step still fails closed on `OPERATOR_PROFILE_NOT_TOOLBOX_BOUND` /
+`SCENARIO_NOT_AUTHORIZED_BY_LEASE`. The console gained AI model catalog/balance/select/test
+endpoints (`/api/console/ai/*`), target deletion (`DELETE /api/console/targets/{id}`) and a compact
+collapsible toolbox-health panel. Offline gates: ruff + strict mypy (202 files) clean, full pytest
+1993 passed with only the three pre-existing environmental `test_phase_2_8_sqlmap_proxy.py`
+failures, frontend tsc/eslint/vitest 21/21 plus a production rebuild served from
+`src/aegis/console`. The wizard was manually exercised end-to-end against a local fixture server:
+target → templates → configure tabs, the embedded profile-bound toolbox step, and the
+`Complete Assessment` campaign finishing 4/4 sequential scans VERIFIED.
+
+Toolbox transfer completion (2026-09-29): the disposable sandbox is no longer a separate operator
+mode. It is reached from the normal assessment wizard (operator-facing TOOLBOX profiles
+`OUTSIDE_IN_WEB_DISCOVERY_V1` / `SQLMAP_AUTHORIZED_WEB_V1`), a wizard-issued lease is bound
+server-side to exactly that profile's scenario (`TOOLBOX_PROFILE_SCENARIOS`;
+`OPERATOR_PROFILE_NOT_TOOLBOX_BOUND` / `SCENARIO_NOT_AUTHORIZED_BY_LEASE` fail closed), and
+completed toolbox runs are projected into the normal Runs list/detail (`/api/console/runs`,
+`/api/console/runs/{id}` toolbox branch) without fabricating scan-store findings — the verifier
+conclusion stays in the toolbox record and its own hash-chained audit stream. The plain
+`POST /api/console/assessments` refuses TOOLBOX profiles with `TOOLBOX_PROFILE_STARTS_FROM_TOOLBOX_STEP`.
+The fixed `qwen3:8b` required-model gate is fully removed (setting, compose key and the obsolete
+`docker-compose.beast.deepseek.yml` overlay); the adversary runs on the operator-selected model
+(allowlist-governed, per-decision identity check). The controller's supported-provider set now
+matches the gateway's adversary routes exactly (ollama/deepseek/openrouter; the internal
+OpenAI-compatible profile is rejected at preflight instead of failing on its first decision). The
+dead `beast` key was dropped from `/api/console/config` (TOOLBOX now appears in
+`operational_engines` when enabled) and `scripts/phase_1_4_acceptance.py` uses the current
+`ASSESS …` phrase. Offline gates: ruff + strict mypy clean, full pytest suite green except the
+three pre-existing `test_phase_2_8_sqlmap_proxy.py` failures (Python 3.14 localhost proxy bypass in
+the host venv, reproduced byte-identical on HEAD without this working set; canonical Python is
+3.12); frontend tsc/eslint/vitest 20/20 (new embedded profile-bound lease test) + production build.
+Live in-sandbox behaviour remains NOT_EVALUATED and needs the Phase 1.4 live matrix re-run.
+
 Production deployment update (2026-09-26): the repository now contains the immutable,
 company-private provider/gateway overlay, gateway-only credential-file handling, a fail-closed
 rendered-Compose preflight, and a read-only staging soak/failure observer. Code/config status is

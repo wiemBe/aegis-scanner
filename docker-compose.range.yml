@@ -235,31 +235,46 @@ services:
 networks:
   range-access:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.0/28}]}
   range-control:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.16/28}]}
   bank-backend:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.32/28}]}
   bank-management:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.48/28}]}
   shop-backend:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.64/28}]}
   shop-management:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.80/28}]}
   ops-backend:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.96/28}]}
   ops-management:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.112/28}]}
   cloud-backend:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.128/28}]}
   cloud-management:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.144/28}]}
   cloud-fixtures:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.160/28}]}
   cloud-internal:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.176/28}]}
   shop-viewer:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.192/28}]}
   shop-browser-control:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.208/28}]}
   ops-worker-control:
     internal: true
+    ipam: {config: [{subnet: 10.215.0.224/28}]}

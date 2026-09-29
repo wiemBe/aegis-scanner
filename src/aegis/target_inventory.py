@@ -45,9 +45,7 @@ Environment = Literal["PRODUCTION", "STAGING", "DEVELOPMENT", "INTERNAL", "SYNTH
 # DRAFT -> VALIDATED -> AUTHORIZED -> AVAILABLE_FOR_ASSESSMENT -> DISABLED. For the single-operator
 # deployment an explicit attestation + authorization reference advances a created target straight to
 # AVAILABLE_FOR_ASSESSMENT; DISABLED preserves the record and its audit history.
-LifecycleState = Literal[
-    "DRAFT", "VALIDATED", "AUTHORIZED", "AVAILABLE_FOR_ASSESSMENT", "DISABLED"
-]
+LifecycleState = Literal["DRAFT", "VALIDATED", "AUTHORIZED", "AVAILABLE_FOR_ASSESSMENT", "DISABLED"]
 
 _ENV_DEFAULT_PORTS = {"http": 80, "https": 443}
 # Cloud metadata / link-local space stays unavailable to ordinary onboarding; only an authorized
@@ -144,6 +142,7 @@ class TargetRecord(BaseModel):
             "type": _TYPE_LABEL[self.target_type],
             "target_type": self.target_type,
             "environment": self.environment,
+            "owner": self.owner,
             "description": self.description or "",
             "origin_source": "OPERATOR_ONBOARDED",
             "synthetic": self.target_type == "SYNTHETIC",
@@ -151,8 +150,15 @@ class TargetRecord(BaseModel):
             "enabled": self.enabled,
             "authorization_reference": self.authorization_reference,
             "authorized_scope": self.authorized_scope(),
+            # Structured scope fields are projected so an operator can edit the record without
+            # trying to reverse the flattened authorized_scope display value. They contain no
+            # credentials or scanner arguments and remain controller-normalized.
+            "origins": self.origins,
+            "addresses": self.addresses,
+            "wildcard_subdomains": self.wildcard_subdomains,
             "allowed_path_prefixes": self.allowed_path_prefixes,
             "excluded_path_prefixes": self.excluded_path_prefixes,
+            "openapi_url": self.openapi_url,
             "credential_reference": self.credential_reference,
             "last_assessment_at": self.last_assessment_at,
             "supported_profile_ids": supported,
@@ -171,9 +177,15 @@ _TYPE_LABEL: dict[TargetType, str] = {
 # unavailable adapter shows the profile disabled with a reason rather than running anything.
 _SUPPORTED_PROFILES: dict[TargetType, list[str]] = {
     "SYNTHETIC": ["aegis-native-bola-synthetic"],
-    "WEBSITE": ["ZAP_LAB_PASSIVE_OPENAPI_V1", "NUCLEI_LAB_SAFE_HTTP_V1"],
-    "API": ["ZAP_LAB_PASSIVE_OPENAPI_V1", "NUCLEI_LAB_SAFE_HTTP_V1"],
-    "IP_CIDR": [],
+    "WEBSITE": [
+        "ZAP_LAB_PASSIVE_OPENAPI_V1",
+        "NUCLEI_LAB_SAFE_HTTP_V1",
+    ],
+    "API": [
+        "ZAP_LAB_PASSIVE_OPENAPI_V1",
+        "NUCLEI_LAB_SAFE_HTTP_V1",
+    ],
+    "IP_CIDR": ["IP_NETWORK_ASSESSMENT_V1"],
 }
 
 
@@ -444,12 +456,16 @@ class TargetInventoryStore:
             )
         return record
 
-    def _reject_duplicate_scope(self, record: TargetRecord) -> None:
+    def _reject_duplicate_scope(
+        self, record: TargetRecord, *, exclude_target_id: str | None = None
+    ) -> None:
         new_scope = set(record.origins) | set(record.addresses)
         for existing in self.list():
-            if existing.enabled and (
-                set(existing.origins) | set(existing.addresses)
-            ) & new_scope:
+            if (
+                existing.id != exclude_target_id
+                and existing.enabled
+                and (set(existing.origins) | set(existing.addresses)) & new_scope
+            ):
                 raise TargetValidationError("DUPLICATE_ORIGIN")
 
     def list(self) -> list[TargetRecord]:
@@ -483,11 +499,18 @@ class TargetInventoryStore:
         record.status = "AVAILABLE_FOR_ASSESSMENT" if enabled else "DISABLED"
         return self._save(record)
 
-    def update_scope(self, target_id: str, request: TargetCreate) -> TargetRecord | None:
+    def update_scope(
+        self,
+        target_id: str,
+        request: TargetCreate,
+        *,
+        operator_id: str | None = None,
+    ) -> TargetRecord | None:
         record = self.get(target_id)
         if record is None:
             return None
         normalized = validate_and_normalize(request)
+        record.target_type = request.target_type
         record.origins = normalized["origins"]
         record.addresses = normalized["addresses"]
         record.wildcard_subdomains = normalized["wildcard_subdomains"]
@@ -496,8 +519,27 @@ class TargetInventoryStore:
         record.openapi_url = normalized["openapi_url"]
         record.display_name = request.display_name.strip()
         record.environment = request.environment
+        record.owner = request.owner or None
         record.authorization_reference = request.authorization_reference.strip()
+        record.attested_by = operator_id or record.attested_by
+        record.description = request.description or None
+        record.credential_reference = request.credential_reference or None
+        self._reject_duplicate_scope(record, exclude_target_id=target_id)
         return self._save(record)
+
+    def delete(self, target_id: str) -> TargetRecord | None:
+        """Remove one operator-owned inventory record and return its final projection source.
+
+        Seeded catalog targets never live in this store, so they cannot be deleted through this
+        path. Assessment history and evidence use their own append-only stores and are untouched.
+        """
+
+        record = self.get(target_id)
+        if record is None:
+            return None
+        with self._connect() as connection:
+            connection.execute("DELETE FROM operator_targets WHERE id = ?", (target_id,))
+        return record
 
     def mark_assessed(self, target_id: str) -> None:
         record = self.get(target_id)

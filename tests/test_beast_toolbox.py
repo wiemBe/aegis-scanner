@@ -88,6 +88,12 @@ def test_new_tools_are_copied_into_the_image() -> None:
     assert "COPY --from=nuclei /out/nuclei /usr/local/bin/nuclei" in _DOCKERFILE
 
 
+def test_projectdiscovery_httpx_is_not_shadowed_by_the_python_httpx_cli() -> None:
+    pip_install = _DOCKERFILE.index("RUN pip install --no-cache-dir .")
+    pinned_copy = _DOCKERFILE.index("COPY --from=webtools /out/httpx /usr/local/bin/httpx")
+    assert pinned_copy > pip_install
+
+
 def test_every_advertised_tool_is_actually_installed() -> None:
     apt = _apt_packages()
     lock = set(_LOCK["tools"])
@@ -143,7 +149,7 @@ def test_render_brief_lists_tools_and_the_boundary_note() -> None:
     brief = render_decision_brief(_request(sandbox_toolbox()))
     assert "Installed sandbox tools" in brief
     assert "advisory" in brief
-    for name in ("akca", "katana", "httpx", "nuclei"):
+    for name in ("akca", "katana", "httpx", "nuclei", "ffuf", "gobuster", "sqlmap"):
         assert f"- {name} (" in brief
     assert SANDBOX_TOOLBOX_BOUNDARY_NOTE in brief
 
@@ -159,6 +165,14 @@ def test_sandbox_toolbox_returns_independent_copies() -> None:
     first = sandbox_toolbox()
     first[0].purpose = "mutated"
     assert sandbox_toolbox()[0].purpose != "mutated"
+
+
+def test_beast_config_projects_the_complete_toolbox(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "config.db"))
+    store = BeastStore(settings.database_path)
+    store.initialize()
+    config = BeastController(settings, store).config()
+    assert {tool["name"] for tool in config["tools"]} == {tool.name for tool in SANDBOX_TOOLBOX}
 
 
 # --------------------------------------------------------------------------------------------------
@@ -237,6 +251,20 @@ def _gateway() -> FastAPI:
 def _sandbox() -> FastAPI:
     app = FastAPI()
 
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "tool_checks": {
+                tool.name: {
+                    "status": "READY",
+                    "executable": tool.name,
+                    "detail": f"{tool.name} test-version",
+                }
+                for tool in SANDBOX_TOOLBOX
+            },
+        }
+
     def authorized(token: str | None) -> None:
         if token != "test-supervisor-token":  # noqa: S105 - synthetic test token
             raise HTTPException(status_code=403)
@@ -314,12 +342,10 @@ async def test_controller_transmits_the_toolbox_without_widening_scope(tmp_path:
             actor_type="OPERATOR",
             target_ref="beast-synthetic-vulnerable",
             profile_id=BEAST_PROFILE_ID,
-            confirmation="BEAST Disposable Synthetic Bank Adversary Target",
+            confirmation="ASSESS Disposable Synthetic Bank Adversary Target",
         )
     )
-    run = beast.create_run(
-        BeastRunRequest(lease_id=lease.lease_id, scenario_id="bola_readonly")
-    )
+    run = beast.create_run(BeastRunRequest(lease_id=lease.lease_id, scenario_id="bola_readonly"))
     await beast.run(run.run_id)
 
     assert capturing.decide_envelopes, "controller never called the gateway decide route"
@@ -330,3 +356,26 @@ async def test_controller_transmits_the_toolbox_without_widening_scope(tmp_path:
     # The toolbox does not add authority: the run still completes under the verifier.
     complete = beast.store.get_run(run.run_id)
     assert complete is not None and complete.state == "VERIFIED"
+
+
+async def test_toolbox_health_requires_successful_runtime_execution_probes(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "health.db"),
+        ai_provider="ollama",
+        ai_model="qwen3:8b",
+        beast_enabled=True,
+        beast_supervisor_token="test-supervisor-token",  # noqa: S106 - synthetic test token
+    )
+    store = BeastStore(settings.database_path)
+    store.initialize()
+    beast = BeastController(
+        settings,
+        store,
+        sandbox_transport=httpx.ASGITransport(app=_sandbox()),
+    )
+
+    health = await beast.toolbox_health()
+
+    assert health["state"] == "READY"
+    assert health["ready"] == health["total"] == len(SANDBOX_TOOLBOX)
+    assert {tool["status"] for tool in health["tools"]} == {"READY"}

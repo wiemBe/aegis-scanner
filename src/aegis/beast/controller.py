@@ -12,6 +12,7 @@ import httpx
 from aegis.beast.contracts import (
     BEAST_MAX_LEASE_SECONDS,
     BEAST_PROFILE_ID,
+    TOOLBOX_PROFILE_SCENARIOS,
     BeastCommandDecision,
     BeastDecisionRequest,
     BeastDecisionResponse,
@@ -57,6 +58,42 @@ _OBJECTIVES = {
         "Compare a benign control with a bounded non-destructive probe."
     ),
 }
+# The disposable execution boundary is provider-independent: the model only proposes typed command
+# text through the credential-free gateway, while the controller/sandbox still own scope, budgets,
+# execution and verification. The adversary always runs on the operator's currently selected
+# gateway model (the gateway's reviewed allowlist governs what can be selected), and each decision
+# is identity-checked against that selection at run time. Only providers with a real adversary
+# decide route are admitted: Ollama, DeepSeek and OpenRouter. The internal OpenAI-compatible
+# profile has no adversary route (the gateway rejects it with BEAST_REQUIRES_SUPPORTED_PROVIDER),
+# so admitting it here would let a run pass preflight and fail on its first decision call.
+_SUPPORTED_BEAST_PROVIDERS = frozenset({"ollama", "deepseek", "openrouter"})
+# Ollama reports a local content digest and reproducible seed; hosted public-egress models can only
+# record the reported model id, request parameters, token counts and timings. Provenance is verified
+# against the field set the provider family can actually attest — never invented for the other.
+_OLLAMA_PROVENANCE_FIELDS = frozenset(
+    {
+        "provider_type",
+        "runtime_version",
+        "model_digest",
+        "context_length",
+        "temperature",
+        "seed",
+        "prompt_eval_count",
+        "eval_count",
+        "total_duration_ms",
+    }
+)
+_HOSTED_PROVENANCE_FIELDS = frozenset(
+    {
+        "provider_type",
+        "runtime",
+        "model",
+        "temperature",
+        "seed",
+        "prompt_eval_count",
+        "eval_count",
+    }
+)
 _PUBLIC_ACCOUNTS = [
     {
         "profile": "public_user_a",
@@ -119,10 +156,11 @@ class BeastController:
     def _eligible(self, selected: Any) -> None:
         if not self.settings.beast_enabled:
             raise BeastRejected("BEAST_MODE_DISABLED")
-        if self.settings.mode_label != "LOCAL_LLM":
-            raise BeastRejected("BEAST_REQUIRES_LOCAL_LLM")
-        if self.settings.ai_model != self.settings.beast_required_model:
-            raise BeastRejected("BEAST_REQUIRES_EXACT_APPROVED_MODEL")
+        if self.settings.ai_provider not in _SUPPORTED_BEAST_PROVIDERS:
+            raise BeastRejected("BEAST_REQUIRES_SUPPORTED_PROVIDER")
+        # The adversary runs on the model the operator currently selected in the console — the
+        # gateway's reviewed allowlist governs what can be selected, and each decision response is
+        # identity-checked against that selection in the run loop (MODEL_IDENTITY_MISMATCH).
         if selected.origin != "http://beast-target:8080":
             raise BeastRejected("TARGET_ORIGIN_NOT_IN_IMMUTABLE_NETWORK_SCOPE")
         if (
@@ -151,13 +189,17 @@ class BeastController:
         self.store.audit(request_id, "BEAST_PREFLIGHT_STARTED", "CONTROLLER")
         try:
             preflight = self.preflight(request.target_ref)
-            expected = f"BEAST {preflight.target.name}"
+            expected = f"ASSESS {preflight.target.name}"
             if request.actor_type != "OPERATOR":
                 raise BeastRejected("MODEL_CANNOT_ACTIVATE_BEAST_MODE")
             if request.profile_id != BEAST_PROFILE_ID:
                 raise BeastRejected("PROFILE_MISMATCH")
             if request.confirmation != expected:
                 raise BeastRejected("ACTIVATION_PHRASE_MISMATCH")
+            if request.operator_profile_id is not None and (
+                request.operator_profile_id not in TOOLBOX_PROFILE_SCENARIOS
+            ):
+                raise BeastRejected("OPERATOR_PROFILE_NOT_TOOLBOX_BOUND")
             if request.requested_resources is not None:
                 baseline = self.resources.model_dump()
                 requested = request.requested_resources.model_dump()
@@ -172,12 +214,20 @@ class BeastController:
             )
             raise BeastRejected(str(exc)) from None
         now = datetime.now(UTC)
+        # A lease issued under an operator-facing TOOLBOX profile authorizes exactly that
+        # profile's bound scenario — create_run then rejects every other scenario server-side.
+        capability_set = (
+            [TOOLBOX_PROFILE_SCENARIOS[request.operator_profile_id]]
+            if request.operator_profile_id is not None
+            else list(_OBJECTIVES)
+        )
         lease = BeastLease(
             lease_id=f"beast-lease-{uuid4().hex[:16]}",
             operator_id=request.operator_id,
             target_ref=request.target_ref,
             profile_id=request.profile_id,
-            capability_set=list(_OBJECTIVES),
+            operator_profile_id=request.operator_profile_id,
+            capability_set=capability_set,
             resources=request.requested_resources or self.resources,
             state=LeaseState.ACTIVE,
             issued_at=now,
@@ -201,6 +251,7 @@ class BeastController:
             {
                 "target_ref": lease.target_ref,
                 "profile_id": lease.profile_id,
+                "operator_profile_id": lease.operator_profile_id,
                 "expires_at": lease.expires_at.isoformat(),
                 "single_run": True,
             },
@@ -217,6 +268,8 @@ class BeastController:
                 self.store.save_lease(lease)
                 self.store.audit(lease.lease_id, "BEAST_LEASE_EXPIRED", "CONTROLLER")
             raise BeastRejected("LEASE_NOT_ACTIVE")
+        # A profile-bound lease authorizes exactly one scenario; the generic sandbox lease keeps
+        # the full objective set. Both paths fail closed on anything the lease did not authorize.
         if request.scenario_id not in lease.capability_set:
             raise BeastRejected("SCENARIO_NOT_AUTHORIZED_BY_LEASE")
         if self.store.active_runs():
@@ -232,6 +285,7 @@ class BeastController:
             scenario_id=request.scenario_id,
             state=RunState.QUEUED,
             model=self.settings.ai_model,
+            operator_profile_id=lease.operator_profile_id,
             resources=lease.resources,
             created_at=datetime.now(UTC),
             lease_expires_at=lease.expires_at,
@@ -248,6 +302,7 @@ class BeastController:
                 "lease_id": lease.lease_id,
                 "target_ref": lease.target_ref,
                 "scenario_id": request.scenario_id,
+                "operator_profile_id": lease.operator_profile_id,
             },
         )
         return run
@@ -356,9 +411,7 @@ class BeastController:
                     objective_evidence_sufficient=evidence_sufficient(
                         run.scenario_id, run.observations
                     ),
-                    decision_requirements=decision_requirements(
-                        run.scenario_id, run.observations
-                    ),
+                    decision_requirements=decision_requirements(run.scenario_id, run.observations),
                     observations=run.observations,
                     available_tools=sandbox_toolbox(),
                 )
@@ -375,23 +428,21 @@ class BeastController:
                     current_lease and current_lease.state is LeaseState.REVOKED
                 ):
                     raise BeastRejected("EMERGENCY_STOP")
-                if model_result.model != self.settings.beast_required_model:
+                if model_result.model != self.settings.ai_model:
                     raise BeastRejected("MODEL_IDENTITY_MISMATCH")
-                required_metadata = {
-                    "provider_type",
-                    "runtime_version",
-                    "model_digest",
-                    "context_length",
-                    "temperature",
-                    "seed",
-                    "prompt_eval_count",
-                    "eval_count",
-                    "total_duration_ms",
-                }
-                if (
-                    not required_metadata <= model_result.metadata.keys()
-                    or model_result.metadata.get("provider_type") != "ollama"
-                ):
+                # Provenance is verified per provider family. Local Ollama attests a content
+                # digest, runtime version, context length and a reproducible seed; hosted
+                # public-egress models (DeepSeek / OpenRouter) attest the reported model id,
+                # request parameters, token counts and timings — a digest simply does not exist
+                # upstream, so none is claimed.
+                provider_type = str(model_result.metadata.get("provider_type", ""))
+                if provider_type == "ollama":
+                    provenance_complete = _OLLAMA_PROVENANCE_FIELDS <= model_result.metadata.keys()
+                elif provider_type in {"deepseek", "openrouter"}:
+                    provenance_complete = _HOSTED_PROVENANCE_FIELDS <= model_result.metadata.keys()
+                else:
+                    provenance_complete = False
+                if not provenance_complete:
                     raise BeastRejected("LIVE_MODEL_PROVENANCE_INCOMPLETE")
                 model_call = {
                     "sequence": sequence,
@@ -697,16 +748,87 @@ class BeastController:
         return {"target_ref": target_ref, "health": "GREEN", "reactivation_blocked": False}
 
     def config(self) -> dict[str, Any]:
+        tools = sandbox_toolbox()
         return {
             "enabled": self.settings.beast_enabled,
             "mode": BeastMode.SAFE_PASSIVE,
             "available_mode": BeastMode.BEAST_ACTIVE if self.settings.beast_enabled else None,
             "profile_id": BEAST_PROFILE_ID,
-            "required_model": self.settings.beast_required_model,
+            # The adversary runs on the model the operator currently selected in the console; the
+            # gateway's reviewed allowlist governs what can be selected. This is therefore the
+            # live selection, not a fixed boot-time requirement.
+            "required_model": self.settings.ai_model,
             "synthetic_lab_only": True,
             "target_refs": list(LAUNCHABLE_BEAST_TARGETS),
-            "technical_subtitle": "Disposable AI Adversary Sandbox",
+            "tools": [tool.model_dump(mode="json") for tool in tools],
+            "technical_subtitle": "Autonomous assessment toolbox",
             "boundary_description": (
-                "Unrestricted attack logic inside a strictly bounded execution environment."
+                "Tool execution inside a controller-bounded disposable environment."
             ),
+        }
+
+    async def toolbox_health(self) -> dict[str, Any]:
+        """Return a live, bounded execution probe for every advertised assessment tool."""
+
+        inventory = sandbox_toolbox()
+        checked_at = datetime.now(UTC).isoformat()
+        if not self.settings.beast_enabled:
+            return {
+                "state": "UNAVAILABLE",
+                "checked_at": checked_at,
+                "reason": "The disposable toolbox service is not enabled in this deployment.",
+                "tools": [
+                    {
+                        **tool.model_dump(mode="json"),
+                        "status": "UNAVAILABLE",
+                        "detail": "service disabled",
+                    }
+                    for tool in inventory
+                ],
+            }
+
+        try:
+            async with httpx.AsyncClient(
+                transport=self.sandbox_transport,
+                timeout=35,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = await client.get(f"{self.settings.beast_supervisor_url}/health")
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            payload = {}
+
+        raw_checks = payload.get("tool_checks") if isinstance(payload, dict) else None
+        checks = raw_checks if isinstance(raw_checks, dict) else {}
+        projected: list[dict[str, Any]] = []
+        for tool in inventory:
+            raw = checks.get(tool.name)
+            check = raw if isinstance(raw, dict) else {}
+            status = str(check.get("status", "UNAVAILABLE"))
+            if status not in {"READY", "MISSING", "ERROR", "UNAVAILABLE"}:
+                status = "ERROR"
+            projected.append(
+                {
+                    **tool.model_dump(mode="json"),
+                    "status": status,
+                    "detail": str(check.get("detail", "health check unavailable"))[:160],
+                }
+            )
+        ready = sum(tool["status"] == "READY" for tool in projected)
+        total = len(projected)
+        return {
+            "state": "READY" if ready == total else "DEGRADED" if ready else "UNAVAILABLE",
+            "checked_at": checked_at,
+            "reason": ""
+            if ready == total
+            else (
+                f"{total - ready} of {total} toolbox commands failed their runtime check."
+                if ready
+                else "The toolbox supervisor did not return a successful tool probe."
+            ),
+            "ready": ready,
+            "total": total,
+            "tools": projected,
         }

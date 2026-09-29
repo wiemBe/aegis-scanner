@@ -11,7 +11,14 @@ from pydantic import SecretStr
 
 import aegis.gateway as gateway
 from aegis.planner import PlannerFailure
-from aegis.providers import OllamaProvider, OpenAIResponsesProvider
+from aegis.providers import (
+    OPENROUTER_APPROVED_MODELS,
+    OPENROUTER_QWEN_MODEL,
+    InternalOpenAICompatibleProvider,
+    OllamaProvider,
+    OpenAIResponsesProvider,
+    OpenRouterProvider,
+)
 from aegis.settings import Settings
 
 STOP = '{"decision_type":"stop","summary":"Need more evidence"}'
@@ -31,9 +38,11 @@ def ollama_provider(chat_handler: Any) -> OllamaProvider:
     )
 
 
-def ollama_reply(content: str = STOP, done_reason: str = "stop") -> dict[str, Any]:
+def ollama_reply(
+    content: str = STOP, done_reason: str = "stop", model: str = "qwen3:4b"
+) -> dict[str, Any]:
     return {
-        "model": "qwen3:4b",
+        "model": model,
         "message": {"role": "assistant", "content": content},
         "done": True,
         "done_reason": done_reason,
@@ -56,6 +65,137 @@ async def test_health_reports_provider_and_model() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
         body = (await http.get("/health")).json()
     assert body["provider"] == "ollama" and body["model"] == "qwen3:4b"
+
+
+async def test_runtime_model_dropdown_is_allowlisted_and_synthetic_test_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        ai_provider="ollama",
+        ai_model="qwen3:4b",
+        ai_allowed_models="qwen3:4b,qwen3:8b",
+        ai_base_url="http://ollama.test:11434",
+    )
+
+    def provider_for(selected: Settings) -> OllamaProvider:
+        return OllamaProvider(
+            selected,
+            httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json=ollama_reply(model=selected.ai_model),
+                    headers={"content-type": "application/json"},
+                )
+            ),
+        )
+
+    monkeypatch.setattr(gateway, "get_settings", lambda: settings)
+    monkeypatch.setattr(gateway, "build_provider", provider_for)
+    gateway._provider = provider_for(settings)  # noqa: SLF001 - gateway singleton under test
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        catalog = (await http.get("/v1/models")).json()
+        assert catalog["current_model"] == "qwen3:4b"
+        assert catalog["models"] == ["qwen3:4b", "qwen3:8b"]
+
+        refused = await http.post("/v1/models/select", json={"model": "unapproved:70b"})
+        assert refused.status_code == 409
+
+        selected = await http.post("/v1/models/select", json={"model": "qwen3:8b"})
+        assert selected.status_code == 200
+        assert selected.json()["current_model"] == "qwen3:8b"
+
+        tested = await http.post("/v1/synthetic-test", json={})
+        assert tested.status_code == 200
+        result = tested.json()
+        assert result["status"] == "PASS"
+        assert result["model"] == "qwen3:8b"
+        assert result["fixture_state"] == "DESTROYED"
+        assert result["cleanup_verified"] is True
+        assert result["docker_resources_created"] == 0
+
+        failing_settings = settings.model_copy(update={"ai_model": "qwen3:8b"})
+        gateway._provider = OllamaProvider(  # noqa: SLF001 - failure cleanup path under test
+            failing_settings,
+            httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    json=ollama_reply(content="not-json", model="qwen3:8b"),
+                    headers={"content-type": "application/json"},
+                )
+            ),
+        )
+        failed = (await http.post("/v1/synthetic-test", json={})).json()
+        assert failed["status"] == "FAIL"
+        assert failed["fixture_state"] == "DESTROYED"
+        assert failed["cleanup_verified"] is True
+        assert failed["docker_resources_created"] == 0
+
+
+@pytest.mark.parametrize("provider_name", ["openrouter", "deepseek"])
+async def test_balance_endpoint_returns_only_normalized_money_fields(provider_name: str) -> None:
+    secret = "provider-secret-never-returned"  # noqa: S105 - inert test credential
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == f"Bearer {secret}"
+        if provider_name == "openrouter":
+            assert request.url.path == "/api/v1/key"
+            payload = {
+                "data": {
+                    "limit": 20.5,
+                    "limit_remaining": 16.25,
+                    "limit_reset": "monthly",
+                    "usage": 4.25,
+                }
+            }
+        else:
+            assert request.url.path == "/user/balance"
+            payload = {
+                "is_available": True,
+                "balance_infos": [
+                    {
+                        "currency": "USD",
+                        "total_balance": "16.25",
+                        "granted_balance": "1.25",
+                        "topped_up_balance": "15.00",
+                    }
+                ],
+            }
+        return httpx.Response(200, json=payload, headers={"content-type": "application/json"})
+
+    if provider_name == "openrouter":
+        provider = OpenRouterProvider(
+            Settings(
+                ai_provider="openrouter",
+                ai_base_url="https://openrouter.ai",
+                ai_model="qwen/qwen3.8-27b",
+                ai_allowed_models=",".join(sorted(OPENROUTER_APPROVED_MODELS)),
+                openrouter_api_key=SecretStr(secret),
+            ),
+            httpx.MockTransport(handler),
+        )
+    else:
+        provider = InternalOpenAICompatibleProvider(
+            Settings(
+                ai_provider="internal_openai_compatible",
+                ai_base_url="https://api.deepseek.com",
+                ai_model="deepseek-chat",
+                ai_allowed_models="deepseek-chat",
+                ai_auth_mode="bearer",
+                ai_auth_token=SecretStr(secret),
+            ),
+            httpx.MockTransport(handler),
+        )
+    gateway._provider = provider
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        response = await http.get("/v1/billing/balance")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "AVAILABLE"
+    assert body["balances"][0]["remaining"] == "16.25"
+    assert secret not in response.text
 
 
 async def test_plan_endpoint_happy_path_via_ollama() -> None:
@@ -215,3 +355,84 @@ def test_responses_real_path_disables_env_proxy() -> None:
     )
     built = provider._client()
     assert built.trust_env is False
+
+
+# --- BEAST adversary route admission --------------------------------------------------------------
+
+
+def _beast_decide_body() -> dict[str, Any]:
+    return {
+        "run_id": "run-001",
+        "scenario_id": "endpoint_discovery",
+        "objective": "Enumerate the reachable endpoint surface of the synthetic target.",
+        "target_origin": "http://beast-target:8080",
+        "target_base_path": "/lab/beast/vulnerable",
+        "synthetic_public_accounts": [{"username": "user-a", "token": "lab-token-user-a"}],
+        "sequence": 1,
+        "remaining_commands": 8,
+        "remaining_time_seconds": 120,
+        "objective_evidence_sufficient": False,
+        "decision_requirements": ["Expose actual response-body bytes from an observed URL."],
+        "observations": [],
+    }
+
+
+_BEAST_COMMAND_DECISION = json.dumps(
+    {
+        "decision_type": "command",
+        "hypothesis": "probe the documented root endpoint",
+        "expected_intent": "retrieve the base response body",
+        "command_text": "curl http://beast-target:8080/lab/beast/vulnerable",
+    }
+)
+
+
+async def test_beast_decide_admits_the_selected_hosted_model() -> None:
+    """BEAST follows the operator's selected gateway model: the routed OpenRouter model serves the
+    adversary decision with its hosted provenance shape, exactly like the Ollama path."""
+
+    def chat(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "gen-test",
+                "model": OPENROUTER_QWEN_MODEL,
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": _BEAST_COMMAND_DECISION},
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 48, "total_tokens": 68},
+            },
+        )
+
+    gateway._provider = OpenRouterProvider(  # noqa: SLF001 - gateway singleton under test
+        Settings(
+            ai_provider="openrouter",
+            ai_base_url="https://openrouter.test",
+            ai_model=OPENROUTER_QWEN_MODEL,
+            ai_allowed_models=",".join(sorted(OPENROUTER_APPROVED_MODELS)),
+            openrouter_api_key="sk-or-test-placeholder",
+        ),
+        httpx.MockTransport(chat),
+    )
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        response = await http.post("/v1/beast/decide", json=_beast_decide_body())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == OPENROUTER_QWEN_MODEL
+    assert body["decision"]["decision_type"] == "command"
+    # The hosted provenance envelope is passed through for the controller's per-family check.
+    assert body["metadata"]["provider_type"] == "openrouter"
+    assert body["metadata"]["model"] == OPENROUTER_QWEN_MODEL
+
+
+async def test_beast_decide_refuses_providers_without_an_adversary_route() -> None:
+    gateway._provider = responses_provider(lambda r: httpx.Response(200))  # noqa: SLF001
+    transport = httpx.ASGITransport(app=gateway.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        response = await http.post("/v1/beast/decide", json=_beast_decide_body())
+    assert response.status_code == 409
+    assert response.json()["detail"] == "BEAST_REQUIRES_SUPPORTED_PROVIDER"

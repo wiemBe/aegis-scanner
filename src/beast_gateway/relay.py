@@ -9,8 +9,19 @@ UPSTREAM = "http://beast-sandbox:8094"
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> Response:
+    """Forward the supervisor's fixed tool self-check; no command input is accepted here."""
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False, trust_env=False) as client:
+            response = await client.get(f"{UPSTREAM}/health")
+    except httpx.HTTPError:
+        return JSONResponse(status_code=502, content={"detail": "SANDBOX_SUPERVISOR_UNAVAILABLE"})
+    return Response(
+        status_code=response.status_code,
+        content=response.content[:262_144],
+        media_type="application/json",
+    )
 
 
 @app.post("/v1/{path:path}")

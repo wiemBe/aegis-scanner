@@ -55,7 +55,7 @@ FROM ${PYTHON_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       bash ca-certificates coreutils curl ffuf findutils gawk grep httpie iproute2 jq \
+       bash ca-certificates coreutils curl ffuf findutils gawk gobuster grep httpie iproute2 jq \
        nmap openssl procps sed sqlmap \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 65532 beast-command \
@@ -64,10 +64,6 @@ RUN apt-get update \
     && mkdir -p /workspace \
     && chown root:root /workspace \
     && chmod 0700 /workspace
-COPY --from=nuclei /out/nuclei /usr/local/bin/nuclei
-COPY --from=webtools /out/akca /usr/local/bin/akca
-COPY --from=webtools /out/katana /usr/local/bin/katana
-COPY --from=webtools /out/httpx /usr/local/bin/httpx
 WORKDIR /opt/aegis
 COPY pyproject.toml README.md ./
 COPY src ./src
@@ -75,6 +71,13 @@ RUN pip install --no-cache-dir . \
     && find /opt/aegis -type d -name __pycache__ -prune -exec rm -rf {} + \
     && chown -R root:root /opt/aegis \
     && chmod -R a-w /opt/aegis
+# Install pinned standalone binaries AFTER pip. The Python httpx dependency also exposes a console
+# script named `httpx`; copying ProjectDiscovery's pinned binary last prevents that unrelated CLI
+# from silently shadowing the assessment prober.
+COPY --from=nuclei /out/nuclei /usr/local/bin/nuclei
+COPY --from=webtools /out/akca /usr/local/bin/akca
+COPY --from=webtools /out/katana /usr/local/bin/katana
+COPY --from=webtools /out/httpx /usr/local/bin/httpx
 EXPOSE 8094
 # uvloop intentionally disabled: its libuv spawn path cannot combine Docker's no-new-privileges
 # boundary with the supervisor's per-command uid/gid drop. CPython's asyncio subprocess path can.

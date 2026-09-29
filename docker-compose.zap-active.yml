@@ -44,8 +44,8 @@ services:
       # record, a report or an evidence artifact, and the control plane refuses to start when
       # ZAP_ACTIVE_ENABLED is true and this is missing, empty or a placeholder.
       ZAP_ACTIVE_LEASE_SECRET: ${AEGIS_ZAP_ACTIVE_LEASE_SECRET:?set AEGIS_ZAP_ACTIVE_LEASE_SECRET (>=32 bytes) in the operator shell}
-      AEGIS_ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET: ${AEGIS_ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET:?set AEGIS_ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET (>=32 bytes) in the operator shell}
-      AEGIS_ZAP_ACTIVE_RUNNER_CLIENT: ${AEGIS_ZAP_ACTIVE_RUNNER_CLIENT:?set AEGIS_ZAP_ACTIVE_RUNNER_CLIENT (>=32 bytes) in the operator shell}
+      ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET: ${AEGIS_ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET:?set AEGIS_ZAP_ACTIVE_OPERATOR_BOOTSTRAP_SECRET (>=32 bytes) in the operator shell}
+      ZAP_ACTIVE_RUNNER_CLIENT_SECRET: ${AEGIS_ZAP_ACTIVE_RUNNER_CLIENT:?set AEGIS_ZAP_ACTIVE_RUNNER_CLIENT (>=32 bytes) in the operator shell}
     networks:
       security-lab: {}
       active-rpc: {}

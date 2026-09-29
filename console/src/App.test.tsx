@@ -146,6 +146,34 @@ const profiles = {
   ],
 }
 
+const toolboxHealth = {
+  state: 'READY',
+  checked_at: '2026-09-28T18:00:00Z',
+  reason: '',
+  ready: 3,
+  total: 3,
+  tools: [
+    { name: 'ffuf', category: 'content-discovery', purpose: 'Discover content.', source: 'debian', status: 'READY', detail: 'ffuf v2.1.0' },
+    { name: 'gobuster', category: 'content-discovery', purpose: 'Enumerate paths.', source: 'debian', status: 'READY', detail: 'gobuster 3.6' },
+    { name: 'sqlmap', category: 'injection-probe', purpose: 'Probe SQL injection.', source: 'debian', status: 'READY', detail: '1.8' },
+  ],
+}
+
+const aiCatalog = {
+  provider: 'internal_openai_compatible',
+  current_model: 'deepseek-v4-pro',
+  models: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
+  runtime_switching: true,
+}
+
+const aiBalance = {
+  provider: 'deepseek',
+  state: 'AVAILABLE',
+  available: true,
+  balances: [{ currency: 'USD', remaining: '12.5000' }],
+  checked_at: '2026-09-29T10:00:00Z',
+}
+
 let postedBodies: Record<string, unknown>[] = []
 
 function stubFetch(overrides: { runs?: unknown[] } = {}) {
@@ -156,6 +184,25 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
       const path = String(input)
       if (init?.method === 'POST') {
         postedBodies.push(JSON.parse(String(init.body)))
+        if (path.includes('/console/ai/select')) {
+          const selected = String(postedBodies.at(-1)?.model)
+          return {
+            ok: true,
+            json: async () => ({ ...aiCatalog, current_model: selected }),
+          } as Response
+        }
+        if (path.includes('/console/ai/test')) {
+          return {
+            ok: true,
+            json: async () => ({
+              test_id: 'ai-test-aaaaaaaaaaaa', status: 'PASS', code: 'SYNTHETIC_AI_TEST_PASSED',
+              provider: aiCatalog.provider, model: aiCatalog.current_model, decision_type: 'stop',
+              usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+              fixture_state: 'DESTROYED', cleanup_verified: true, docker_resources_created: 0,
+              started_at: '2026-09-29T10:00:00Z', completed_at: '2026-09-29T10:00:01Z',
+            }),
+          } as Response
+        }
         return {
           ok: true,
           json: async () => ({
@@ -171,6 +218,12 @@ function stubFetch(overrides: { runs?: unknown[] } = {}) {
         ? { run, events: [], evidence: [] }
         : path.includes('/console/runs')
           ? { items: runsList, count: runsList.length }
+          : path.includes('/console/toolbox/health')
+            ? toolboxHealth
+          : path.includes('/console/ai/models')
+            ? aiCatalog
+          : path.includes('/console/ai/balance')
+            ? aiBalance
           : path.includes('/console/findings')
             ? { items: [confirmedFinding] }
             : path.includes('/console/targets')
@@ -204,6 +257,21 @@ describe('Operator console — landing and navigation', () => {
     await screen.findByRole('heading', { name: 'Runs' })
     expect(screen.getAllByRole('button', { name: 'New Assessment' }).length).toBeGreaterThan(0)
     expect(await screen.findByText('Recent runs')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'USD 12.5' })).toBeInTheDocument()
+  })
+
+  it('switches an allowlisted AI model and runs a self-cleaning synthetic test', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    const selector = await screen.findByRole('combobox', { name: 'AI model' })
+    expect(selector).toHaveValue('deepseek-v4-pro')
+
+    fireEvent.change(selector, { target: { value: 'deepseek-chat' } })
+    await screen.findByText('deepseek-chat selected')
+    expect(postedBodies).toContainEqual({ model: 'deepseek-chat' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test AI' }))
+    expect(await screen.findByText(/AI test passed · fixture destroyed · no Docker resources/)).toBeInTheDocument()
   })
 
   it('has no Presentation Mode and no Engineering Dashboard in navigation', async () => {
@@ -212,6 +280,7 @@ describe('Operator console — landing and navigation', () => {
     expect(screen.queryByText(/Presentation/i)).toBeNull()
     expect(screen.queryByText(/Engineering/i)).toBeNull()
     expect(screen.queryByText(/Engineering dashboard/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'BEAST Sandbox' })).toBeNull()
   })
 
   it('gates the Debug route behind the development build flag', async () => {
@@ -231,30 +300,57 @@ describe('Operator console — landing and navigation', () => {
 })
 
 describe('New assessment workflow', () => {
+  it('keeps the live-checked toolbox inside the normal assessment flow without a separate mode', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getAllByText('New Assessment')[0]!)
+
+    expect(await screen.findByRole('heading', { name: 'Assessment toolbox' })).toBeInTheDocument()
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(screen.queryByText(/BEAST mode/i)).toBeNull()
+    for (const tool of toolboxHealth.tools) {
+      expect(screen.getByText(tool.name)).toBeInTheDocument()
+      expect(screen.getByText(tool.detail)).toBeInTheDocument()
+    }
+    expect(screen.getAllByText('READY').length).toBeGreaterThanOrEqual(toolboxHealth.tools.length)
+    expect(screen.getByRole('button', { name: 'Check tools' })).toBeInTheDocument()
+  })
+
   it('selects an authorized target, shows profile availability, reviews, and starts a real job', async () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Runs' })
     fireEvent.click(screen.getAllByText('New Assessment')[0]!)
 
-    // Step 1: authorized inventory targets.
+    // Screen 1: choose one controller-authorized inventory target.
     await screen.findByText('Choose an authorized target')
     expect(screen.getByText('Aegis Bank')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Choose scan template/ })).toBeDisabled()
     fireEvent.click(screen.getByText('Synthetic Bank API'))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: /Choose scan template/ }))
 
-    // Step 2: profile description shown; availability drives selectability.
-    await screen.findByText('Choose an assessment')
-    expect(screen.getByText(/Examines authorized API object-access boundaries/)).toBeInTheDocument()
+    // Screen 2 is a scanner-style template library narrowed to compatible controller profiles.
+    expect(await screen.findByRole('heading', { name: 'Scan templates' })).toBeInTheDocument()
+    expect(await screen.findByText('Web & API Authorization')).toBeInTheDocument()
+    expect(screen.queryByText('Exposure & Misconfiguration Scan')).not.toBeInTheDocument()
+    expect(screen.getByText('Basic scan')).toBeInTheDocument()
+    expect(screen.getByText(/Aegis native engine \(in-process\).*8 requests/)).toBeInTheDocument()
     fireEvent.click(screen.getByText('Web & API Authorization'))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(screen.getByText(/Basic scan.*Read-only/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Configure scan/ }))
 
-    // Step 3: controls.
+    // Screen 3: a Nessus-style configuration workspace keeps settings, credentials, checks and
+    // advanced execution facts separate without inventing capabilities outside the profile.
     await screen.findByText('Execution controls')
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-
-    // Step 4: review summary + start.
-    await screen.findByText('Review and start')
-    expect(screen.getByText('Web & API Authorization')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Credentials' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Checks' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Advanced' })).toBeInTheDocument()
+    expect(screen.getByText(/It is not allowed to/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByRole('spinbutton', { name: /Target request budget/ }), {
+      target: { value: '4' },
+    })
+    fireEvent.change(screen.getByRole('spinbutton', { name: /Maximum duration/ }), {
+      target: { value: '1' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Start assessment' }))
 
     await waitFor(() => expect(postedBodies.length).toBe(1))
@@ -263,6 +359,8 @@ describe('New assessment workflow', () => {
     expect(postedBodies[0]).toMatchObject({
       target_id: 'synthetic-bank-api',
       profile_id: 'aegis-native-bola-synthetic',
+      request_budget: 4,
+      max_duration_minutes: 1,
     })
   })
 
@@ -278,6 +376,8 @@ describe('New assessment workflow', () => {
         }
         const payload = path.includes('/console/runs')
           ? { items: [run], count: 1 }
+          : path.includes('/console/ai/models')
+            ? aiCatalog
           : path.includes('/console/findings')
             ? { items: [] }
             : path.includes('/console/targets')
@@ -296,10 +396,10 @@ describe('New assessment workflow', () => {
     fireEvent.click(screen.getAllByText('New Assessment')[0]!)
     await screen.findByText('Choose an authorized target')
     fireEvent.click(screen.getByText('Synthetic Bank API'))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: /Choose scan template/ }))
     fireEvent.click(await screen.findByText('Web & API Authorization'))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Continue' }))
+    fireEvent.click(screen.getByRole('button', { name: /Configure scan/ }))
+    await screen.findByText('Execution controls')
     const start = await screen.findByRole('button', { name: 'Start assessment' })
     fireEvent.click(start)
     const pending = await screen.findByRole('button', { name: 'Starting…' })
@@ -402,6 +502,8 @@ describe('Company target onboarding', () => {
         }
         const payload = path.includes('/console/runs')
           ? { items: [run], count: 1 }
+          : path.includes('/console/ai/models')
+            ? aiCatalog
           : path.includes('/console/findings')
             ? { items: [] }
             : path.includes('/console/targets')
@@ -448,8 +550,13 @@ describe('Company target onboarding', () => {
       expect(screen.queryByRole('dialog', { name: 'Add authorized target' })).toBeNull(),
     )
     expect(await screen.findByText('Company Marketing Site')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    await screen.findByText('Choose an assessment')
+
+    // The flow returns on the target screen with the new target already selected. The following
+    // template library shows its unavailable engine profiles honestly and blocks configuration.
+    fireEvent.click(screen.getByRole('button', { name: /Choose scan template/ }))
+    expect(await screen.findByText('Exposure & Misconfiguration Scan')).toBeInTheDocument()
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /Configure scan/ })).toBeDisabled()
 
     // The create posted a typed, bounded scope — an origin, never a scanner argument or secret.
     const createBody = postedBodies.find((b) => b.display_name === 'Company Marketing Site')
@@ -471,5 +578,86 @@ describe('Company target onboarding', () => {
     expect(screen.getByText('Synthetic Bank API')).toBeInTheDocument()
     expect(screen.getAllByText('Synthetic').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: '+ Add authorized target' })).toBeInTheDocument()
+    // Seeded catalog targets state their immutability where the Edit/Enable/Delete actions would
+    // be — the edit affordance is never silently missing — and no Edit is offered for them.
+    expect(screen.getAllByText('Immutable').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
+    // The seeded target's detail modal explains the same instead of hiding the actions quietly.
+    fireEvent.click(screen.getAllByRole('button', { name: 'View' })[0]!)
+    await screen.findByRole('dialog')
+    expect(await screen.findByText(/Catalog-seeded target — immutable/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  })
+
+  it('edits and deletes an operator target with explicit name confirmation', async () => {
+    let inventory = [companyTarget]
+    const requests: { method: string; path: string; body?: Record<string, unknown> }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        const method = init?.method ?? 'GET'
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined
+        requests.push({ method, path, body })
+
+        if (method === 'PUT') {
+          const updated = { ...companyTarget, name: String(body?.display_name), owner: body?.owner }
+          inventory = [updated]
+          return { ok: true, json: async () => updated } as Response
+        }
+        if (method === 'DELETE') {
+          inventory = []
+          return { ok: true, status: 204 } as Response
+        }
+
+        const payload = path.includes('/console/runs')
+          ? { items: [], count: 0 }
+          : path.includes('/console/ai/models')
+            ? aiCatalog
+          : path.includes('/console/findings')
+            ? { items: [] }
+            : path.includes('/console/targets')
+              ? { custom_target_entry: true, items: inventory }
+              : path.includes('/console/profiles')
+                ? profiles
+                : path.includes('/console/health')
+                  ? { control_plane: 'HEALTHY', lab: 'HEALTHY' }
+                  : { console_version: '1.0.0', operational_engines: ['AEGIS_NATIVE'] }
+        return { ok: true, json: async () => payload } as Response
+      }),
+    )
+
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Runs' })
+    fireEvent.click(screen.getByRole('button', { name: 'Targets' }))
+    await screen.findByText('Company Marketing Site')
+    // An operator-onboarded target is mutable: the edit affordance replaces the immutable marker.
+    expect(screen.queryByText('Immutable')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    await screen.findByRole('dialog', { name: 'Edit authorized target' })
+    fireEvent.change(screen.getByDisplayValue('Company Marketing Site'), {
+      target: { value: 'Renamed Company Site' },
+    })
+    fireEvent.click(screen.getByLabelText('I confirm that I am authorized to assess these targets'))
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    expect(await screen.findByText('Renamed Company Site')).toBeInTheDocument()
+    expect(requests.find((request) => request.method === 'PUT')?.body).toMatchObject({
+      display_name: 'Renamed Company Site',
+      origins: ['https://example.company.com'],
+      authorization_attested: true,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await screen.findByRole('dialog', { name: 'Delete authorized target' })
+    const deleteButton = screen.getByRole('button', { name: 'Delete target' })
+    expect(deleteButton).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Target name confirmation'), {
+      target: { value: 'Renamed Company Site' },
+    })
+    fireEvent.click(deleteButton)
+
+    await waitFor(() => expect(screen.queryByText('Renamed Company Site')).toBeNull())
+    expect(requests.some((request) => request.method === 'DELETE')).toBe(true)
   })
 })

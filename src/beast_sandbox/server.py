@@ -4,10 +4,12 @@ import asyncio
 import ctypes
 import hashlib
 import os
+import re
 import resource
 import shutil
 import signal
 import stat
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,20 @@ WORKSPACE_ROOT = Path(os.environ.get("BEAST_WORKSPACE_ROOT", "/workspace"))
 COMMAND_UID = int(os.environ.get("BEAST_COMMAND_UID", "65532"))
 COMMAND_GID = int(os.environ.get("BEAST_COMMAND_GID", "65532"))
 ARTIFACT_PREVIEW_BYTES = 8192
+
+# Fixed, non-networking startup probes. These verify that each advertised binary can actually be
+# executed inside the runtime image; operator or model input never reaches these argv values.
+TOOL_PROBES: dict[str, tuple[str, ...]] = {
+    "curl": ("curl", "--version"),
+    "httpie": ("http", "--version"),
+    "httpx": ("httpx", "-version"),
+    "katana": ("katana", "-version"),
+    "akca": ("akca", "--version"),
+    "ffuf": ("ffuf", "-V"),
+    "gobuster": ("gobuster", "version"),
+    "nuclei": ("nuclei", "-version"),
+    "sqlmap": ("sqlmap", "--version"),
+}
 
 # Reparent orphaned command descendants to the supervisor so a shell cannot escape cleanup by
 # double-forking or creating a new session. This is namespace-local and grants no new capability.
@@ -181,8 +197,7 @@ class Supervisor:
         gateway = await self._gateway("/__aegis/state")
         command_connections = max(
             0,
-            int(gateway.get("connections", 0))
-            - int(gateway_before.get("connections", 0)),
+            int(gateway.get("connections", 0)) - int(gateway_before.get("connections", 0)),
         )
         return CommandResult(
             command_id=command.command_id,
@@ -200,18 +215,14 @@ class Supervisor:
             resource_usage={
                 "output_bytes": len(stdout_cap) + len(stderr_cap),
                 "artifact_bytes": sum(
-                    int(item["size"])
-                    for item in artifacts
-                    if item["disposition"] == "ADMITTED"
+                    int(item["size"]) for item in artifacts if item["disposition"] == "ADMITTED"
                 ),
                 "target_connections": int(gateway.get("connections", 0)),
                 "command_target_connections": command_connections,
                 "transmitted_bytes": int(gateway.get("transmitted_bytes", 0)),
                 "received_bytes": int(gateway.get("received_bytes", 0)),
             },
-            network_destinations=["beast-target:8080"]
-            if command_connections
-            else [],
+            network_destinations=["beast-target:8080"] if command_connections else [],
         )
 
     def _artifacts(self, workspace: Path, limit: int) -> list[dict[str, Any]]:
@@ -300,26 +311,62 @@ def authorize(value: str | None) -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    tools = {
-        name: shutil.which(name) is not None
-        for name in (
-            "bash",
-            "python3",
-            "curl",
-            "http",
-            "jq",
-            "openssl",
-            "nmap",
-            "ffuf",
-            "sqlmap",
-            "nuclei",
+    def probe(name: str, argv: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+        executable = shutil.which(argv[0])
+        if executable is None:
+            return name, {"status": "MISSING", "executable": argv[0], "detail": "not installed"}
+        try:
+            completed = subprocess.run(  # noqa: S603 - argv is fixed above; never operator input
+                [executable, *argv[1:]],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(WORKSPACE_ROOT)},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return name, {
+                "status": "ERROR",
+                "executable": argv[0],
+                "detail": type(exc).__name__,
+            }
+        output = [
+            re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+            for line in (completed.stdout or completed.stderr).splitlines()
+            if line.strip()
+        ]
+        version_line = next(
+            (
+                line
+                for line in output
+                if "version" in line.lower() and "warning" not in line.lower()
+            ),
+            None,
         )
-    }
+        detail = (version_line or (output[0] if output else f"exit {completed.returncode}"))[:160]
+        return name, {
+            "status": "READY" if completed.returncode == 0 else "ERROR",
+            "executable": argv[0],
+            "detail": detail,
+        }
+
+    # Run the short probes sequentially in one worker. Starting nine worker threads and nine child
+    # processes at once can exhaust the deliberately small sandbox PID budget and report false
+    # failures even though every binary is healthy.
+    checks = dict(
+        await asyncio.to_thread(lambda: [probe(name, argv) for name, argv in TOOL_PROBES.items()])
+    )
     return {
-        "status": "ok",
+        "status": "ok"
+        if all(item["status"] == "READY" for item in checks.values())
+        else "degraded",
         "profile_id": "BEAST_ADVERSARY_SANDBOX_V1",
         "unprivileged_uid": COMMAND_UID,
-        "tools": tools,
+        # Preserve the original boolean field for older deployment checks while the richer result
+        # powers the normal assessment UI.
+        "tools": {name: item["status"] == "READY" for name, item in checks.items()},
+        "tool_checks": checks,
     }
 
 

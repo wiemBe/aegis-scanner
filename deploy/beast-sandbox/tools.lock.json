@@ -4,7 +4,7 @@
     "This file is the human- and test-facing source of truth; deploy/beast-sandbox/Dockerfile must",
     "ADD each asset with the matching sha256. tests/test_beast_toolbox.py asserts they stay in sync.",
     "SHA-256 values are the upstream release checksums (verified 2026-09-28). Distro packages",
-    "(curl, httpie, ffuf, sqlmap, nmap) are pinned by the base image + apt and are not listed here."
+    "(curl, httpie, ffuf, gobuster, sqlmap, nmap) are pinned by the base image + apt and are not listed here."
   ],
   "tools": {
     "nuclei": {
