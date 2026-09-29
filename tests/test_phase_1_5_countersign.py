@@ -100,6 +100,20 @@ def test_checked_in_operator_authorization_verifies_with_its_public_key_only() -
     assert status.rule_id == 40012
 
 
+def test_checked_in_authorization_does_not_require_periodic_resigning() -> None:
+    """Age alone cannot invalidate an immutable, digest-bound authorization."""
+
+    status = verify_countersign(
+        capability_id="zap_active_reflected_xss_v1",
+        profile_id="ZAP_LAB_ACTIVE_REFLECTED_XSS_V1",
+        environment="SYNTHETIC_LAB",
+        target_ref="synthetic-zap-active-vulnerable",
+        now=datetime(2036, 1, 1, tzinfo=UTC),
+    )
+    assert status.valid
+    assert status.code == "VALID"
+
+
 def test_coordinated_record_and_manifest_edits_fail_without_operator_signature(
     tmp_path: Path,
 ) -> None:
@@ -121,7 +135,7 @@ def test_expired_and_drifted_authorizations_fail_before_use(tmp_path: Path) -> N
     assert _verify(countersign, public, manifest_path=drift) == "MANIFEST_DIGEST_MISMATCH"
 
 
-def test_malformed_unknown_key_and_stale_authorizations_fail_closed(tmp_path: Path) -> None:
+def test_malformed_unknown_key_and_future_authorizations_fail_closed(tmp_path: Path) -> None:
     countersign, public = _signed(tmp_path)
     countersign.write_text("{not-json")
     assert _verify(countersign, public) == "COUNTERSIGN_MALFORMED"
@@ -137,6 +151,15 @@ def test_malformed_unknown_key_and_stale_authorizations_fail_closed(tmp_path: Pa
     assert _verify(countersign, public) == "SIGNER_KEY_UNTRUSTED"
 
     countersign, public = _signed(
-        tmp_path, issued_at=(datetime.now(UTC) - timedelta(days=8)).isoformat()
+        tmp_path, issued_at=(datetime.now(UTC) + timedelta(minutes=6)).isoformat()
     )
     assert _verify(countersign, public) == "AUTHORIZATION_STALE"
+
+
+def test_old_non_expiring_authorization_remains_valid(tmp_path: Path) -> None:
+    countersign, public = _signed(
+        tmp_path,
+        issued_at=(datetime.now(UTC) - timedelta(days=3650)).isoformat(),
+        expires_at=None,
+    )
+    assert _verify(countersign, public) == "VALID"

@@ -3,8 +3,8 @@
 #
 # Execution order:
 #   D. Build + bring up the base stack with the OpenRouter overlay.
-#   E. Prove the API key is readable ONLY inside the gateway (mounted file), never in the control
-#      plane / lab-api / egress-proxy, and never in any container's environment.
+#   E. Prove the API key is readable ONLY in the gateway environment, never in the control
+#      plane / lab-api / egress-proxy.
 #   F. One provider-only smoke call (proves gateway->OpenRouter, ZERO target requests).
 #   H. Secret scan: the key value must appear in NO log, DB, API response or evidence file.
 #   I. Tear down the stack.
@@ -13,10 +13,9 @@
 # openrouter_initial_acceptance.py); it validates the live provider route only, as the deployment
 # guide's "one authorized synthetic scan" precondition requires.
 #
-# Unlike DeepSeek (an env token) the OpenRouter key is a read-only FILE mounted only into the
-# gateway. Point OPENROUTER_API_KEY_SOURCE at its absolute path. The value is read locally for
-# ABSENCE assertions only and is never printed, echoed, logged or committed; presence in the gateway
-# is proven by digest comparison, not by printing the key.
+# The OpenRouter key is read from the untracked .env.gateway file by llm-gateway only. The value is
+# read locally for isolation assertions only and is never printed, echoed, logged or committed;
+# presence in the gateway is proven by digest comparison, not by printing the key.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +23,7 @@ cd "$ROOT"
 
 PROJECT="aegis-openrouter"
 STACK="-f docker-compose.yml -f docker-compose.openrouter.yml"
-KEY_PATH_IN_GW="/run/secrets/openrouter-api-key"
+GATEWAY_ENV_FILE="$ROOT/.env.gateway"
 EXPECTED_MODEL="${EXPECTED_MODEL:-qwen/qwen3.8-27b}"
 PASS=0
 FAIL=0
@@ -37,17 +36,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-: "${OPENROUTER_API_KEY_SOURCE:?set OPENROUTER_API_KEY_SOURCE to the absolute key-file path}"
-if [ ! -s "$OPENROUTER_API_KEY_SOURCE" ]; then
-  echo "FATAL: OPENROUTER_API_KEY_SOURCE ($OPENROUTER_API_KEY_SOURCE) is missing or empty." >&2
+: "${GATEWAY_ENV_FILE:?gateway env file path is unavailable}"
+if [ ! -s "$GATEWAY_ENV_FILE" ]; then
+  echo "FATAL: .env.gateway is missing or empty." >&2
   exit 2
 fi
-# Local digest of the source key for a value-free presence proof; the key itself is never emitted.
-KEY_SHA="$(shasum -a 256 "$OPENROUTER_API_KEY_SOURCE" | cut -d' ' -f1)"
-# Key value read for ABSENCE scans only. Never printed, and never passed as a command argument:
+KEY_VALUE="$(awk -F= '/^[[:space:]]*OPENROUTER_API_KEY=/{sub(/^[^=]*=/, ""); print; exit}' "$GATEWAY_ENV_FILE")"
+if [ -z "$KEY_VALUE" ]; then
+  echo "FATAL: .env.gateway must contain a non-empty OPENROUTER_API_KEY." >&2
+  exit 2
+fi
+# Local digest of the key for a value-free presence proof; the key itself is never emitted.
+KEY_SHA="$(printf '%s' "$KEY_VALUE" | shasum -a 256 | cut -d' ' -f1)"
+# Key value is retained for ABSENCE scans only. Never printed, and never passed as a command argument:
 # `contains_key` searches stdin for it via a bash fd fed by the `printf` builtin, so the value
 # never appears in any external process's argv (i.e. not visible in `ps`/`/proc`).
-KEY_VALUE="$(cat "$OPENROUTER_API_KEY_SOURCE")"
 contains_key() { grep -qF -f <(printf '%s' "$KEY_VALUE"); }
 
 echo "== D. Build + bring up stack (project $PROJECT) =="
@@ -75,28 +78,17 @@ done
 
 echo "== E. Credential isolation (value never printed) =="
 # Present in the gateway, and it is the RIGHT key: compare digests, never the value.
-GW_SHA="$(docker exec "$GW" python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('$KEY_PATH_IN_GW').read_bytes()).hexdigest())" 2>/dev/null || true)"
+GW_SHA="$(docker exec "$GW" python -c "import hashlib,os; print(hashlib.sha256(os.environ['OPENROUTER_API_KEY'].encode()).hexdigest())" 2>/dev/null || true)"
 if [ "$GW_SHA" = "$KEY_SHA" ]; then
-  pass "key file present in llm-gateway (only) and digest matches the source"
+  pass "gateway-only OpenRouter key is present and its digest matches"
 else
-  fail "gateway key file missing or digest mismatch"
+  fail "gateway OpenRouter key missing or digest mismatch"
 fi
-# Absent as a mounted file in every other service.
-path_absent_in() { # cid label
-  if docker exec "$1" sh -c "test -e $KEY_PATH_IN_GW" 2>/dev/null; then
-    fail "key file unexpectedly present in $2"
-  else
-    pass "key file absent in $2"
-  fi
-}
-path_absent_in "$CP" "control-plane"
-path_absent_in "$LAB" "lab-api"
-path_absent_in "$PX" "egress-proxy"
-# The key must never appear in ANY container's environment (it is a file mount, not an env var).
-if docker inspect "$CP" "$GW" "$LAB" "$PX" 2>/dev/null | contains_key; then
-  fail "credential value FOUND in a container environment"
+# The key is an environment variable only in llm-gateway; it must be absent from every other service.
+if docker inspect "$CP" "$LAB" "$PX" 2>/dev/null | contains_key; then
+  fail "credential value FOUND outside llm-gateway"
 else
-  pass "credential value absent from every container environment"
+  pass "credential value absent from control-plane, lab-api and egress-proxy"
 fi
 
 echo "== F. Provider-only smoke (zero target requests) =="

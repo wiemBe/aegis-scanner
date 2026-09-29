@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type {
+  AiBalance,
+  AiModelCatalog,
   AssessmentProfile,
   ConsoleConfig,
   Finding,
@@ -14,7 +16,6 @@ import { findingStateView, short, when } from './format'
 import { AddTarget } from './AddTarget'
 import { NewAssessment } from './NewAssessment'
 import { RunDetailView } from './RunDetail'
-import { BeastConsole } from './Beast'
 
 type Route =
   | { name: 'home' }
@@ -25,7 +26,6 @@ type Route =
   | { name: 'targets' }
   | { name: 'reports' }
   | { name: 'audit' }
-  | { name: 'beast' }
   | { name: 'debug' }
 
 const DEV = import.meta.env.DEV
@@ -46,8 +46,6 @@ function parseHash(): Route {
       return { name: 'reports' }
     case 'audit':
       return { name: 'audit' }
-    case 'beast':
-      return { name: 'beast' }
     case 'debug':
       return DEV ? { name: 'debug' } : { name: 'home' }
     default:
@@ -79,9 +77,38 @@ function healthState(health: Health): { state: 'ok' | 'warn' | 'bad' | 'unknown'
   return { state: 'bad', label: 'Backend unavailable' }
 }
 
+function balanceText(balance: AiBalance): string {
+  if (balance.state === 'UNSUPPORTED') return 'Balance n/a'
+  if (balance.state !== 'AVAILABLE') return 'Balance unavailable'
+  if (balance.balances.length === 0 && balance.provider === 'openrouter' && balance.total_usage) {
+    return `Used USD ${Number(balance.total_usage).toLocaleString(undefined, { maximumFractionDigits: 4 })} · no key cap`
+  }
+  if (balance.balances.length === 0) return 'Balance unavailable'
+  return balance.balances
+    .map((entry) => `${entry.currency} ${Number(entry.remaining).toLocaleString(undefined, { maximumFractionDigits: 4 })}`)
+    .join(' · ')
+}
+
+function aiModelLabel(model: string): string {
+  const labels: Record<string, string> = {
+    'qwen/qwen3.8-27b': 'Qwen 3.8 27B',
+    'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
+    'z-ai/glm-5.3': 'GLM 5.3',
+    'z-ai/glm-5.3-flash': 'GLM 5.3 Flash',
+    'z-ai/glm-5.3-flashx': 'GLM 5.3 FlashX',
+    'z-ai/glm-5.3-prime': 'GLM 5.3 Prime',
+  }
+  return labels[model] ? `${labels[model]} · OpenRouter` : model
+}
+
 export function App() {
   const [route, setRoute] = useState<Route>(parseHash())
   const [config, setConfig] = useState<ConsoleConfig>()
+  const [aiCatalog, setAiCatalog] = useState<AiModelCatalog>()
+  const [aiBalance, setAiBalance] = useState<AiBalance>()
+  const [aiBusy, setAiBusy] = useState<'select' | 'test' | undefined>()
+  const [balanceBusy, setBalanceBusy] = useState(false)
+  const [aiNotice, setAiNotice] = useState<{ ok: boolean; text: string }>()
   const [runs, setRuns] = useState<Run[]>([])
   const [findings, setFindings] = useState<Finding[]>([])
   const [targets, setTargets] = useState<TargetEntry[]>([])
@@ -99,8 +126,13 @@ export function App() {
 
   const hydrate = useCallback(async () => {
     try {
-      const [cfg, runData, findingData, targetData, profileData, healthData] = await Promise.all([
+      const [cfg, aiData, balanceData, runData, findingData, targetData, profileData, healthData] = await Promise.all([
         consoleApi.config(),
+        // Model-provider availability must not take the operator console down with it. Targets,
+        // profiles and completed evidence remain usable when a paid provider is out of credit or
+        // its gateway is offline; the model switcher simply stays hidden until it recovers.
+        consoleApi.aiModels().catch(() => undefined),
+        consoleApi.aiBalance().catch(() => undefined),
         consoleApi.runs(),
         consoleApi.findings(),
         consoleApi.targets(),
@@ -108,6 +140,8 @@ export function App() {
         consoleApi.health(),
       ])
       setConfig(cfg)
+      setAiCatalog(aiData)
+      setAiBalance(balanceData)
       setRuns(runData.items)
       setFindings(findingData.items)
       setTargets(targetData.items)
@@ -171,20 +205,84 @@ export function App() {
 
   const activeRuns = useMemo(() => runs.filter((r) => r.status === 'RUNNING' || r.status === 'QUEUED'), [runs])
   const hs = healthState(health)
-  const environment = 'Synthetic Lab'
+  const environment = 'Authorized Assessment'
 
-  const startAssessment = async (target: TargetEntry, profile: AssessmentProfile) => {
+  const startAssessment = async (
+    target: TargetEntry,
+    profile: AssessmentProfile,
+    limits: { request_budget: number; max_duration_minutes: number },
+  ) => {
     // Typed controller job referencing the stable inventory target id. The controller enforces the
     // target's stored scope; the browser never sends an origin or a scanner argument.
     return consoleApi.startAssessment({
       target_id: target.target_ref,
       profile_id: profile.profile_id,
+      ...limits,
     })
+  }
+
+  const refreshAiBalance = async () => {
+    setBalanceBusy(true)
+    try {
+      setAiBalance(await consoleApi.aiBalance())
+    } catch {
+      setAiBalance((current) => current ? { ...current, state: 'UNAVAILABLE', balances: [] } : undefined)
+    } finally {
+      setBalanceBusy(false)
+    }
   }
 
   const onTargetCreated = (created: TargetEntry) => {
     setTargets((current) => [...current, created])
   }
+
+  const selectAiModel = async (model: string) => {
+    if (!aiCatalog || model === aiCatalog.current_model) return
+    setAiBusy('select')
+    setAiNotice(undefined)
+    try {
+      const updated = await consoleApi.selectAiModel(model)
+      setAiCatalog(updated)
+      setAiNotice({ ok: true, text: `${updated.current_model} selected` })
+    } catch (reason) {
+      setAiNotice({
+        ok: false,
+        text: reason instanceof Error ? reason.message : 'Model change was rejected.',
+      })
+    } finally {
+      setAiBusy(undefined)
+    }
+  }
+
+  const testAi = async () => {
+    setAiBusy('test')
+    setAiNotice(undefined)
+    try {
+      const result = await consoleApi.testAi()
+      setAiNotice({
+        ok: result.status === 'PASS' && result.cleanup_verified,
+        text:
+          result.status === 'PASS'
+            ? `AI test passed · fixture ${result.fixture_state.toLowerCase()} · no Docker resources`
+            : `AI test failed: ${result.code} · fixture ${result.fixture_state.toLowerCase()}`,
+      })
+    } catch (reason) {
+      setAiNotice({
+        ok: false,
+        text: reason instanceof Error ? reason.message : 'AI test could not run.',
+      })
+    } finally {
+      setAiBusy(undefined)
+    }
+  }
+
+  // The floating status notice is a transient toast: it auto-dismisses instead of sitting on top
+  // of the page content indefinitely.
+  useEffect(() => {
+    if (!aiNotice) return undefined
+    const timer = window.setTimeout(() => setAiNotice(undefined), 7000)
+    return () => window.clearTimeout(timer)
+  }, [aiNotice])
 
   const navActive = (match: Route['name'][]) => match.includes(route.name)
 
@@ -222,14 +320,6 @@ export function App() {
               {item.label}
             </button>
           ))}
-          {config?.beast?.enabled && (
-            <button
-              className={`nav-item ${navActive(['beast']) ? 'active' : ''}`}
-              onClick={() => go('#/beast')}
-            >
-              BEAST Sandbox
-            </button>
-          )}
           {DEV && (
             <button
               className={`nav-item ${navActive(['debug']) ? 'active' : ''}`}
@@ -241,7 +331,7 @@ export function App() {
         </nav>
 
         <div className="sidebar-foot">
-          <p className="sidebar-note">Structured, checksummed audit evidence. Synthetic lab only — not an immutable audit store.</p>
+          <p className="sidebar-note">Structured, checksummed audit evidence for explicitly authorized targets. Not an immutable audit store.</p>
         </div>
       </aside>
 
@@ -250,6 +340,43 @@ export function App() {
           <span className="env-chip">{environment}</span>
           <HealthDot state={hs.state} label={hs.label} />
           <span className="spacer" />
+          {aiCatalog && Array.isArray(aiCatalog.models) && (
+            <div className="ai-switcher">
+              <span className="ai-provider">{aiCatalog.provider}</span>
+              {aiBalance?.state && (
+                <button
+                  type="button"
+                  className={`ai-balance ${aiBalance.state.toLowerCase()}`}
+                  onClick={() => void refreshAiBalance()}
+                  disabled={balanceBusy}
+                  title="Refresh provider balance"
+                >
+                  {balanceBusy ? 'Balance…' : balanceText(aiBalance)}
+                </button>
+              )}
+              <label className="sr-only" htmlFor="ai-model-select">AI model</label>
+              <select
+                id="ai-model-select"
+                aria-label="AI model"
+                title={aiModelLabel(aiCatalog.current_model)}
+                value={aiCatalog.current_model}
+                disabled={Boolean(aiBusy) || aiCatalog.models.length === 0}
+                onChange={(event) => void selectAiModel(event.target.value)}
+              >
+                {aiCatalog.models.map((model) => (
+                  <option key={model} value={model}>{aiModelLabel(model)}</option>
+                ))}
+              </select>
+              <button className="btn" disabled={Boolean(aiBusy)} onClick={() => void testAi()}>
+                {aiBusy === 'test' ? 'Testing…' : 'Test AI'}
+              </button>
+              {aiNotice && (
+                <span className={`ai-notice ${aiNotice.ok ? 'ok' : 'bad'}`} role="status">
+                  {aiNotice.text}
+                </span>
+              )}
+            </div>
+          )}
           <button className="btn primary" onClick={() => go('#/new')}>
             New Assessment
           </button>
@@ -298,13 +425,14 @@ export function App() {
               onTargetUpdated={(t) =>
                 setTargets((current) => current.map((c) => (c.target_ref === t.target_ref ? t : c)))
               }
+              onTargetDeleted={(targetRef) =>
+                setTargets((current) => current.filter((target) => target.target_ref !== targetRef))
+              }
             />
           ) : route.name === 'reports' ? (
             <ReportsView runs={runs} onOpen={(id) => go(`#/runs/${id}`)} />
           ) : route.name === 'audit' ? (
             <AuditView />
-          ) : route.name === 'beast' ? (
-            <BeastConsole />
           ) : route.name === 'debug' && DEV ? (
             <DebugView health={health} config={config} />
           ) : (
@@ -484,15 +612,45 @@ function TargetsView({
   profiles,
   onTargetCreated,
   onTargetUpdated,
+  onTargetDeleted,
 }: {
   targets: TargetEntry[]
   profiles: AssessmentProfile[]
   onTargetCreated: (t: TargetEntry) => void
   onTargetUpdated: (t: TargetEntry) => void
+  onTargetDeleted: (targetRef: string) => void
 }) {
   const [adding, setAdding] = useState(false)
+  const [editing, setEditing] = useState<TargetEntry>()
   const [detail, setDetail] = useState<TargetEntry>()
+  const [deleting, setDeleting] = useState<TargetEntry>()
+  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [deleteError, setDeleteError] = useState<string>()
   const [busy, setBusy] = useState<string>()
+
+  const openDelete = (target: TargetEntry) => {
+    setDeleteConfirmation('')
+    setDeleteError(undefined)
+    setDeleting(target)
+  }
+
+  const remove = async () => {
+    if (!deleting || deleteConfirmation !== deleting.name || busy) return
+    setBusy(deleting.target_ref)
+    setDeleteError(undefined)
+    try {
+      await consoleApi.deleteTarget(deleting.target_ref)
+      onTargetDeleted(deleting.target_ref)
+      if (detail?.target_ref === deleting.target_ref) setDetail(undefined)
+      if (editing?.target_ref === deleting.target_ref) setEditing(undefined)
+      setDeleting(undefined)
+      setDeleteConfirmation('')
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : 'The target could not be deleted.')
+    } finally {
+      setBusy(undefined)
+    }
+  }
 
   const toggle = async (target: TargetEntry) => {
     setBusy(target.target_ref)
@@ -517,6 +675,11 @@ function TargetsView({
       <Pill tone="success">Company</Pill>
     )
 
+  // A user-onboarded synthetic target is still mutable. The immutable distinction is catalog seed
+  // versus operator inventory, not merely whether the target environment is synthetic.
+  const operatorOwned = (target: TargetEntry) =>
+    target.origin_source === 'OPERATOR_ONBOARDED' || !target.synthetic
+
   return (
     <div>
       <div className="page-head with-action">
@@ -537,7 +700,7 @@ function TargetsView({
         />
       ) : (
         <div className="table-wrap">
-          <table>
+          <table className="targets-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -566,10 +729,10 @@ function TargetsView({
                       <div className="muted">+{target.authorized_scope.length - 2} more</div>
                     )}
                   </td>
-                  <td>{target.environment}</td>
+                  <td>{target.environment.replaceAll('_', ' ')}</td>
                   <td>
                     <Pill tone={target.status === 'AVAILABLE_FOR_ASSESSMENT' ? 'success' : 'neutral'}>
-                      {target.status.replaceAll('_', ' ')}
+                      {target.status === 'AVAILABLE_FOR_ASSESSMENT' ? 'Available' : target.status.replaceAll('_', ' ')}
                     </Pill>
                   </td>
                   <td className="muted">{target.last_assessment_at ? when(target.last_assessment_at) : '—'}</td>
@@ -580,14 +743,33 @@ function TargetsView({
                   </td>
                   <td className="target-actions">
                     <button className="link-btn" onClick={() => setDetail(target)}>View</button>
-                    {!target.synthetic && (
-                      <button
-                        className="link-btn"
-                        disabled={busy === target.target_ref}
-                        onClick={() => void toggle(target)}
+                    {operatorOwned(target) ? (
+                      <>
+                        <button className="link-btn" onClick={() => setEditing(target)}>Edit</button>
+                        <button
+                          className="link-btn"
+                          disabled={busy === target.target_ref}
+                          onClick={() => void toggle(target)}
+                        >
+                          {target.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        <button
+                          className="link-btn destructive"
+                          disabled={busy === target.target_ref}
+                          onClick={() => openDelete(target)}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    ) : (
+                      // A catalog-seeded target is controller-defined and immutable. The row says so
+                      // instead of silently hiding the edit affordance.
+                      <span
+                        className="immutable-note"
+                        title="Catalog-seeded targets are controller-defined and immutable. Onboard a target with '+ Add authorized target' to edit its authorized scope here."
                       >
-                        {target.enabled ? 'Disable' : 'Enable'}
-                      </button>
+                        Immutable
+                      </span>
                     )}
                     <button
                       className="link-btn"
@@ -626,6 +808,22 @@ function TargetsView({
               ]}
             />
             <div className="modal-actions">
+              {operatorOwned(detail) ? (
+                <>
+                  <button className="btn" onClick={() => {
+                    setEditing(detail)
+                    setDetail(undefined)
+                  }}>Edit</button>
+                  <button className="btn danger" onClick={() => {
+                    openDelete(detail)
+                    setDetail(undefined)
+                  }}>Delete</button>
+                </>
+              ) : (
+                <p className="immutable-note modal-note">
+                  Catalog-seeded target — immutable. Only operator-onboarded targets can be edited or deleted.
+                </p>
+              )}
               <button className="btn ghost" onClick={() => setDetail(undefined)}>Close</button>
             </div>
           </div>
@@ -640,6 +838,61 @@ function TargetsView({
             setAdding(false)
           }}
         />
+      )}
+
+      {editing && (
+        <AddTarget
+          editTarget={editing}
+          onClose={() => setEditing(undefined)}
+          onCreated={() => setEditing(undefined)}
+          onUpdated={(updated) => {
+            onTargetUpdated(updated)
+            setEditing(undefined)
+          }}
+        />
+      )}
+
+      {deleting && (
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Delete authorized target">
+          <div className="modal">
+            <h2>Delete authorized target</h2>
+            <p>
+              This removes <strong>{deleting.name}</strong> from the authorized inventory. Existing
+              assessment reports and evidence are retained, but no new assessment can use this target.
+            </p>
+            <label className="field wide">
+              <span>Type <strong>{deleting.name}</strong> to confirm</span>
+              <input
+                autoFocus
+                value={deleteConfirmation}
+                onChange={(event) => setDeleteConfirmation(event.target.value)}
+                aria-label="Target name confirmation"
+                autoComplete="off"
+              />
+            </label>
+            {deleteError && (
+              <div className="banner critical">
+                <div className="banner-body"><strong>Delete failed</strong>{deleteError}</div>
+              </div>
+            )}
+            <div className="modal-actions">
+              <button
+                className="btn ghost"
+                disabled={busy === deleting.target_ref}
+                onClick={() => setDeleting(undefined)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                disabled={deleteConfirmation !== deleting.name || busy === deleting.target_ref}
+                onClick={() => void remove()}
+              >
+                {busy === deleting.target_ref ? 'Deleting…' : 'Delete target'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

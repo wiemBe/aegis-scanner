@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+from aegis.beast.inventory import LAUNCHABLE_BEAST_TARGETS
+from aegis.beast.inventory import target as beast_target
 from aegis.engine.catalog import (
     PROFILE_CATALOG,
     get_engine_capability,
@@ -87,6 +89,183 @@ _PROFILE_COPY: dict[str, dict[str, object]] = {
     },
 }
 
+# Operator-facing capability packs that live outside the Phase 1 engine catalog. They appear in the
+# same assessment picker as every other capability; the disposable toolbox is an implementation
+# boundary, not a separate operator mode.
+_SUPPLEMENTAL_PROFILES: tuple[dict[str, object], ...] = (
+    {
+        "profile_id": "OUTSIDE_IN_WEB_DISCOVERY_V1",
+        "display_name": "Outside-in Web Discovery",
+        "operator_summary": (
+            "Enumerates the authorized web surface with FFUF and Gobuster from the disposable "
+            "adversary environment."
+        ),
+        "how_it_runs": (
+            "FFUF and Gobuster run from the normal assessment workflow inside a disposable "
+            "toolbox and can reach only the controller-selected target boundary."
+        ),
+        "advanced": True,
+        "order": 5,
+        "engine": "TOOLBOX",
+        "environment": "AUTHORIZED_INVENTORY",
+        "execution_mode": "STANDARD",
+        "tools": ["ffuf", "gobuster"],
+        "isolation_boundary": "Disposable assessment sandbox behind the controller target gateway.",
+        "capabilities": [
+            {
+                "capability_id": "aegis.recon.content_discovery",
+                "title": "Authorized content discovery (FFUF / Gobuster)",
+                "activity": "ACTIVE",
+                "request_budget": 64,
+                "concurrency_budget": 4,
+                "time_budget_ms": 120_000,
+                "requires_authentication": False,
+                "state_changing_possible": False,
+                "verified_severity": "UNKNOWN",
+                "required_approvals": ["OPERATOR_AUTHORIZATION_REFERENCE", "TOOLBOX_PREFLIGHT"],
+            }
+        ],
+    },
+    {
+        "profile_id": "SQLMAP_AUTHORIZED_WEB_V1",
+        "display_name": "SQL Injection Assessment",
+        "operator_summary": (
+            "Runs SQLMap against an observed parameter inside the authorized assessment boundary."
+        ),
+        "how_it_runs": (
+            "SQLMap runs from the normal assessment workflow in the disposable toolbox. Tool "
+            "output remains evidence; the independent verifier owns confirmation."
+        ),
+        "advanced": True,
+        "order": 8,
+        "engine": "TOOLBOX",
+        "environment": "AUTHORIZED_INVENTORY",
+        "execution_mode": "STANDARD",
+        "tools": ["sqlmap"],
+        "isolation_boundary": "Disposable assessment sandbox behind the controller target gateway.",
+        "capabilities": [
+            {
+                "capability_id": "aegis.injection.sqlmap",
+                "title": "SQLMap injection assessment",
+                "activity": "ACTIVE",
+                "request_budget": 800,
+                "concurrency_budget": 1,
+                "time_budget_ms": 180_000,
+                "requires_authentication": False,
+                "state_changing_possible": False,
+                "verified_severity": "HIGH",
+                "required_approvals": ["OPERATOR_AUTHORIZATION_REFERENCE", "TOOLBOX_PREFLIGHT"],
+            }
+        ],
+    },
+    {
+        "profile_id": "TOOLBOX_INFORMATION_EXPOSURE_V1",
+        "display_name": "Source-control & Configuration Exposure",
+        "operator_summary": (
+            "Checks the authorized surface for publicly exposed source-control metadata and "
+            "configuration artifacts with bounded read-only requests."
+        ),
+        "how_it_runs": (
+            "The disposable toolbox uses Curl and the pinned Nuclei binary only inside the "
+            "controller-selected target boundary. Direct response evidence is retained for the "
+            "independent verifier."
+        ),
+        "advanced": True,
+        "order": 6,
+        "engine": "TOOLBOX",
+        "environment": "AUTHORIZED_INVENTORY",
+        "execution_mode": "STANDARD",
+        "tools": ["curl", "nuclei"],
+        "isolation_boundary": "Disposable assessment sandbox behind the controller target gateway.",
+        "capabilities": [
+            {
+                "capability_id": "aegis.exposure.source_control",
+                "title": "Source-control and configuration exposure review",
+                "activity": "ACTIVE",
+                "request_budget": 40,
+                "concurrency_budget": 2,
+                "time_budget_ms": 180_000,
+                "requires_authentication": False,
+                "state_changing_possible": False,
+                "verified_severity": "MEDIUM",
+                "required_approvals": [
+                    "OPERATOR_AUTHORIZATION_REFERENCE",
+                    "TOOLBOX_PREFLIGHT",
+                ],
+            }
+        ],
+    },
+    {
+        "profile_id": "TOOLBOX_BOLA_READONLY_V1",
+        "display_name": "Read-only Object Authorization",
+        "operator_summary": (
+            "Compares bounded cross-owner object reads on the authorized synthetic API without "
+            "changing target state."
+        ),
+        "how_it_runs": (
+            "The disposable toolbox establishes synthetic controls and performs read-only "
+            "cross-owner requests. The deterministic verifier, not the model, decides whether an "
+            "authorization boundary failed."
+        ),
+        "advanced": True,
+        "order": 7,
+        "engine": "TOOLBOX",
+        "environment": "AUTHORIZED_INVENTORY",
+        "execution_mode": "STANDARD",
+        "tools": ["curl", "httpie"],
+        "isolation_boundary": "Disposable assessment sandbox behind the controller target gateway.",
+        "capabilities": [
+            {
+                "capability_id": "aegis.authorization.bola_readonly",
+                "title": "Read-only cross-owner object authorization comparison",
+                "activity": "ACTIVE",
+                "request_budget": 20,
+                "concurrency_budget": 2,
+                "time_budget_ms": 180_000,
+                "requires_authentication": False,
+                "state_changing_possible": False,
+                "verified_severity": "HIGH",
+                "required_approvals": [
+                    "OPERATOR_AUTHORIZATION_REFERENCE",
+                    "TOOLBOX_PREFLIGHT",
+                ],
+            }
+        ],
+    },
+    {
+        "profile_id": "IP_NETWORK_ASSESSMENT_V1",
+        "display_name": "IP & Network Service Assessment",
+        "operator_summary": (
+            "Discovers TCP/UDP services on an explicitly authorized IP address or CIDR with Nmap."
+        ),
+        "how_it_runs": (
+            "Uses the controller-owned AUTHORIZED_ENV_RECON profile and requires a signed lease "
+            "binding the exact saved IP/CIDR scope before the network runner can execute."
+        ),
+        "advanced": True,
+        "order": 9,
+        "engine": "RECON_NMAP",
+        "environment": "AUTHORIZED_INVENTORY",
+        "execution_mode": "NETWORK_RUNNER",
+        "tools": ["nmap"],
+        "isolation_boundary": "Dedicated network runner bound to an authorized inventory lease.",
+        "capabilities": [
+            {
+                "capability_id": "aegis.recon.network_service_discovery",
+                "title": "Authorized network service discovery (Nmap)",
+                "activity": "ACTIVE",
+                "request_budget": 1000,
+                "concurrency_budget": 1,
+                "time_budget_ms": 90_000,
+                "requires_authentication": False,
+                "state_changing_possible": False,
+                "verified_severity": "UNKNOWN",
+                "required_approvals": ["SIGNED_TARGET_LEASE"],
+            }
+        ],
+    },
+)
+
 # The controller-registered default AEGIS_NATIVE target used by the unqualified ``/api/scans``
 # flow. Presented alongside the range inventory so the operator selects from real authorized
 # targets only. No management origin, credential or answer-key material is projected.
@@ -121,16 +300,48 @@ def target_directory() -> list[dict[str, object]]:
     """
 
     targets: list[dict[str, object]] = [dict(_NATIVE_TARGET)]
-    for item in scanner_inventory():
+    for target_ref in LAUNCHABLE_BEAST_TARGETS:
+        item = beast_target(target_ref)
+        variant = "Patched" if target_ref.endswith("patched") else "Vulnerable"
         targets.append(
             {
-                "target_ref": item["target_ref"],
-                "name": item["name"],
+                "target_ref": item.target_ref,
+                "name": f"Disposable Toolbox Lab ({variant})",
+                "type": "Toolbox-enabled REST API",
+                "target_type": "SYNTHETIC",
+                "environment": item.environment.value,
+                "description": (
+                    "Controller-seeded disposable API target for autonomous normal-workflow "
+                    "tool assessments."
+                ),
+                "supported_profile_ids": [
+                    "OUTSIDE_IN_WEB_DISCOVERY_V1",
+                    "TOOLBOX_INFORMATION_EXPOSURE_V1",
+                    "TOOLBOX_BOLA_READONLY_V1",
+                    "SQLMAP_AUTHORIZED_WEB_V1",
+                ],
+                "origin_source": "CONTROLLER_SEEDED",
+                "synthetic": True,
+                "status": "AVAILABLE_FOR_ASSESSMENT",
+                "enabled": True,
+                "authorized_scope": [f"{item.origin}{item.base_path}"],
+                "authorization_reference": item.approval_reference,
+                "allowed_path_prefixes": [item.allowed_path_prefix],
+                "excluded_path_prefixes": [],
+                "credential_reference": None,
+                "last_assessment_at": None,
+            }
+        )
+    for scanner_item in scanner_inventory():
+        targets.append(
+            {
+                "target_ref": scanner_item["target_ref"],
+                "name": scanner_item["name"],
                 "type": "REST API",
                 "target_type": "SYNTHETIC",
-                "environment": item["environment"],
+                "environment": scanner_item["environment"],
                 "description": (
-                    f"Authorized synthetic range application ({item['application_id']})."
+                    f"Authorized synthetic range application ({scanner_item['application_id']})."
                 ),
                 # Range applications are assessed by the isolated engine profiles. Whether those
                 # profiles can execute in this deployment is decided by :func:`profile_directory`;
@@ -143,7 +354,7 @@ def target_directory() -> list[dict[str, object]]:
                 "synthetic": True,
                 "status": "AVAILABLE_FOR_ASSESSMENT",
                 "enabled": True,
-                "authorized_scope": [f"{item['origin']} (synthetic range)"],
+                "authorized_scope": [f"{scanner_item['origin']} (synthetic range)"],
                 "authorization_reference": "SYNTHETIC_RANGE_SCOPE",
                 "allowed_path_prefixes": [],
                 "excluded_path_prefixes": [],
@@ -189,6 +400,21 @@ def profile_directory(
                 "unavailable_reason": "" if state["available"] else state["reason"],
                 "capabilities": capabilities,
                 "isolation_boundary": profile.isolation_boundary,
+                "execution_mode": "STANDARD",
+                "tools": [],
+            }
+        )
+    for supplemental in _SUPPLEMENTAL_PROFILES:
+        profile_id = str(supplemental["profile_id"])
+        state = availability.get(
+            profile_id,
+            {"available": False, "reason": "Not available in this deployment."},
+        )
+        projected.append(
+            {
+                **supplemental,
+                "available": state["available"],
+                "unavailable_reason": "" if state["available"] else state["reason"],
             }
         )
     projected.sort(key=_profile_sort_order)
@@ -229,7 +455,15 @@ def _project_capability(capability_id: str) -> dict[str, object]:
 def _profile_sort_order(item: dict[str, object]) -> int:
     """Stable display order for a projected profile; unmapped profiles sort last."""
 
-    order = _PROFILE_COPY[str(item["profile_id"])]["order"]
+    profile_id = str(item["profile_id"])
+    if profile_id in _PROFILE_COPY:
+        order = _PROFILE_COPY[profile_id]["order"]
+    else:
+        supplemental = next(
+            (profile for profile in _SUPPLEMENTAL_PROFILES if profile["profile_id"] == profile_id),
+            None,
+        )
+        order = supplemental["order"] if supplemental else 999
     return order if isinstance(order, int) else 0
 
 

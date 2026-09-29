@@ -8,6 +8,7 @@ skipped/NOT_EVALUATED state rather than crashing.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -26,6 +27,18 @@ class DockerQueryError(ContainerAcceptanceError):
     or "resource absent". Callers catch this and fail closed (leftover state UNKNOWN), never treat
     it as a clean result.
     """
+
+
+def isolated_subnet(label: str, namespace: str) -> str:
+    """Return a deterministic /28 outside Docker Desktop's finite automatic address pools.
+
+    Ephemeral acceptance networks still have unique names and are removed after each run. Giving
+    them an explicit subnet prevents repeated tests from consuming Docker's predefined pools. The
+    namespace separates Phase 2.8/2.9 even when their random label suffixes happen to match.
+    """
+
+    digest = hashlib.sha256(f"{namespace}:{label}".encode("ascii")).digest()
+    return f"10.254.{digest[0]}.{digest[1] & 0xF0}/28"
 
 
 @dataclass(frozen=True)

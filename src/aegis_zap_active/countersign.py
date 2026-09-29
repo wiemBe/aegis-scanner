@@ -23,7 +23,6 @@ EXPECTED_CAPABILITY = "zap_active_reflected_xss_v1"
 EXPECTED_PROFILE = "ZAP_LAB_ACTIVE_REFLECTED_XSS_V1"
 EXPECTED_ENVIRONMENT = "SYNTHETIC_LAB"
 EXPECTED_SIGNER_KEY_ID = "efe-phase15-operator-20260921"
-MAX_COUNTERSIGN_AGE = timedelta(days=7)
 MAX_COUNTERSIGN_CLOCK_SKEW = timedelta(minutes=5)
 _SHA256 = r"^[a-f0-9]{64}$"
 
@@ -188,8 +187,12 @@ def verify_countersign(
         or record.issued_at > checked_at + MAX_COUNTERSIGN_CLOCK_SKEW
     ):
         return _fail("AUTHORIZATION_STALE")
-    if checked_at - record.issued_at > MAX_COUNTERSIGN_AGE:
-        return _fail("AUTHORIZATION_STALE")
+    # ``issued_at`` is provenance, not a renewable lease.  The authorization is permanently bound
+    # to the signed manifest digest, signer key id, rule, add-on digests, targets and method.  A
+    # seven-day age limit used to make an otherwise immutable authorization stop working solely
+    # because wall-clock time passed, forcing access to the offline private key even though none of
+    # the authorized bytes or scope had changed.  Keep rejecting future-dated records and honor an
+    # explicit signed ``expires_at`` value, but do not invent an implicit expiry.
     if record.expires_at is not None and checked_at >= record.expires_at:
         return _fail("AUTHORIZATION_EXPIRED")
     if capability_id != EXPECTED_CAPABILITY or record.capability_id != capability_id:

@@ -114,6 +114,36 @@ def test_logger_writes_single_line_valid_json() -> None:
     assert json.loads(lines[0])["service"] == "lab-api"
 
 
+def test_debug_step_accepts_gateway_service_without_expanding_schema() -> None:
+    record = build_record(
+        service="llm-gateway",
+        event="debug_step",
+        level="DEBUG",
+        request_id="-",
+        code="provider.construct.complete",
+    )
+    assert set(record).issubset(_ALLOWED_LOG_KEYS)
+    assert record["service"] == "llm-gateway"
+    assert record["event"] == "debug_step"
+    assert record["level"] == "DEBUG"
+    assert record["code"] == "provider.construct.complete"
+
+
+def test_diagnostic_error_events_remain_closed_schema() -> None:
+    for event in ("security_check", "background_error", "operation_error"):
+        record = build_record(
+            service="control-plane",
+            event=event,
+            level="ERROR",
+            request_id="-",
+            code="FIXED_DIAGNOSTIC_CODE",
+            exception_class="RuntimeError",
+        )
+        assert set(record).issubset(_ALLOWED_LOG_KEYS)
+        assert record["event"] == event
+        assert record["level"] == "ERROR"
+
+
 class _SecretStringObject:
     def __str__(self) -> str:
         return "SENTINEL-FROM-STR-MUST-NOT-LEAK"

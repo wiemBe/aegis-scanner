@@ -123,7 +123,7 @@ def issue_and_run(base_url: str, target_ref: str, scenario: str) -> dict[str, An
         "actor_type": "OPERATOR",
         "target_ref": target_ref,
         "profile_id": "BEAST_ADVERSARY_SANDBOX_V1",
-        "confirmation": "BEAST Disposable Synthetic Bank Adversary Target",
+        "confirmation": "ASSESS Disposable Synthetic Bank Adversary Target",
     }
     status, lease = request_json(f"{base_url}/api/beast/leases", lease_payload)
     assert status == 201, (status, lease)
@@ -196,7 +196,7 @@ def negative_controls(base_url: str, trials: int) -> dict[str, Any]:
         "actor_type": "OPERATOR",
         "target_ref": "beast-synthetic-vulnerable",
         "profile_id": "BEAST_ADVERSARY_SANDBOX_V1",
-        "confirmation": "BEAST Disposable Synthetic Bank Adversary Target",
+        "confirmation": "ASSESS Disposable Synthetic Bank Adversary Target",
     }
     statuses = []
     for _ in range(trials):

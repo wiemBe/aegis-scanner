@@ -21,15 +21,16 @@ verifier — never by the model.
 1. [Architecture](#architecture)
 2. [Deployment modes](#deployment-modes)
 3. [Requirements](#requirements)
-4. [Quick start — offline demo (no model)](#quick-start--offline-demo-no-model)
-5. [Local LLM demo (Ollama)](#local-llm-demo-ollama)
-6. [Operator Console](#operator-console)
-7. [Production deployment](#production-deployment)
-8. [Development & quality gates](#development--quality-gates)
-9. [Compose file reference](#compose-file-reference)
-10. [Safety & budgets](#safety--budgets)
-11. [Phase history](#phase-history)
-12. [Further documentation](#further-documentation)
+4. [One-command full stack](#one-command-full-stack)
+5. [Quick start — offline demo (no model)](#quick-start--offline-demo-no-model)
+6. [Local LLM demo (Ollama)](#local-llm-demo-ollama)
+7. [Operator Console](#operator-console)
+8. [Production deployment](#production-deployment)
+9. [Development & quality gates](#development--quality-gates)
+10. [Compose file reference](#compose-file-reference)
+11. [Safety & budgets](#safety--budgets)
+12. [Phase history](#phase-history)
+13. [Further documentation](#further-documentation)
 
 ---
 
@@ -98,6 +99,36 @@ retained as a **disabled** compatibility profile and must not be used as a defau
 - **Ollama** (local or on a GPU box) — only for `LOCAL_LLM` mode.
 - For the [standalone RHEL/Fedora production stack](docs/aegis-ai-prod-rhel.md): rootless
   **Podman** + SELinux.
+
+## One-command stack
+
+[`start.sh`](./start.sh) defaults to `deepseek-v4-pro`, selects the correct Compose overlay from an
+explicit model override, and starts the small long-running development stack (dashboard, control
+plane and model gateway). Synthetic range/scanner services are opt-in so they do not permanently
+consume Docker networks:
+
+```bash
+./start.sh
+./start.sh --model qwen3:8b
+./start.sh up --model deepseek-v4-pro
+./start.sh up --model qwen/qwen3.8-27b  # set OPENROUTER_API_KEY in .env.gateway first
+./start.sh up --full-lab                   # only when the complete range is needed
+```
+
+DeepSeek reads `AI_AUTH_TOKEN` and OpenRouter reads `OPENROUTER_API_KEY` from the untracked
+`.env.gateway`, which is loaded only into `llm-gateway`. Extensive timestamped diagnostics are enabled by default: launcher
+events are written to `artifacts/runtime-logs/`, while `./start.sh logs` follows the last 1,000
+timestamped service lines. Controller and gateway diagnostics use the closed structured schema and
+intentionally omit credentials, request/response bodies, query strings and raw model output.
+Third-party service-native lines are clearly prefixed by Compose and may contain ordinary
+operational target metadata. Use `--quiet` to suppress launcher DEBUG lines. Use
+`./start.sh models` for routing, `./start.sh status`, `./start.sh logs`, and `./start.sh down` for
+lifecycle operations. The Operator Console model dropdown switches among the selected provider's
+startup-allowlisted models. Its **Test AI** action makes one schema-constrained call against an
+ephemeral in-memory synthetic fixture, destroys the fixture in `finally`, and creates no container
+or Docker network. `--core-only` is the default; `--full-lab` adds the range, Nuclei, passive/active
+ZAP and the disposable toolbox (`--no-toolbox` excludes it). Phase acceptance/recon Compose files are
+finite test jobs and intentionally are not part of the long-running core stack.
 
 ---
 
@@ -170,12 +201,18 @@ response bodies and credentials; browser screenshots are disabled by default.
 
 Each run detail also has a **Transcript** tab — a debug view of the AI input → decision → result
 chain (the planner's hypothesis, the controller's execution, and the deterministic evidence/verifier
-outcome), plus the full structured event stream with raw evidence refs per step. A **BEAST Sandbox**
-panel (shown only when BEAST is enabled) provides the same per-turn transcript for the disposable
-adversary sandbox behind its typed-phrase activation gate. Completed runs are appended to a persisted
+outcome), plus the full structured event stream with raw evidence refs per step. Autonomous toolbox
+profiles use the same New Assessment flow and provide a per-turn transcript for their disposable
+workspace behind its typed-phrase activation gate. Completed runs are appended to a persisted
 **run ledger** (`run-ledger.csv` / `.jsonl`, next to the SQLite database, keyed by
 `date-<FQDN|API|IP>`); **Export CSV** on the Runs/Reports pages downloads it (`GET
 /api/console/runs.csv`).
+
+The New Assessment controls let the operator lower the target-request budget and wall-clock
+duration for one run; the controller rejects values above the deployment/capability ceiling and
+persists the effective limits with the run. The top bar also shows a credential-free DeepSeek
+account balance or OpenRouter API-key limit remainder/usage when the selected provider supports
+it. Balance lookup is fail-soft and all provider credentials remain inside `llm-gateway`.
 
 Reference: [console architecture](docs/operator-console-architecture.md),
 [event envelope](docs/audit-event-envelope.md),
@@ -255,14 +292,19 @@ never placed in the environment — it is a SELinux-labelled read-only file moun
 - **Cleanup** — `make cleanup-check` fails if any `aegis`-labelled container or network is left
   behind.
 
-### OpenRouter + Qwen3.8 27B (explicit opt-in)
+### OpenRouter reviewed model catalog (explicit opt-in)
 
-The OpenRouter profile pins the exact model ID `qwen/qwen3.8-27b`, requires strict JSON Schema
-support, requests ZDR and denies provider data collection on every call. The key is mounted only
-into `llm-gateway`; a CONNECT proxy restricts public egress to `openrouter.ai:443`.
+The OpenRouter profile allows only the reviewed model IDs `qwen/qwen3.8-27b`,
+`deepseek/deepseek-v4-flash` and four synchronous GLM 5.3 routes — `z-ai/glm-5.3`,
+`z-ai/glm-5.3-flash`, `z-ai/glm-5.3-flashx` and `z-ai/glm-5.3-prime`. Asynchronous `:batch`
+routes are excluded because they can exceed the live model-call timeout.
+The Operator Console dropdown switches between them at runtime.
+Each requires strict JSON Schema support, requests ZDR and denies provider data collection on every call. The untracked
+`.env.gateway` file is loaded only into `llm-gateway`; a CONNECT proxy restricts public egress to
+`openrouter.ai:443`.
 
 ```bash
-export OPENROUTER_API_KEY_SOURCE=/absolute/path/openrouter-api-key
+# Edit the existing OPENROUTER_API_KEY= line in .env.gateway, then:
 docker compose -f docker-compose.yml -f docker-compose.openrouter.yml up --build -d
 ```
 
@@ -329,7 +371,7 @@ on internal-only networks with **no published host port**.
 | `docker-compose.nuclei.yml` | Controlled Nuclei profile (Phase 1.2) |
 | `docker-compose.zap.yml` | Passive ZAP OpenAPI profile (Phase 1.3) |
 | `docker-compose.zap-active.yml` | Isolated active reflected-XSS ZAP profile (Phase 1.5) |
-| `docker-compose.beast.yml` | BEAST MODE disposable adversary sandbox (Phase 1.4, synthetic only) |
+| `docker-compose.beast.yml` | Disposable assessment toolbox (Phase 1.4; runs the operator-selected model; no fixed-model gate) |
 | `docker-compose.phase-1-7*.yml` | Multi-agent runtime overlays (recon / combined / 1.7-A) |
 | `docker-compose.mock-egress.yml` | Mock egress endpoint for isolation tests |
 
@@ -348,8 +390,9 @@ on internal-only networks with **no published host port**.
   response bodies. Target credentials are resolved only by the executor and redacted.
 - **Budgets** — default max **8 target requests (incl. import)**, 6 iterations, 6 model calls;
   bounded response bodies, no redirects, bounded total scan time (300 s scan / 90 s model default
-  for local inference). Token admission uses conservative cumulative reservations (an admission
-  policy, not billing).
+  for local inference). Operators may narrow the request/time ceilings per run but cannot widen
+  them. Token admission uses conservative cumulative reservations (an admission policy, not
+  billing).
 - **Fail-closed verdicts** — budget exhaustion, missing evidence and errors can never become `PASS`.
   Confirmed findings stay `FAIL` even if a later step fails. Review requests and safety rejections
   are always visible.
@@ -384,7 +427,7 @@ GO verdicts are scoped to the synthetic lab — never production or broad-covera
 | [1.1](docs/phase-1.1-security-tool-kernel.md) | Provider-independent security-tool integration kernel | GO (bounded BOLA via engine) |
 | [1.2](docs/phase-1.2-nuclei-integration.md) | Controlled Nuclei profile (one signed template) | GO (one synthetic capability) |
 | [1.3](docs/phase-1.3-zap-passive-openapi.md) | Passive-only ZAP OpenAPI profile | GO (one passive capability) |
-| [1.4](docs/phase-1.4-beast-mode.md) | BEAST MODE disposable adversary sandbox | Synthetic-lab only |
+| [1.4](docs/phase-1.4-beast-mode.md) | Disposable adversary sandbox, now the assessment toolbox (no separate operator mode) | Synthetic-lab only |
 | [1.4-B](docs/phase-1.4-b-beast-toolbox.md) | BEAST sandbox toolbox: AKCA + curated HexStrike web-recon (tool surface only) | Offline-accepted; live NOT_EVALUATED |
 | [1.5](docs/phase-1.5-zap-active-reflected-xss.md) | Narrow active reflected-XSS ZAP profile (single-use lease) | **GO** (one rule, one endpoint) |
 | [1.6](docs/phase-1.6-aegis-vulnerable-application-range.md) | Vulnerable application range: 4 apps, 19 scenarios, 3 chains | Catalog increment |

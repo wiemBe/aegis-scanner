@@ -7,7 +7,8 @@ an authority. The model still authors the exact `command_text` itself and may us
 tool or shell syntax. What actually bounds the adversary is the immutable target boundary
 (GET/HEAD/OPTIONS to one synthetic origin, under byte/rate/connection budgets) — not this note.
 
-Phase 1.4-B added `akca`, `katana` and `httpx` (see `docs/phase-1.4-b-beast-toolbox.md`). Every
+Phase 1.4-B added `akca`, `katana`, `httpx` and `gobuster` (see
+`docs/phase-1.4-b-beast-toolbox.md`). Every
 externally fetched binary here is pinned by version + SHA-256 in
 `deploy/beast-sandbox/tools.lock.json` and installed by the pinned, checksum-verified stages of
 `deploy/beast-sandbox/Dockerfile`. `tests/test_beast_toolbox.py` keeps the three in sync.
@@ -70,6 +71,14 @@ SANDBOX_TOOLBOX: tuple[BeastToolDescriptor, ...] = (
         name="ffuf",
         category="content-discovery",
         purpose="Fuzz for additional paths below the authorized base path via GET requests.",
+        source="debian",
+    ),
+    BeastToolDescriptor(
+        name="gobuster",
+        category="content-discovery",
+        purpose=(
+            "Enumerate paths below the authorized base path with a controller-bounded wordlist."
+        ),
         source="debian",
     ),
     BeastToolDescriptor(

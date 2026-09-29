@@ -9,10 +9,24 @@ class BudgetExceeded(ValueError):
 
 
 class ScanBudget:
-    def __init__(self, settings: Settings, usage: BudgetUsage) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        usage: BudgetUsage,
+        *,
+        max_requests: int | None = None,
+        time_budget_seconds: float | None = None,
+    ) -> None:
         self.settings = settings
         self.usage = usage
-        self.deadline = time.monotonic() + settings.scan_timeout_seconds
+        self.max_requests = min(
+            max_requests or settings.max_requests_per_scan, settings.max_requests_per_scan
+        )
+        self.time_budget_seconds = min(
+            time_budget_seconds or settings.scan_timeout_seconds,
+            settings.scan_timeout_seconds,
+        )
+        self.deadline = time.monotonic() + self.time_budget_seconds
         # Per-scan sink for the most recent provider run facts (set by the gateway planner).
         # Local to one run(), so concurrent scans never share provider metadata.
         self.provider_metadata: ProviderRunMetadata | None = None
@@ -26,7 +40,7 @@ class ScanBudget:
 
     def request(self) -> None:
         self.check_time()
-        if self.usage.requests >= self.settings.max_requests_per_scan:
+        if self.usage.requests >= self.max_requests:
             raise BudgetExceeded("REQUEST_BUDGET")
         self.usage.requests += 1
 

@@ -13,7 +13,8 @@ import re
 # The one place service names are defined. Metric/log ``service`` may only be one of these.
 SERVICE_CONTROL_PLANE = "control-plane"
 SERVICE_LAB_API = "lab-api"
-KNOWN_SERVICES = frozenset({SERVICE_CONTROL_PLANE, SERVICE_LAB_API})
+SERVICE_LLM_GATEWAY = "llm-gateway"
+KNOWN_SERVICES = frozenset({SERVICE_CONTROL_PLANE, SERVICE_LAB_API, SERVICE_LLM_GATEWAY})
 
 # Allowlisted HTTP methods; anything else collapses to ``OTHER``.
 METHOD_ALLOWLIST = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})

@@ -9,13 +9,22 @@ ROOT = Path(__file__).resolve().parents[1]
 OVERLAY = ROOT / "docker-compose.openrouter.yml"
 PROD = ROOT / "docker-compose.openrouter.prod.yml"
 SQUID = ROOT / "deploy" / "egress-proxy.openrouter.squid.conf"
+APPROVED_MODELS = {
+    "qwen/qwen3.8-27b",
+    "deepseek/deepseek-v4-flash",
+    # Live-scan-safe synchronous GLM 5.3 routes; asynchronous :batch routes stay excluded.
+    "z-ai/glm-5.3",
+    "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.3-flashx",
+    "z-ai/glm-5.3-prime",
+}
 
 
 def compose() -> dict[str, Any]:
     return yaml.safe_load(OVERLAY.read_text(encoding="utf-8"))
 
 
-def test_gateway_has_exact_model_key_file_and_private_routing() -> None:
+def test_gateway_has_exact_model_gateway_only_env_file_and_private_routing() -> None:
     services = compose()["services"]
     control = services["control-plane"]
     gateway = services["llm-gateway"]
@@ -23,19 +32,23 @@ def test_gateway_has_exact_model_key_file_and_private_routing() -> None:
     gateway_env = gateway["environment"]
 
     assert control_env["AI_PROVIDER"] == "openrouter"
+    assert control_env["AI_BASE_URL"] == "https://openrouter.ai"
     assert control_env["AI_MODEL"] == "qwen/qwen3.8-27b"
     assert "OPENROUTER_API_KEY" not in control_env
     assert "OPENROUTER_API_KEY_FILE" not in control_env
     assert gateway_env["AI_PROVIDER"] == "openrouter"
     assert gateway_env["AI_BASE_URL"] == "https://openrouter.ai"
     assert gateway_env["AI_MODEL"] == "qwen/qwen3.8-27b"
-    assert gateway_env["AI_ALLOWED_MODELS"] == "qwen/qwen3.8-27b"
-    assert gateway_env["OPENROUTER_API_KEY_FILE"] == "/run/secrets/openrouter-api-key"
+    assert set(control_env["AI_ALLOWED_MODELS"].split(",")) == APPROVED_MODELS
+    assert set(gateway_env["AI_ALLOWED_MODELS"].split(",")) == APPROVED_MODELS
+    assert "OPENROUTER_API_KEY" not in gateway_env
+    assert "OPENROUTER_API_KEY_FILE" not in gateway_env
+    assert gateway["env_file"] == [{"path": ".env.gateway", "required": False}]
     assert gateway_env["AI_USE_EGRESS_PROXY"] == "true"
     assert gateway["networks"] == ["planner-rpc", "gateway-egress"]
     assert "security-lab" not in gateway["networks"]
     assert "provider-egress" not in gateway["networks"]
-    assert any("OPENROUTER_API_KEY_SOURCE" in item for item in gateway["volumes"])
+    assert all("openrouter-api-key" not in item for item in gateway["volumes"])
 
 
 def test_only_proxy_joins_public_egress_and_has_no_key() -> None:

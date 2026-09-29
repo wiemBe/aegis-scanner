@@ -15,11 +15,13 @@ results, and produce evidence for independent verification.”
 
 ## Control boundary
 
-The operator activates `BEAST_ACTIVE` only after a server-side preflight and exact typed phrase,
-`BEAST Disposable Synthetic Bank Adversary Target`. The resulting lease is operator-, target-,
-profile- and capability-bound; single-use; non-renewable by the model; at most 15 minutes; and
-revoked at completion or emergency stop. `SAFE_PASSIVE` remains the default and `PRODUCTION_SAFE`
-does not expose Phase 1.4 capabilities.
+The operator activates the disposable sandbox only after a server-side preflight and exact typed
+phrase, `ASSESS Disposable Synthetic Bank Adversary Target` (the phrase was renamed from the older
+`BEAST …` form when the separate mode was retired; the sandbox itself is unchanged). The resulting
+lease is operator-, target-, profile- and capability-bound; single-use; non-renewable by the model;
+at most 15 minutes; and revoked at completion or emergency stop. A lease issued from the assessment
+wizard under an operator-facing TOOLBOX profile authorizes exactly that profile's bound scenario.
+`SAFE_PASSIVE` remains the default and `PRODUCTION_SAFE` does not expose Phase 1.4 capabilities.
 
 The command text is opaque data until the sandbox supervisor invokes `/bin/bash -c` under uid/gid
 65532. The supervisor is root-owned and read-only, drops the child identity and groups, applies

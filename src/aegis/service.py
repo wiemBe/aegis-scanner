@@ -152,6 +152,28 @@ class ScanService:
             zap=self.zap if settings.zap_enabled else None,
         )
 
+    def _request_limit(self, result: ScanResult) -> int:
+        return min(
+            result.request_budget or self.settings.max_requests_per_scan,
+            self.settings.max_requests_per_scan,
+        )
+
+    def _time_limit_seconds(self, result: ScanResult) -> float:
+        requested = (
+            result.time_budget_ms / 1000
+            if result.time_budget_ms is not None
+            else self.settings.scan_timeout_seconds
+        )
+        return min(requested, self.settings.scan_timeout_seconds)
+
+    def _scan_budget(self, result: ScanResult) -> ScanBudget:
+        return ScanBudget(
+            self.settings,
+            result.usage,
+            max_requests=self._request_limit(result),
+            time_budget_seconds=self._time_limit_seconds(result),
+        )
+
     def create(self, request: ScanCreate | None = None) -> ScanResult:
         request = request or ScanCreate()
         if request.capability is not None:
@@ -206,6 +228,8 @@ class ScanService:
             scenario=scenario,
             retest_of=request.retest_of,
             retest_objectives=objectives,
+            request_budget=request.request_budget,
+            time_budget_ms=request.time_budget_ms,
         )
         self.store.save(result)
         self.store.add_audit(
@@ -218,11 +242,11 @@ class ScanService:
                 "retest_of": result.retest_of,
                 "planner_contract_version": result.planner_contract_version,
                 "limits": {
-                    "requests_including_import": self.settings.max_requests_per_scan,
+                    "requests_including_import": self._request_limit(result),
                     "iterations": self.settings.max_iterations,
                     "model_calls": self.settings.max_model_calls,
                     "token_reservations": self.settings.max_tokens_per_scan,
-                    "seconds": self.settings.scan_timeout_seconds,
+                    "seconds": self._time_limit_seconds(result),
                 },
             },
         )
@@ -294,7 +318,7 @@ class ScanService:
             prior_finding="Confirmed cross-owner account read" if result.retest_of else None,
             retest_objectives=[o.model_dump() for o in result.retest_objectives],
             remaining={
-                "requests": self.settings.max_requests_per_scan - result.usage.requests,
+                "requests": self._request_limit(result) - result.usage.requests,
                 "iterations": self.settings.max_iterations - result.usage.iterations,
                 "model_calls": self.settings.max_model_calls - result.usage.model_calls,
                 "token_reservations": self.settings.max_tokens_per_scan
@@ -620,12 +644,13 @@ class ScanService:
                 method=r.method,
                 path=r.path,
                 credential_profile=r.credential_profile,
-                object_ref=r.path.rsplit("/", 1)[-1] if r.path.rsplit("/", 1)[-1] in OBJECTS
+                object_ref=r.path.rsplit("/", 1)[-1]
+                if r.path.rsplit("/", 1)[-1] in OBJECTS
                 else None,
             )
             for r in hypothesis.requests
         ]
-        remaining = {"requests": self.settings.max_requests_per_scan - result.usage.requests}
+        remaining = {"requests": self._request_limit(result) - result.usage.requests}
         return build_engine_job(
             engine=SecurityEngine.AEGIS_NATIVE,
             profile_id=_AEGIS_NATIVE_PROFILE_ID,
@@ -949,9 +974,9 @@ class ScanService:
             return
         result.status = ScanStatus.RUNNING
         self._audit(result, "SCAN_STARTED", {})
-        budget = ScanBudget(self.settings, result.usage)
+        budget = self._scan_budget(result)
         try:
-            async with asyncio.timeout(self.settings.scan_timeout_seconds):
+            async with asyncio.timeout(self._time_limit_seconds(result)):
                 await self._loop(result, budget)
         except SafetyViolation as exc:
             result.status = ScanStatus.REVIEW
@@ -1072,6 +1097,8 @@ class ScanService:
             engine_kernel_version=ENGINE_KERNEL_VERSION,
             capability_id=capability.capability_id,
             target_ref=target_ref,
+            request_budget=request.request_budget,
+            time_budget_ms=request.time_budget_ms,
         )
         self.store.save(result)
         self.store.add_audit(
@@ -1086,8 +1113,8 @@ class ScanService:
                 "capability": capability.capability_id,
                 "target_ref": target_ref,
                 "limits": {
-                    "requests_including_import": self.settings.max_requests_per_scan,
-                    "seconds": self.settings.scan_timeout_seconds,
+                    "requests_including_import": self._request_limit(result),
+                    "seconds": self._time_limit_seconds(result),
                 },
             },
         )
@@ -1096,9 +1123,9 @@ class ScanService:
     async def _run_nuclei_scan(self, result: ScanResult) -> None:
         result.status = ScanStatus.RUNNING
         self._audit(result, "SCAN_STARTED", {"engine": SecurityEngine.NUCLEI.value})
-        budget = ScanBudget(self.settings, result.usage)
+        budget = self._scan_budget(result)
         try:
-            async with asyncio.timeout(self.settings.scan_timeout_seconds):
+            async with asyncio.timeout(self._time_limit_seconds(result)):
                 await self._nuclei_flow(result, budget)
         except SafetyViolation as exc:
             result.status = ScanStatus.REVIEW
@@ -1255,7 +1282,7 @@ class ScanService:
                 run_id=result.id,
                 environment=EngineEnvironment.SYNTHETIC_LAB,
                 target_ref=result.target_ref or "",
-                remaining_requests=self.settings.max_requests_per_scan - result.usage.requests,
+                remaining_requests=self._request_limit(result) - result.usage.requests,
                 allowed_origins=[self.settings.lab_base_url],
                 adapter_enabled=self.nuclei.enabled,
             )
@@ -1672,9 +1699,12 @@ class ScanService:
     ) -> list[NormalizedEvidence]:
         items = []
         for fact in facts:
-            digest = fact.body_sha256 or hashlib.sha256(
-                json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
-            ).hexdigest()
+            digest = (
+                fact.body_sha256
+                or hashlib.sha256(
+                    json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
+                ).hexdigest()
+            )
             items.append(
                 NormalizedEvidence(
                     evidence_id=f"{result.id}:{fact.name}",
@@ -1708,9 +1738,13 @@ class ScanService:
 
         capability = get_engine_capability(request.capability or "")
         profile_capabilities = {"zap_passive_header_openapi_v1"}
-        if capability is None or capability.engine is not SecurityEngine.ZAP or not (
-            capability.capability_id in profile_capabilities
-            or "NEVER_APPROVED" in capability.required_approvals
+        if (
+            capability is None
+            or capability.engine is not SecurityEngine.ZAP
+            or not (
+                capability.capability_id in profile_capabilities
+                or "NEVER_APPROVED" in capability.required_approvals
+            )
         ):
             # The retired Phase 1.1 placeholder and unknown ids are refused outright.
             raise ValueError("Unknown or unsupported engine capability")
@@ -1759,6 +1793,8 @@ class ScanService:
             engine_kernel_version=ENGINE_KERNEL_VERSION,
             capability_id=capability.capability_id,
             target_ref=target_ref,
+            request_budget=request.request_budget,
+            time_budget_ms=request.time_budget_ms,
         )
         self.store.save(result)
         self.store.add_audit(
@@ -1773,8 +1809,8 @@ class ScanService:
                 "capability": capability.capability_id,
                 "target_ref": target_ref,
                 "limits": {
-                    "requests_including_import": self.settings.max_requests_per_scan,
-                    "seconds": self.settings.scan_timeout_seconds,
+                    "requests_including_import": self._request_limit(result),
+                    "seconds": self._time_limit_seconds(result),
                 },
             },
         )
@@ -1783,10 +1819,10 @@ class ScanService:
     async def _run_zap_scan(self, result: ScanResult) -> None:
         result.status = ScanStatus.RUNNING
         self._audit(result, "SCAN_STARTED", {"engine": SecurityEngine.ZAP.value})
-        budget = ScanBudget(self.settings, result.usage)
+        budget = self._scan_budget(result)
         try:
             async with asyncio.timeout(
-                max(self.settings.scan_timeout_seconds, self.settings.zap_rpc_timeout_seconds + 30)
+                max(self._time_limit_seconds(result), self.settings.zap_rpc_timeout_seconds + 30)
             ):
                 await self._zap_flow(result, budget)
         except SafetyViolation as exc:
@@ -1988,7 +2024,7 @@ class ScanService:
                 run_id=result.id,
                 environment=EngineEnvironment.SYNTHETIC_LAB,
                 target_ref=result.target_ref or "",
-                remaining_requests=self.settings.max_requests_per_scan - result.usage.requests,
+                remaining_requests=self._request_limit(result) - result.usage.requests,
                 allowed_origins=[self.settings.lab_base_url],
                 adapter_enabled=self.zap.enabled,
             )
@@ -2347,9 +2383,7 @@ class ScanService:
             },
         )
         code = (error.detail or error.code.value) if error else "UNKNOWN"
-        self._zap_terminal(
-            result, f"ZAP_EXECUTION_INCOMPLETE_{code}"[:120], ScanStatus.INCOMPLETE
-        )
+        self._zap_terminal(result, f"ZAP_EXECUTION_INCOMPLETE_{code}"[:120], ScanStatus.INCOMPLETE)
 
     def _zap_observations(
         self,
@@ -2489,9 +2523,12 @@ class ScanService:
     ) -> list[NormalizedEvidence]:
         items = []
         for fact in facts:
-            digest = fact.body_sha256 or hashlib.sha256(
-                json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
-            ).hexdigest()
+            digest = (
+                fact.body_sha256
+                or hashlib.sha256(
+                    json.dumps(fact.model_dump(mode="json"), sort_keys=True).encode()
+                ).hexdigest()
+            )
             items.append(
                 NormalizedEvidence(
                     evidence_id=f"{result.id}:{fact.name}",

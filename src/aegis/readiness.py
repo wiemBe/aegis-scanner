@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aegis.settings import OPENROUTER_QWEN_MODEL, Settings
+from aegis.settings import OPENROUTER_APPROVED_MODELS, Settings
 from aegis.storage import ScanStore
 
 READINESS_CONTRACT_VERSION = "readiness-v3"
@@ -213,17 +213,17 @@ def _check_provider_configuration(settings: Settings) -> ReadinessCheck:
                 name=name, status=CheckStatus.FAIL, detail="AI_BASE_URL has no host"
             )
         if provider == "openrouter":
-            if model != OPENROUTER_QWEN_MODEL:
+            if model not in OPENROUTER_APPROVED_MODELS:
                 return ReadinessCheck(
                     name=name,
                     status=CheckStatus.FAIL,
-                    detail="openrouter requires the exact pinned model",
+                    detail="openrouter requires a model from the reviewed catalog",
                 )
-            if settings.allowed_model_set != {OPENROUTER_QWEN_MODEL}:
+            if settings.allowed_model_set != OPENROUTER_APPROVED_MODELS:
                 return ReadinessCheck(
                     name=name,
                     status=CheckStatus.FAIL,
-                    detail="openrouter allowlist must contain only the pinned model",
+                    detail="openrouter allowlist must exactly match the reviewed catalog",
                 )
             if parsed.hostname != "openrouter.ai":
                 return ReadinessCheck(

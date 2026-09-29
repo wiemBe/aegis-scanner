@@ -6,6 +6,10 @@ import { Pill } from './components'
 type Props = {
   onClose: () => void
   onCreated: (target: TargetEntry) => void
+  // When present the form edits an existing operator-onboarded target in place (PUT) instead of
+  // creating a new one. Catalog-seeded targets are immutable and are never passed here.
+  editTarget?: TargetEntry
+  onUpdated?: (target: TargetEntry) => void
 }
 
 const TYPE_OPTIONS: { value: TargetType; label: string; help: string }[] = [
@@ -44,24 +48,35 @@ function reason(code: string): string {
   return REASON_COPY[code] ?? code
 }
 
-export function AddTarget({ onClose, onCreated }: Props) {
-  const [targetType, setTargetType] = useState<TargetType>('WEBSITE')
-  const [displayName, setDisplayName] = useState('')
-  const [environment, setEnvironment] = useState<(typeof ENVIRONMENTS)[number]>('PRODUCTION')
-  const [owner, setOwner] = useState('')
-  const [authRef, setAuthRef] = useState('')
-  const [description, setDescription] = useState('')
+export function AddTarget({ onClose, onCreated, editTarget, onUpdated }: Props) {
+  const editing = Boolean(editTarget)
+  // Prefill from the existing record's safe structured projection. Authorization attestation is
+  // deliberately re-taken for every scope change.
+  const isNetworkEdit = editTarget?.target_type === 'IP_CIDR'
+  const originText = (editTarget?.origins ?? editTarget?.authorized_scope.filter((scope) => !scope.startsWith('*.')) ?? []).join('\n')
+  const addressText = (editTarget?.addresses ?? (isNetworkEdit ? editTarget?.authorized_scope : []) ?? []).join('\n')
+
+  const [targetType, setTargetType] = useState<TargetType>(editTarget?.target_type ?? 'WEBSITE')
+  const [displayName, setDisplayName] = useState(editTarget?.name ?? '')
+  const [environment, setEnvironment] = useState<(typeof ENVIRONMENTS)[number]>(
+    (ENVIRONMENTS as readonly string[]).includes(editTarget?.environment ?? '')
+      ? (editTarget!.environment as (typeof ENVIRONMENTS)[number])
+      : 'PRODUCTION',
+  )
+  const [owner, setOwner] = useState(editTarget?.owner ?? '')
+  const [authRef, setAuthRef] = useState(editTarget?.authorization_reference ?? '')
+  const [description, setDescription] = useState(editTarget?.description ?? '')
   const [attested, setAttested] = useState(false)
 
-  const [origins, setOrigins] = useState('')
-  const [wildcards, setWildcards] = useState('')
-  const [wildcardAuthorized, setWildcardAuthorized] = useState(false)
-  const [openapiUrl, setOpenapiUrl] = useState('')
-  const [credentialReference, setCredentialReference] = useState('')
-  const [allowedPaths, setAllowedPaths] = useState('')
-  const [excludedPaths, setExcludedPaths] = useState('')
-  const [addresses, setAddresses] = useState('')
-  const [cidrAuthorized, setCidrAuthorized] = useState(false)
+  const [origins, setOrigins] = useState(isNetworkEdit ? '' : originText)
+  const [wildcards, setWildcards] = useState((editTarget?.wildcard_subdomains ?? []).map((domain) => `*.${domain}`).join('\n'))
+  const [wildcardAuthorized, setWildcardAuthorized] = useState(Boolean(editTarget?.wildcard_subdomains?.length))
+  const [openapiUrl, setOpenapiUrl] = useState(editTarget?.openapi_url ?? '')
+  const [credentialReference, setCredentialReference] = useState(editTarget?.credential_reference ?? '')
+  const [allowedPaths, setAllowedPaths] = useState(editTarget?.allowed_path_prefixes.join('\n') ?? '')
+  const [excludedPaths, setExcludedPaths] = useState(editTarget?.excluded_path_prefixes.join('\n') ?? '')
+  const [addresses, setAddresses] = useState(isNetworkEdit ? addressText : '')
+  const [cidrAuthorized, setCidrAuthorized] = useState(Boolean(editTarget?.addresses?.some((address) => address.includes('/'))))
 
   const [preview, setPreview] = useState<ScopePreview>()
   const [error, setError] = useState<string>()
@@ -120,21 +135,27 @@ export function AddTarget({ onClose, onCreated }: Props) {
     setError(undefined)
     setBusy(true)
     try {
-      const created = await consoleApi.createTarget(request)
-      onCreated(created)
+      if (editing && editTarget) {
+        const updated = await consoleApi.updateTarget(editTarget.target_ref, request)
+        onUpdated?.(updated)
+      } else {
+        const created = await consoleApi.createTarget(request)
+        onCreated(created)
+      }
     } catch (e) {
-      setError(reason(e instanceof Error ? e.message : 'CREATE_FAILED'))
+      setError(reason(e instanceof Error ? e.message : editing ? 'UPDATE_FAILED' : 'CREATE_FAILED'))
       setBusy(false)
     }
   }
 
   return (
-    <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Add authorized target">
+    <div className="modal-scrim" role="dialog" aria-modal="true" aria-label={editing ? 'Edit authorized target' : 'Add authorized target'}>
       <div className="modal target-modal">
-        <h2>Add authorized target</h2>
+        <h2>{editing ? 'Edit authorized target' : 'Add authorized target'}</h2>
         <p>
-          Add the exact company origins you are authorized to assess. Redirects and discovered hosts
-          outside this scope will not be followed.
+          {editing
+            ? 'Update the authorized scope for this target. Changes are re-validated and re-normalized; re-confirm your authorization below.'
+            : 'Add the exact company origins you are authorized to assess. Redirects and discovered hosts outside this scope will not be followed.'}
         </p>
 
         <div className="type-tabs" role="tablist">
@@ -293,7 +314,7 @@ export function AddTarget({ onClose, onCreated }: Props) {
         <div className="modal-actions">
           <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
           <button className="btn" onClick={runPreview} disabled={!canSubmit}>Preview scope</button>
-          <button className="btn primary" onClick={save} disabled={!canSubmit}>Add and continue</button>
+          <button className="btn primary" onClick={save} disabled={!canSubmit}>{editing ? 'Save changes' : 'Add and continue'}</button>
         </div>
       </div>
     </div>

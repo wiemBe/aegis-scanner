@@ -45,11 +45,8 @@ function tokens(call: BeastModelCall): string {
   return `${total || '—'} tok (in ${inTok ?? '—'} / out ${outTok ?? '—'})`
 }
 
-// BEAST is the deliberately gated Phase 1.4 disposable adversary sandbox. This panel is the console
-// surface for it. It preserves the operator-activation gate: a typed confirmation phrase and a
-// server preflight are required before a single-use lease is issued — this is not a one-click scan.
-// Phase 1.4-B added AKCA + curated HexStrike web-recon tools inside the sandbox; the boundary
-// (GET/HEAD/OPTIONS gateway, verifier authority, synthetic-only, cleanup) is unchanged.
+// Internal implementation of the autonomous toolbox assessment. The operator sees it as a normal
+// assessment profile; the disposable sandbox remains an execution boundary, not a separate mode.
 
 const SCENARIO_LABELS: Record<string, string> = {
   endpoint_discovery: 'Endpoint discovery',
@@ -212,13 +209,27 @@ function TranscriptTurn({
   )
 }
 
-export function BeastConsole() {
+export function BeastConsole({
+  embedded = false,
+  initialTargetRef,
+  initialScenario,
+  operatorProfileId,
+  onBack,
+}: {
+  embedded?: boolean
+  initialTargetRef?: string
+  initialScenario?: string
+  operatorProfileId?: string
+  onBack?: () => void
+}) {
   const [config, setConfig] = useState<BeastConfig>()
   const [loading, setLoading] = useState(true)
   const [preflight, setPreflight] = useState<BeastPreflight>()
-  const [targetRef, setTargetRef] = useState<string>()
+  const [targetRef, setTargetRef] = useState<string | undefined>(initialTargetRef)
   const [operatorId, setOperatorId] = useState('')
   const [scenario, setScenario] = useState<string>()
+  const [requestBudget, setRequestBudget] = useState('')
+  const [durationMinutes, setDurationMinutes] = useState('')
   const [phrase, setPhrase] = useState('')
   const [run, setRun] = useState<BeastRunView>()
   const [events, setEvents] = useState<BeastEvent[]>([])
@@ -231,17 +242,30 @@ export function BeastConsole() {
     consoleApi
       .beastConfig()
       .then((cfg) => setConfig(cfg))
-      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load BEAST config.'))
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load toolbox config.'))
       .finally(() => setLoading(false))
     return () => {
       if (pollRef.current !== undefined) window.clearInterval(pollRef.current)
     }
   }, [])
 
-  const requiredPhrase = preflight ? `BEAST ${preflight.target.name}` : ''
+  const requiredPhrase = preflight ? `ASSESS ${preflight.target.name}` : ''
   const phraseOk = phrase.trim() === requiredPhrase && requiredPhrase !== ''
   const operatorOk = /^[A-Za-z0-9._@-]{3,80}$/.test(operatorId)
-  const canActivate = Boolean(preflight && scenario && phraseOk && operatorOk && !busy)
+  const requestBudgetValue = Number(requestBudget)
+  const durationSeconds = Math.round(Number(durationMinutes) * 60)
+  const resourceLimitsOk = Boolean(
+    preflight &&
+    Number.isInteger(requestBudgetValue) &&
+    requestBudgetValue >= 1 &&
+    requestBudgetValue <= preflight.resources.max_target_connections &&
+    Number.isFinite(durationSeconds) &&
+    durationSeconds >= 10 &&
+    durationSeconds <= preflight.resources.total_wall_time_seconds,
+  )
+  const canActivate = Boolean(
+    preflight && scenario && phraseOk && operatorOk && resourceLimitsOk && !busy,
+  )
 
   const selectTarget = useCallback(async (ref: string) => {
     setTargetRef(ref)
@@ -253,13 +277,23 @@ export function BeastConsole() {
     try {
       const pf = await consoleApi.beastPreflight(ref)
       setPreflight(pf)
-      if (pf.enabled_capabilities.length === 1) setScenario(pf.enabled_capabilities[0])
+      setRequestBudget(String(pf.resources.max_target_connections))
+      setDurationMinutes(String(pf.resources.total_wall_time_seconds / 60))
+      if (initialScenario && pf.enabled_capabilities.includes(initialScenario)) {
+        setScenario(initialScenario)
+      } else if (pf.enabled_capabilities.length === 1) {
+        setScenario(pf.enabled_capabilities[0])
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Preflight was rejected by the controller.')
     } finally {
       setBusy(false)
     }
-  }, [])
+  }, [initialScenario])
+
+  useEffect(() => {
+    if (initialTargetRef) void selectTarget(initialTargetRef)
+  }, [initialTargetRef, selectTarget])
 
   const poll = useCallback((runId: string) => {
     if (pollRef.current !== undefined) window.clearInterval(pollRef.current)
@@ -289,7 +323,13 @@ export function BeastConsole() {
         actor_type: 'OPERATOR',
         target_ref: targetRef,
         profile_id: config.profile_id,
+        ...(operatorProfileId ? { operator_profile_id: operatorProfileId } : {}),
         confirmation: phrase.trim(),
+        requested_resources: {
+          ...preflight.resources,
+          max_target_connections: requestBudgetValue,
+          total_wall_time_seconds: durationSeconds,
+        },
       })
       const created = await consoleApi.beastCreateRun({
         lease_id: lease.lease_id,
@@ -300,11 +340,22 @@ export function BeastConsole() {
       setNotice(`Lease ${lease.lease_id} issued; run ${created.run_id} started.`)
       poll(created.run_id)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Activation was rejected by the controller.')
+      setError(e instanceof Error ? e.message : 'The toolbox assessment was rejected by the controller.')
     } finally {
       setBusy(false)
     }
-  }, [config, preflight, targetRef, scenario, operatorId, phrase, poll])
+  }, [
+    config,
+    preflight,
+    targetRef,
+    scenario,
+    operatorId,
+    operatorProfileId,
+    phrase,
+    requestBudgetValue,
+    durationSeconds,
+    poll,
+  ])
 
   const stop = useCallback(async () => {
     if (!run) return
@@ -326,8 +377,10 @@ export function BeastConsole() {
     setRun(undefined)
     setEvents([])
     setPreflight(undefined)
-    setTargetRef(undefined)
+    setTargetRef(initialTargetRef)
     setScenario(undefined)
+    setRequestBudget('')
+    setDurationMinutes('')
     setPhrase('')
     setNotice(undefined)
     setError(undefined)
@@ -353,26 +406,47 @@ export function BeastConsole() {
     ]
   }, [preflight])
 
-  if (loading) return <Loading label="Loading BEAST sandbox…" />
+  if (loading) return <Loading label="Loading assessment toolbox…" />
 
   return (
     <div className="stack">
       <div className="page-head">
-        <h1>BEAST Adversary Sandbox</h1>
+        {embedded ? <h2>Autonomous toolbox assessment</h2> : <h1>Autonomous toolbox assessment</h1>}
         <p>
-          Disposable, network-isolated adversary sandbox — synthetic lab only. The AI authors its own
-          commands inside a bounded gateway; the independent verifier alone confirms findings.
+          The model can select from the verified tool inventory inside a disposable, network-isolated
+          workspace. The independent verifier alone confirms findings.
         </p>
+        {onBack && <button className="btn ghost" onClick={onBack}>← Back to assessments</button>}
       </div>
+
+      {!embedded && config?.tools?.length ? (
+        <div className="panel toolbox-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Installed sandbox toolbox</h2>
+              <span className="sub">Controller-reported inventory · {config.tools.length} tools</span>
+            </div>
+          </div>
+          <div className="toolbox-grid">
+            {config.tools.map((tool) => (
+              <div className="toolbox-item" key={tool.name}>
+                <div>
+                  <strong className="mono">{tool.name}</strong>
+                  <Pill tone="neutral">{tool.category}</Pill>
+                </div>
+                <p>{tool.purpose}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {!config?.enabled ? (
         <div className="banner critical">
           <div className="banner-body">
-            <strong>BEAST is disabled.</strong> This is the safe default. To enable it, an operator
-            must bring up the stack with the <code>docker-compose.beast.yml</code> overlay,{' '}
-            <code>BEAST_ENABLED=true</code>, and <code>LOCAL_LLM</code> using the exact approved model
-            (<code>{config?.required_model ?? 'qwen3:8b'}</code>). It cannot be enabled from the
-            browser.
+            <strong>The disposable toolbox is unavailable.</strong> Start the stack with the
+            toolbox enabled so the controller, sandbox supervisor and gateway are all ready. It
+            cannot be enabled from the browser.
           </div>
         </div>
       ) : (
@@ -399,7 +473,7 @@ export function BeastConsole() {
 
           {!run && (
             <>
-              <div className="panel">
+              {!initialTargetRef && <div className="panel">
                 <div className="panel-head">
                   <h2>1 · Select a synthetic target</h2>
                   <Pill tone="neutral">{config.mode}</Pill>
@@ -417,12 +491,12 @@ export function BeastConsole() {
                     </button>
                   ))}
                 </div>
-              </div>
+              </div>}
 
               {preflight && (
                 <div className="panel">
                   <div className="panel-head">
-                    <h2>2 · Review controls &amp; confirm</h2>
+                    <h2>Review controls &amp; confirm</h2>
                     <Pill tone="neutral">{preflight.target.environment}</Pill>
                   </div>
                   <Kv
@@ -449,14 +523,56 @@ export function BeastConsole() {
                     </label>
                     <label className="field">
                       <span>Scenario</span>
-                      <select value={scenario ?? ''} onChange={(e) => setScenario(e.target.value || undefined)}>
-                        <option value="">Select a scenario…</option>
-                        {preflight.enabled_capabilities.map((cap) => (
-                          <option key={cap} value={cap}>
-                            {SCENARIO_LABELS[cap] ?? cap}
-                          </option>
-                        ))}
-                      </select>
+                      {operatorProfileId ? (
+                        <>
+                          <input
+                            value={SCENARIO_LABELS[scenario ?? ''] ?? scenario ?? ''}
+                            disabled
+                            aria-label="Scenario (bound to the selected assessment profile)"
+                          />
+                          <small className="muted">
+                            Bound to the selected assessment profile — the controller rejects any
+                            other scenario.
+                          </small>
+                        </>
+                      ) : (
+                        <select value={scenario ?? ''} onChange={(e) => setScenario(e.target.value || undefined)}>
+                          <option value="">Select a scenario…</option>
+                          {preflight.enabled_capabilities.map((cap) => (
+                            <option key={cap} value={cap}>
+                              {SCENARIO_LABELS[cap] ?? cap}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </label>
+                    <label className="field">
+                      <span>Target connection budget</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={preflight.resources.max_target_connections}
+                        step={1}
+                        value={requestBudget}
+                        onChange={(e) => setRequestBudget(e.target.value)}
+                      />
+                      <small className="muted">
+                        Maximum {preflight.resources.max_target_connections}
+                      </small>
+                    </label>
+                    <label className="field">
+                      <span>Maximum duration (minutes)</span>
+                      <input
+                        type="number"
+                        min={10 / 60}
+                        max={preflight.resources.total_wall_time_seconds / 60}
+                        step={0.1}
+                        value={durationMinutes}
+                        onChange={(e) => setDurationMinutes(e.target.value)}
+                      />
+                      <small className="muted">
+                        Maximum {preflight.resources.total_wall_time_seconds / 60} minutes
+                      </small>
                     </label>
                   </div>
 
@@ -475,11 +591,11 @@ export function BeastConsole() {
                   </label>
 
                   <div className="modal-actions" style={{ marginTop: 16 }}>
-                    <button className="btn ghost" onClick={reset} disabled={busy}>
-                      Cancel
+                    <button className="btn ghost" onClick={onBack ?? reset} disabled={busy}>
+                      Back
                     </button>
                     <button className="btn danger" onClick={() => void activate()} disabled={!canActivate}>
-                      {busy ? 'Activating…' : 'Activate BEAST run'}
+                      {busy ? 'Starting…' : 'Start toolbox assessment'}
                     </button>
                   </div>
                 </div>
@@ -490,7 +606,7 @@ export function BeastConsole() {
           {run && (
             <div className="panel">
               <div className="panel-head">
-                <h2>BEAST run</h2>
+                <h2>Toolbox assessment run</h2>
                 <Pill tone={stateTone(run.state)} running={running}>
                   {run.state}
                 </Pill>
@@ -518,7 +634,7 @@ export function BeastConsole() {
                   </button>
                 ) : (
                   <button className="btn ghost" onClick={reset}>
-                    Start another run
+                    Start another assessment
                   </button>
                 )}
               </div>

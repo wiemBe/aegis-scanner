@@ -209,7 +209,7 @@ function Activity({ events }: { events: EventRecord[] }) {
   )
 }
 
-// Debug transcript for the normal (non-BEAST) assessment path: the AI proposes a typed hypothesis,
+// Debug transcript for the controller-native assessment path: the AI proposes a typed hypothesis,
 // the controller executes it deterministically, and the independent verifier concludes. This frames
 // that input -> AI -> result chain for debugging, plus the full structured event stream with raw
 // evidence refs per step. No raw response bodies or credentials (the backend already redacts them).

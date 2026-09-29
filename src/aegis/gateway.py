@@ -12,15 +12,18 @@ run metadata. Provider response bodies, headers, hidden chain-of-thought and any
 appear in its responses or logs.
 """
 
+import asyncio
 import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import uuid4
 
+import httpx
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aegis.beast.contracts import BeastDecisionRequest, BeastDecisionResponse
 from aegis.extensions import EMPTY_EXTENSION_RUNTIME
@@ -64,12 +67,37 @@ from aegis.multi_agent.contracts import (
     SurfaceAgentOutput,
 )
 from aegis.planner import PlannerFailure
-from aegis.providers import OllamaProvider, PlannerProvider, agent_system_prompt, build_provider
+from aegis.providers import (
+    DeepSeekProvider,
+    OllamaProvider,
+    OpenRouterProvider,
+    PlannerProvider,
+    agent_system_prompt,
+    build_provider,
+)
 from aegis.settings import get_settings
+from aegis_obs.logging import StructuredLogger
+from aegis_obs.metrics import MetricsRegistry
+from aegis_obs.middleware import ObservabilityASGIMiddleware, disable_uvicorn_access_log
+from aegis_obs.normalize import SERVICE_LLM_GATEWAY
 
 _provider: PlannerProvider | None = None
+_provider_selection_lock = asyncio.Lock()
 _AGENT_PROJECTION_LIMIT = 256
 _agent_request_projections: dict[str, AgentGatewayRequestProjection] = {}
+_obs_metrics = MetricsRegistry(service=SERVICE_LLM_GATEWAY)
+_obs_logger = StructuredLogger()
+
+
+def _debug_step(code: str) -> None:
+    if get_settings().debug_logging:
+        _obs_logger.log(
+            service=SERVICE_LLM_GATEWAY,
+            event="debug_step",
+            level="DEBUG",
+            request_id="-",
+            code=code,
+        )
 
 
 def get_provider() -> PlannerProvider:
@@ -78,17 +106,52 @@ def get_provider() -> PlannerProvider:
     invalid provider configuration."""
     global _provider
     if _provider is None:
+        _debug_step("provider.construct.begin")
         _provider = build_provider(get_settings())
+        _debug_step("provider.construct.complete")
     return _provider
+
+
+class ModelSelectionRequest(BaseModel):
+    """A model id from the gateway's startup allowlist; never a provider URL or credential."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+
+
+def _model_catalog() -> dict[str, object]:
+    settings = get_settings()
+    provider = get_provider()
+    return {
+        "provider": provider.provider_type,
+        "current_model": provider.model,
+        "models": sorted(settings.allowed_model_set),
+        "runtime_switching": len(settings.allowed_model_set) > 1,
+    }
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    disable_uvicorn_access_log()
+    _debug_step("startup.lifecycle.begin")
     get_provider()  # Fail closed on startup if provider configuration is invalid.
+    _obs_logger.log(
+        service=SERVICE_LLM_GATEWAY,
+        event="startup",
+        level="INFO",
+        request_id="-",
+    )
+    _debug_step("startup.lifecycle.serving")
     yield
 
 
 app = FastAPI(title="Aegis LLM Gateway", version="0.3.0", lifespan=lifespan)
+app.add_middleware(
+    ObservabilityASGIMiddleware,
+    service=SERVICE_LLM_GATEWAY,
+    get_registry=lambda: _obs_metrics,
+    get_logger=lambda: _obs_logger,
+)
 
 _AGENT_OUTPUTS: dict[str, type[BaseModel]] = {
     "PLAN_SURFACE": LeadTaskOutput,
@@ -179,6 +242,137 @@ _AGENT_TASK_ROLES = {
 async def health() -> dict[str, str]:
     provider = get_provider()
     return {"status": "ok", "provider": provider.provider_type, "model": provider.model}
+
+
+@app.get("/v1/models")
+async def models() -> dict[str, object]:
+    """Return only the startup-approved model ids for the configured provider family."""
+
+    return _model_catalog()
+
+
+@app.get("/v1/billing/balance")
+async def billing_balance() -> dict[str, object]:
+    """Return a small credential-free account balance projection.
+
+    Provider credentials never leave this process. Billing lookup failures are deliberately
+    fail-soft because they must not affect model readiness or an assessment already in progress.
+    """
+
+    provider = get_provider()
+    checked_at = datetime.now(UTC).isoformat()
+    try:
+        projection = await provider.account_balance()
+        return {**projection, "checked_at": checked_at}
+    except (PlannerFailure, httpx.HTTPError, ValueError, KeyError, TypeError):
+        _obs_logger.log(
+            service=SERVICE_LLM_GATEWAY,
+            event="operation_error",
+            level="WARNING",
+            request_id="-",
+            code="PROVIDER_BALANCE_UNAVAILABLE",
+        )
+        return {
+            "provider": provider.provider_type,
+            "state": "UNAVAILABLE",
+            "available": None,
+            "balances": [],
+            "code": "PROVIDER_BALANCE_UNAVAILABLE",
+            "checked_at": checked_at,
+        }
+
+
+@app.post("/v1/models/select")
+async def select_model(request: ModelSelectionRequest) -> dict[str, object]:
+    """Atomically replace the provider instance with another allowlisted model configuration."""
+
+    global _provider
+    settings = get_settings()
+    if request.model not in settings.allowed_model_set:
+        raise HTTPException(status_code=409, detail="MODEL_NOT_IN_STARTUP_ALLOWLIST")
+    async with _provider_selection_lock:
+        if get_provider().model != request.model:
+            try:
+                candidate_settings = settings.model_copy(update={"ai_model": request.model})
+                candidate = build_provider(candidate_settings)
+            except (RuntimeError, ValueError):
+                raise HTTPException(
+                    status_code=409, detail="MODEL_CONFIGURATION_REJECTED"
+                ) from None
+            _provider = candidate
+            _debug_step("provider.runtime_model_switched")
+    return _model_catalog()
+
+
+@app.post("/v1/synthetic-test")
+async def synthetic_test() -> dict[str, object]:
+    """Run one real, schema-constrained model call against an ephemeral in-memory lab fixture.
+
+    No target socket, container, Compose project or Docker network is created.  The fixture contains
+    only fixed synthetic references and is discarded in ``finally`` on success and failure.
+    """
+
+    test_id = f"ai-test-{uuid4().hex[:12]}"
+    started_at = datetime.now(UTC)
+    cleanup_verified = False
+    fixed_context: dict[str, object] = {
+        "surface": {"lab": "EPHEMERAL_SYNTHETIC_AI_CONTRACT_V1", "paths": {}},
+        "observations": [],
+        "verification": {"status": "PASS"},
+        "remaining": {"model_calls": 1, "target_requests": 0},
+        "permitted_decision_types": ["stop"],
+        "stage": "synthetic_ai_contract_test",
+        "planner_contract_version": 3,
+    }
+    provider = get_provider()
+    status = "FAIL"
+    code = "MODEL_TEST_FAILED"
+    decision_type: str | None = None
+    usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    try:
+        async with _provider_selection_lock:
+            provider = get_provider()
+            result = await provider.decide(fixed_context, 512)
+        decision_type = result.decision.decision_type
+        usage = result.usage.model_dump(mode="json")
+        if result.model != provider.model:
+            code = "PROVIDER_MODEL_MISMATCH"
+        elif decision_type != "stop":
+            code = "SYNTHETIC_CONTRACT_MISMATCH"
+        else:
+            status = "PASS"
+            code = "SYNTHETIC_AI_TEST_PASSED"
+    except PlannerFailure as exc:
+        code = str(exc)[:200]
+        _obs_logger.log(
+            service=SERVICE_LLM_GATEWAY,
+            event="operation_error",
+            level="ERROR",
+            request_id="-",
+            code=code,
+        )
+    except Exception as exc:  # noqa: BLE001 - return a bounded class label; cleanup still runs
+        code = f"SYNTHETIC_AI_TEST_{type(exc).__name__}"[:200]
+    finally:
+        fixed_context.clear()
+        cleanup_verified = not fixed_context
+        _debug_step("synthetic_ai_test.fixture_destroyed")
+
+    completed_at = datetime.now(UTC)
+    return {
+        "test_id": test_id,
+        "status": status,
+        "code": code,
+        "provider": provider.provider_type,
+        "model": provider.model,
+        "decision_type": decision_type,
+        "usage": usage,
+        "fixture_state": "DESTROYED",
+        "cleanup_verified": cleanup_verified,
+        "docker_resources_created": 0,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+    }
 
 
 def _agent_projection(
@@ -434,11 +628,16 @@ async def generate_agent(request: AgentGatewayRequest) -> AgentGatewayResponse:
 
 @app.post("/v1/beast/decide", response_model=BeastDecisionResponse)
 async def beast_decide(request: BeastDecisionRequest) -> BeastDecisionResponse:
-    """Phase 1.4 deliberately has no demo/mock/heuristic provider or command fallback."""
+    """Phase 1.4 deliberately has no demo/mock/heuristic provider or command fallback.
+
+    The adversary runs on the model the operator selected in the console, so every provider with a
+    real adversary route is admitted: local Ollama (digest provenance) and the hosted public-egress
+    profiles (DeepSeek, OpenRouter) with their hosted provenance shape. Anything else fails closed.
+    """
 
     provider = get_provider()
-    if not isinstance(provider, OllamaProvider) or provider.provider_type != "ollama":
-        raise HTTPException(status_code=409, detail="BEAST_REQUIRES_LOCAL_OLLAMA_MODEL")
+    if not isinstance(provider, OllamaProvider | DeepSeekProvider | OpenRouterProvider):
+        raise HTTPException(status_code=409, detail="BEAST_REQUIRES_SUPPORTED_PROVIDER")
     try:
         result = await provider.adversary_decide(request)
     except PlannerFailure as exc:

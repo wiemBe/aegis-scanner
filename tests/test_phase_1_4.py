@@ -169,7 +169,7 @@ def lease_request(**overrides: Any) -> LeaseRequest:
         "actor_type": "OPERATOR",
         "target_ref": "beast-synthetic-vulnerable",
         "profile_id": BEAST_PROFILE_ID,
-        "confirmation": "BEAST Disposable Synthetic Bank Adversary Target",
+        "confirmation": "ASSESS Disposable Synthetic Bank Adversary Target",
     }
     values.update(overrides)
     return LeaseRequest(**values)
@@ -180,20 +180,47 @@ def test_activation_is_operator_only_exact_and_synthetic(tmp_path: Path) -> None
     beast = controller(tmp_path, harness)
     preflight = beast.preflight("beast-synthetic-vulnerable")
     assert preflight.target.environment == "SYNTHETIC_LAB"
-    assert preflight.technical_subtitle == "Disposable AI Adversary Sandbox"
+    assert preflight.technical_subtitle == "Autonomous assessment toolbox"
     assert preflight.automatic_expiry_seconds <= 900
     with pytest.raises(BeastRejected, match="ACTIVATION_PHRASE_MISMATCH"):
-        beast.issue_lease(lease_request(confirmation="BEAST wrong"))
+        beast.issue_lease(lease_request(confirmation="ASSESS wrong"))
     with pytest.raises(BeastRejected, match="TARGET_NOT_IN_CONTROLLER_INVENTORY"):
         beast.preflight("https://public.example")
-    with pytest.raises(BeastRejected, match="BEAST_REQUIRES_LOCAL_LLM"):
+    with pytest.raises(BeastRejected, match="BEAST_REQUIRES_SUPPORTED_PROVIDER"):
         controller(tmp_path / "demo", harness, ai_provider="demo").preflight(
             "beast-synthetic-vulnerable"
         )
-    with pytest.raises(BeastRejected, match="BEAST_REQUIRES_EXACT_APPROVED_MODEL"):
-        controller(tmp_path / "wrong-model", harness, ai_model="qwen3:4b").preflight(
-            "beast-synthetic-vulnerable"
-        )
+    # The internal OpenAI-compatible profile has no adversary decide route (the gateway rejects
+    # it with BEAST_REQUIRES_SUPPORTED_PROVIDER), so the controller must reject it at preflight
+    # instead of admitting a run that would fail on its first decision call.
+    with pytest.raises(BeastRejected, match="BEAST_REQUIRES_SUPPORTED_PROVIDER"):
+        controller(
+            tmp_path / "internal",
+            harness,
+            ai_provider="internal_openai_compatible",
+            ai_model="deepseek-v4-pro",
+        ).preflight("beast-synthetic-vulnerable")
+    deepseek = controller(
+        tmp_path / "deepseek",
+        harness,
+        ai_provider="deepseek",
+        ai_model="deepseek-v4-pro",
+    )
+    assert deepseek.preflight("beast-synthetic-vulnerable").target.target_ref == (
+        "beast-synthetic-vulnerable"
+    )
+    # BEAST follows the model the operator selected in the console: a different selected model is
+    # accepted (the gateway allowlist governs selection; the decision is identity-checked against
+    # the live selection at run time), so no fixed required-model gate remains.
+    selected = controller(
+        tmp_path / "selected-model",
+        harness,
+        ai_provider="openrouter",
+        ai_model="qwen/qwen3.8-27b",
+    )
+    assert selected.preflight("beast-synthetic-vulnerable").target.target_ref == (
+        "beast-synthetic-vulnerable"
+    )
 
 
 def test_resource_expansion_and_lease_reuse_fail_closed(tmp_path: Path) -> None:
@@ -205,6 +232,41 @@ def test_resource_expansion_and_lease_reuse_fail_closed(tmp_path: Path) -> None:
     beast.create_run(BeastRunRequest(lease_id=lease.lease_id, scenario_id="bola_readonly"))
     with pytest.raises(BeastRejected, match="LEASE_NOT_ACTIVE"):
         beast.create_run(BeastRunRequest(lease_id=lease.lease_id, scenario_id="bola_readonly"))
+
+
+def test_operator_profile_bound_lease_narrows_the_scenario_server_side(tmp_path: Path) -> None:
+    """A lease issued under an operator-facing TOOLBOX profile authorizes exactly that profile's
+    bound scenario; the browser cannot widen it, and create_run rejects any other scenario."""
+
+    beast = controller(tmp_path, Harness())
+    with pytest.raises(BeastRejected, match="OPERATOR_PROFILE_NOT_TOOLBOX_BOUND"):
+        beast.issue_lease(lease_request(operator_profile_id="NOT_A_TOOLBOX_PROFILE"))
+    discovery = beast.issue_lease(
+        lease_request(operator_profile_id="OUTSIDE_IN_WEB_DISCOVERY_V1")
+    )
+    assert discovery.capability_set == ["endpoint_discovery"]
+    run = beast.create_run(
+        BeastRunRequest(lease_id=discovery.lease_id, scenario_id="endpoint_discovery")
+    )
+    assert run.operator_profile_id == "OUTSIDE_IN_WEB_DISCOVERY_V1"
+    # A different profile's scenario is rejected before any sandbox admission.
+    injection = beast.issue_lease(lease_request(operator_profile_id="SQLMAP_AUTHORIZED_WEB_V1"))
+    assert injection.capability_set == ["safe_injection"]
+    with pytest.raises(BeastRejected, match="SCENARIO_NOT_AUTHORIZED_BY_LEASE"):
+        beast.create_run(
+            BeastRunRequest(lease_id=injection.lease_id, scenario_id="endpoint_discovery")
+        )
+    exposure = beast.issue_lease(
+        lease_request(operator_profile_id="TOOLBOX_INFORMATION_EXPOSURE_V1")
+    )
+    assert exposure.capability_set == ["information_exposure"]
+    authorization = beast.issue_lease(
+        lease_request(operator_profile_id="TOOLBOX_BOLA_READONLY_V1")
+    )
+    assert authorization.capability_set == ["bola_readonly"]
+    # A generic sandbox lease (no operator profile) still authorizes the full objective set.
+    generic = beast.issue_lease(lease_request())
+    assert "bola_readonly" in generic.capability_set
 
 
 @pytest.mark.asyncio
@@ -303,9 +365,10 @@ def test_compose_boundary_has_no_host_mount_socket_or_external_network() -> None
     )
     assert "beast-adversary" not in compose["services"]["control-plane"]["networks"]
     assert "beast-adversary" not in compose["services"]["lab-api"]["networks"]
-    assert compose["services"]["beast-target-gateway"]["networks"]["beast-adversary"][
-        "ipv4_address"
-    ] == "10.214.48.2"
+    assert (
+        compose["services"]["beast-target-gateway"]["networks"]["beast-adversary"]["ipv4_address"]
+        == "10.214.48.2"
+    )
 
 
 def test_controller_contains_no_command_allowlist_or_expected_sequence() -> None:

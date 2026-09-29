@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BeastConsole } from './Beast'
 
 const TARGET_NAME = 'Disposable Synthetic Bank Adversary Target'
-const REQUIRED_PHRASE = `BEAST ${TARGET_NAME}`
+const REQUIRED_PHRASE = `ASSESS ${TARGET_NAME}`
 
 const enabledConfig = {
   enabled: true,
@@ -13,6 +13,17 @@ const enabledConfig = {
   required_model: 'qwen3:8b',
   synthetic_lab_only: true,
   target_refs: ['beast-synthetic-vulnerable'],
+  tools: [
+    { name: 'curl', category: 'http-client', purpose: 'Issue bounded HTTP requests.', source: 'debian' },
+    { name: 'httpie', category: 'http-client', purpose: 'Inspect HTTP responses.', source: 'debian' },
+    { name: 'httpx', category: 'http-prober', purpose: 'Probe observed paths.', source: 'github' },
+    { name: 'katana', category: 'web-crawler', purpose: 'Crawl the authorized surface.', source: 'github' },
+    { name: 'akca', category: 'dast-scanner', purpose: 'Run contextual DAST checks.', source: 'github' },
+    { name: 'ffuf', category: 'content-discovery', purpose: 'Discover content.', source: 'debian' },
+    { name: 'gobuster', category: 'content-discovery', purpose: 'Enumerate paths.', source: 'debian' },
+    { name: 'nuclei', category: 'template-scanner', purpose: 'Run detection templates.', source: 'github' },
+    { name: 'sqlmap', category: 'injection-probe', purpose: 'Probe SQL injection.', source: 'debian' },
+  ],
   technical_subtitle: 'Disposable AI Adversary Sandbox',
   boundary_description: 'Unrestricted attack logic inside a strictly bounded execution environment.',
 }
@@ -34,7 +45,7 @@ const preflight = {
     expected_impact: 'Bounded requests to a synthetic fixture',
     max_blast_radius: 'One internal synthetic target service',
   },
-  enabled_capabilities: ['bola_readonly'],
+  enabled_capabilities: ['endpoint_discovery', 'bola_readonly', 'safe_injection'],
   enabled_engines: ['AI_ADVERSARY_SHELL', 'DETERMINISTIC_VERIFIER'],
   resources: {
     total_wall_time_seconds: 180,
@@ -154,8 +165,12 @@ describe('BEAST console panel', () => {
   it('shows a fail-closed disabled state when BEAST is off', async () => {
     stub({ ...enabledConfig, enabled: false })
     render(<BeastConsole />)
-    expect(await screen.findByText(/BEAST is disabled/i)).toBeInTheDocument()
+    expect(await screen.findByText(/disposable toolbox is unavailable/i)).toBeInTheDocument()
     expect(screen.queryByText('beast-synthetic-vulnerable')).not.toBeInTheDocument()
+    expect(screen.getByText('Installed sandbox toolbox')).toBeInTheDocument()
+    for (const tool of enabledConfig.tools) {
+      expect(screen.getByText(tool.name)).toBeInTheDocument()
+    }
   })
 
   it('gates activation behind the exact typed confirmation phrase', async () => {
@@ -166,11 +181,12 @@ describe('BEAST console panel', () => {
     await screen.findByText(/Type the exact confirmation phrase/i)
     expect(screen.getByText(REQUIRED_PHRASE)).toBeInTheDocument()
 
-    const activate = screen.getByRole('button', { name: /Activate BEAST run/i })
+    const activate = screen.getByRole('button', { name: /Start toolbox assessment/i })
     expect(activate).toBeDisabled()
 
     fireEvent.change(screen.getByPlaceholderText('e.g. operator-1'), { target: { value: 'operator-1' } })
-    fireEvent.change(screen.getByPlaceholderText('Type the phrase exactly'), { target: { value: 'BEAST wrong phrase' } })
+    fireEvent.change(screen.getByLabelText('Scenario'), { target: { value: 'bola_readonly' } })
+    fireEvent.change(screen.getByPlaceholderText('Type the phrase exactly'), { target: { value: 'ASSESS wrong phrase' } })
     expect(activate).toBeDisabled()
 
     fireEvent.change(screen.getByPlaceholderText('Type the phrase exactly'), { target: { value: REQUIRED_PHRASE } })
@@ -182,8 +198,9 @@ describe('BEAST console panel', () => {
     fireEvent.click(await screen.findByText('beast-synthetic-vulnerable'))
     await screen.findByText(/Type the exact confirmation phrase/i)
     fireEvent.change(screen.getByPlaceholderText('e.g. operator-1'), { target: { value: 'operator-1' } })
+    fireEvent.change(screen.getByLabelText('Scenario'), { target: { value: 'bola_readonly' } })
     fireEvent.change(screen.getByPlaceholderText('Type the phrase exactly'), { target: { value: REQUIRED_PHRASE } })
-    fireEvent.click(screen.getByRole('button', { name: /Activate BEAST run/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Start toolbox assessment/i }))
 
     await screen.findByText('beast-run-abc')
     // Verifier outcome is surfaced, not self-asserted by the run.
@@ -207,5 +224,35 @@ describe('BEAST console panel', () => {
     })
     const runReq = posted.find((p) => p.path.endsWith('/runs'))?.body as Record<string, unknown>
     expect(runReq).toMatchObject({ lease_id: 'beast-lease-xyz', scenario_id: 'bola_readonly' })
+  })
+
+  it('binds an embedded wizard launch to the selected assessment profile', async () => {
+    // The NewAssessment wizard renders the embedded panel with the operator-facing TOOLBOX
+    // profile: the lease carries operator_profile_id, the scenario is preselected and locked,
+    // and the controller narrows the lease to exactly that profile's bound scenario.
+    render(
+      <BeastConsole
+        embedded
+        initialTargetRef="beast-synthetic-vulnerable"
+        initialScenario="endpoint_discovery"
+        operatorProfileId="OUTSIDE_IN_WEB_DISCOVERY_V1"
+      />,
+    )
+    await screen.findByText(/Type the exact confirmation phrase/i)
+
+    // The scenario is shown read-only, bound to the profile — no dropdown to change it.
+    const scenarioField = screen.getByLabelText(/Scenario \(bound to the selected assessment profile\)/i)
+    expect(scenarioField).toBeDisabled()
+    expect(scenarioField).toHaveValue('Endpoint discovery')
+
+    fireEvent.change(screen.getByPlaceholderText('e.g. operator-1'), { target: { value: 'operator-1' } })
+    fireEvent.change(screen.getByPlaceholderText('Type the phrase exactly'), { target: { value: REQUIRED_PHRASE } })
+    fireEvent.click(screen.getByRole('button', { name: /Start toolbox assessment/i }))
+
+    await screen.findByText('beast-run-abc')
+    const lease = posted.find((p) => p.path.includes('/leases'))?.body as Record<string, unknown>
+    expect(lease).toMatchObject({ operator_profile_id: 'OUTSIDE_IN_WEB_DISCOVERY_V1' })
+    const runReq = posted.find((p) => p.path.endsWith('/runs'))?.body as Record<string, unknown>
+    expect(runReq).toMatchObject({ lease_id: 'beast-lease-xyz', scenario_id: 'endpoint_discovery' })
   })
 })

@@ -25,6 +25,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -57,9 +58,24 @@ from aegis.planner import (
     DemoPlanner,
     PlannerFailure,
 )
-from aegis.settings import OPENROUTER_QWEN_MODEL, JsonResponseMode, Settings
+from aegis.settings import (
+    OPENROUTER_APPROVED_MODELS,
+    JsonResponseMode,
+    Settings,
+)
+from aegis.settings import (
+    OPENROUTER_QWEN_MODEL as OPENROUTER_QWEN_MODEL,
+)
 
 _JSON_CONTENT_TYPE = "application/json"
+
+
+def _provider_failure_code(prefix: str, exc: Exception) -> str:
+    """Return a bounded diagnostic code without provider bodies, URLs or credentials."""
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{prefix}HTTP_{exc.response.status_code}"
+    return f"{prefix}{type(exc).__name__}"
 
 
 def _permitted_and_schema(context: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
@@ -292,6 +308,54 @@ class PlannerProvider(ABC):
         schema: dict[str, Any],
         max_output_tokens: int,
     ) -> AgentProviderResult: ...
+
+    async def account_balance(self) -> dict[str, object]:
+        """Return a credential-free balance projection when this provider supports one."""
+
+        return {
+            "provider": self.provider_type,
+            "state": "UNSUPPORTED",
+            "available": None,
+            "balances": [],
+        }
+
+
+def _decimal_string(value: object) -> str:
+    """Normalize provider money fields while rejecting negative or non-finite values."""
+
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise PlannerFailure("INVALID_PROVIDER_BALANCE") from None
+    if not amount.is_finite() or amount < 0:
+        raise PlannerFailure("INVALID_PROVIDER_BALANCE")
+    return format(amount, "f")
+
+
+def _deepseek_balance_projection(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict) or type(payload.get("is_available")) is not bool:
+        raise PlannerFailure("INVALID_PROVIDER_BALANCE")
+    entries = payload.get("balance_infos")
+    if not isinstance(entries, list) or len(entries) > 4:
+        raise PlannerFailure("INVALID_PROVIDER_BALANCE")
+    balances: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("currency") not in {"CNY", "USD"}:
+            raise PlannerFailure("INVALID_PROVIDER_BALANCE")
+        balances.append(
+            {
+                "currency": str(entry["currency"]),
+                "remaining": _decimal_string(entry.get("total_balance")),
+                "granted": _decimal_string(entry.get("granted_balance")),
+                "topped_up": _decimal_string(entry.get("topped_up_balance")),
+            }
+        )
+    return {
+        "provider": "deepseek",
+        "state": "AVAILABLE",
+        "available": payload["is_available"],
+        "balances": balances,
+    }
 
 
 def _duration_ms(value: Any) -> int | None:
@@ -527,7 +591,7 @@ class OllamaProvider(_HttpModelProvider):
         except PlannerFailure:
             raise
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+            raise PlannerFailure(_provider_failure_code("MODEL_RESPONSE_REJECTED_", exc)) from None
 
     async def generate_agent(
         self,
@@ -620,16 +684,20 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
 
     provider_type = "internal_openai_compatible"
     CHAT_PATH = "/chat/completions"
+    DEEPSEEK_BALANCE_PATH = "/user/balance"
 
     def __init__(
         self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
     ) -> None:
+        deepseek_host = urlsplit(settings.ai_base_url).hostname == "api.deepseek.com"
         super().__init__(
             settings.ai_base_url,
             require_https=True,
             timeout=settings.model_timeout_seconds,
             body_limit=settings.max_response_bytes,
-            allowed_paths=(self.CHAT_PATH,),
+            allowed_paths=(
+                (self.CHAT_PATH, self.DEEPSEEK_BALANCE_PATH) if deepseek_host else (self.CHAT_PATH,)
+            ),
             extension_manifest_path=settings.extension_manifest_path,
             transport=transport,
         )
@@ -670,6 +738,16 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
         self._verify = settings.provider_ca_bundle or True
         self._output_cap = settings.max_completion_tokens
         self._per_call_token_ceiling = settings.max_tokens_per_scan
+
+    async def account_balance(self) -> dict[str, object]:
+        if self._host != "api.deepseek.com" or self._auth_mode != "bearer" or not self._token:
+            return await super().account_balance()
+        raw = await self._request(
+            "GET",
+            self.DEEPSEEK_BALANCE_PATH,
+            headers={"Accept": _JSON_CONTENT_TYPE, "Authorization": f"Bearer {self._token}"},
+        )
+        return _deepseek_balance_projection(json.loads(raw))
 
     def _client(self) -> httpx.AsyncClient:
         # Direct connection by default; through the constrained CONNECT proxy for public backends.
@@ -843,7 +921,7 @@ class InternalOpenAICompatibleProvider(_HttpModelProvider):
         except PlannerFailure:
             raise
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise PlannerFailure(f"MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
+            raise PlannerFailure(_provider_failure_code("MODEL_RESPONSE_REJECTED_", exc)) from None
 
     async def generate_agent(
         self,
@@ -940,6 +1018,7 @@ class PublicHostedOpenAICompatibleProvider(InternalOpenAICompatibleProvider):
     FORCE_RESPONSE_MODE: JsonResponseMode | None = None
     #: When set, forces the seed-support flag (e.g. False for routed, non-deterministic upstreams).
     FORCE_SUPPORTS_SEED: bool | None = None
+    BALANCE_PATH: str | None = None
 
     def __init__(
         self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None
@@ -952,7 +1031,11 @@ class PublicHostedOpenAICompatibleProvider(InternalOpenAICompatibleProvider):
             require_https=True,
             timeout=settings.model_timeout_seconds,
             body_limit=settings.max_response_bytes,
-            allowed_paths=(self.CHAT_PATH,),
+            allowed_paths=(
+                (self.CHAT_PATH, self.BALANCE_PATH)
+                if self.BALANCE_PATH is not None
+                else (self.CHAT_PATH,)
+            ),
             extension_manifest_path=settings.extension_manifest_path,
             transport=transport,
         )
@@ -997,7 +1080,7 @@ class PublicHostedOpenAICompatibleProvider(InternalOpenAICompatibleProvider):
 
 
 class OpenRouterProvider(PublicHostedOpenAICompatibleProvider):
-    """OpenRouter adapter pinned to Qwen3.8 27B and privacy-preserving routing.
+    """OpenRouter adapter restricted to the reviewed, privacy-preserving model catalog.
 
     This is an explicit public-egress profile. The API key exists only in the gateway, the
     destination origin and model are immutable, and each request requires an upstream endpoint
@@ -1009,17 +1092,16 @@ class OpenRouterProvider(PublicHostedOpenAICompatibleProvider):
 
     provider_type = "openrouter"
     CHAT_PATH = "/api/v1/chat/completions"
+    BALANCE_PATH = "/api/v1/key"
     REQUIRED_HOST = "openrouter.ai"
     FORCE_RESPONSE_MODE = "json_schema"
     FORCE_SUPPORTS_SEED = False
 
     def _validate_model_policy(self) -> None:
-        if self.model != OPENROUTER_QWEN_MODEL:
-            raise ValueError(
-                f"AI_PROVIDER=openrouter supports only the exact model {OPENROUTER_QWEN_MODEL}"
-            )
-        if self._allowed_models != {OPENROUTER_QWEN_MODEL}:
-            raise ValueError("OpenRouter model allowlist must contain only the exact pinned model")
+        if self.model not in OPENROUTER_APPROVED_MODELS:
+            raise ValueError("AI_PROVIDER=openrouter model is not in the reviewed model catalog")
+        if self._allowed_models != OPENROUTER_APPROVED_MODELS:
+            raise ValueError("OpenRouter model allowlist must exactly match the reviewed catalog")
 
     def _resolve_credential(self, settings: Settings) -> str:
         try:
@@ -1029,6 +1111,40 @@ class OpenRouterProvider(PublicHostedOpenAICompatibleProvider):
                 "AI_PROVIDER=openrouter requires exactly one valid OPENROUTER_API_KEY or "
                 "OPENROUTER_API_KEY_FILE gateway credential source"
             ) from None
+
+    async def account_balance(self) -> dict[str, object]:
+        raw = await self._request(
+            "GET",
+            self.BALANCE_PATH,
+            headers={"Accept": _JSON_CONTENT_TYPE, "Authorization": f"Bearer {self._token}"},
+        )
+        payload = json.loads(raw)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise PlannerFailure("INVALID_PROVIDER_BALANCE")
+        usage = _decimal_string(data.get("usage"))
+        limit = data.get("limit")
+        remaining_value = data.get("limit_remaining")
+        balances: list[dict[str, str]] = []
+        available: bool | None = None
+        normalized_limit: str | None = None
+        if limit is not None:
+            normalized_limit = _decimal_string(limit)
+        if remaining_value is not None:
+            remaining = _decimal_string(remaining_value)
+            balances.append({"currency": "USD", "remaining": remaining})
+            available = Decimal(remaining) > 0
+        return {
+            "provider": "openrouter",
+            "state": "AVAILABLE",
+            "available": available,
+            "balances": balances,
+            "key_limit": normalized_limit,
+            "total_usage": usage,
+            "limit_reset": data.get("limit_reset")
+            if isinstance(data.get("limit_reset"), str)
+            else None,
+        }
 
     def _payload(
         self,
@@ -1044,6 +1160,62 @@ class OpenRouterProvider(PublicHostedOpenAICompatibleProvider):
             "zdr": True,
         }
         return payload
+
+    async def adversary_decide(self, request: BeastDecisionRequest) -> BeastProviderResult:
+        """One genuine command-level decision from the routed model; no deterministic fallback.
+
+        BEAST's adversary follows the model the operator selected in the console, so this hosted
+        route mirrors the DeepSeek adversary path. Provenance is the hosted shape (see the class
+        docstring): the reported model id, request parameters, token counts and timings. Routed
+        upstreams provide no content digest and no reproducible seed, so none is claimed.
+        """
+
+        schema = BEAST_DECISION_ADAPTER.json_schema()
+        brief = render_decision_brief(request)
+        try:
+            # The base payload builder expects a JSON-serializable context object; the BEAST brief
+            # is plain text, so the user message is set verbatim after the standard payload is
+            # assembled (keeping the reviewed model id, json_schema mode and ZDR flags intact).
+            payload = self._payload(BEAST_SYSTEM_PROMPT, {}, min(self._output_cap, 4096), schema)
+            payload["messages"][1]["content"] = brief
+            raw = await self._request(
+                "POST", self.CHAT_PATH, json_body=payload, headers=self._headers()
+            )
+            data = json.loads(raw)
+            reported_model = data.get("model")
+            if not isinstance(reported_model, str) or not reported_model:
+                raise PlannerFailure("PROVIDER_MODEL_IDENTITY_MISSING")
+            if reported_model != self.model:
+                raise PlannerFailure(
+                    "PROVIDER_MODEL_MISMATCH", provider_reported_model=reported_model
+                )
+            choice = data["choices"][0]
+            finish = choice.get("finish_reason")
+            if finish not in (None, "stop"):
+                raise PlannerFailure(f"INCOMPLETE_MODEL_OUTPUT_{str(finish).upper()}")
+            # Only the structured content field is read; any provider reasoning field is never
+            # touched, persisted, returned or logged.
+            message = choice["message"].get("content")
+            if not isinstance(message, str) or not message.strip():
+                raise PlannerFailure("MISSING_MODEL_OUTPUT")
+            usage = self._usage(data.get("usage") or {})
+            metadata = ProviderRunMetadata(
+                provider_type=self.provider_type,
+                runtime=self.provider_type,
+                model=self.model,
+                temperature=self._temperature,
+                # No determinism claim exists for routed upstreams; seed stays omitted.
+                seed=None,
+                prompt_eval_count=usage.input_tokens,
+                eval_count=usage.output_tokens,
+                stop_reason=finish,
+            )
+            decision = BEAST_DECISION_ADAPTER.validate_json(message)
+            return BeastProviderResult(self.model, decision, usage, metadata)
+        except PlannerFailure:
+            raise
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise PlannerFailure(f"BEAST_MODEL_RESPONSE_REJECTED_{type(exc).__name__}") from None
 
 
 class DeepSeekProvider(PublicHostedOpenAICompatibleProvider):
@@ -1065,6 +1237,7 @@ class DeepSeekProvider(PublicHostedOpenAICompatibleProvider):
 
     provider_type = "deepseek"
     CHAT_PATH = "/chat/completions"
+    BALANCE_PATH = "/user/balance"
     _SUPPORTED_MODELS = frozenset({"deepseek-chat", "deepseek-reasoner"})
 
     def _validate_model_policy(self) -> None:
@@ -1077,6 +1250,14 @@ class DeepSeekProvider(PublicHostedOpenAICompatibleProvider):
         if key is None or not key.get_secret_value().strip():
             raise ValueError("AI_PROVIDER=deepseek requires DEEPSEEK_API_KEY")
         return key.get_secret_value()
+
+    async def account_balance(self) -> dict[str, object]:
+        raw = await self._request(
+            "GET",
+            self.BALANCE_PATH,
+            headers={"Accept": _JSON_CONTENT_TYPE, "Authorization": f"Bearer {self._token}"},
+        )
+        return _deepseek_balance_projection(json.loads(raw))
 
     @property
     def _is_reasoner(self) -> bool:

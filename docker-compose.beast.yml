@@ -1,4 +1,4 @@
-# Phase 1.4 — Disposable AI Adversary Sandbox (SYNTHETIC_LAB only).
+# Disposable assessment toolbox (Phase 1.4; SYTHETIC_LAB only).
 #
 # control-plane -> beast-rpc -> RPC relay -> beast-adversary -> sandbox supervisor
 # sandbox command -> beast-adversary -> exact target gateway -> beast-target-backend -> lab-api
@@ -8,6 +8,9 @@
 # one-purpose forwarder; supervisor authorization is required and its token is stripped from the
 # command environment. The target gateway independently enforces exact prefix and byte/connection
 # budgets. No other project service joins beast-adversary.
+#
+# The adversary runs on the model the operator selected in the console (the gateway's reviewed
+# allowlist governs selection); there is no fixed required-model environment key.
 
 services:
   control-plane:
@@ -16,7 +19,6 @@ services:
       BEAST_ENABLED: "true"
       BEAST_SUPERVISOR_URL: http://beast-rpc-relay:8094
       BEAST_SUPERVISOR_TOKEN: ${BEAST_SUPERVISOR_TOKEN:?set a random supervisor token}
-      BEAST_REQUIRED_MODEL: qwen3:8b
     networks:
       security-lab:
         ipv4_address: 10.213.47.10

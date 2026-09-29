@@ -37,6 +37,7 @@ from aegis.engine.contracts import (
     TargetReference,
 )
 from aegis.engine.policy import EnginePolicyRejection
+from aegis.observability import logger as obs_logger
 from aegis.zap_active_lease import ActiveScanLease, ActiveScanLeaseStore, LeaseError
 from aegis_zap.projection import ProjectionRejected
 from aegis_zap_active.contracts import (
@@ -116,6 +117,14 @@ def _json(payload: dict[str, object]) -> bytes:
 
 
 def _reject(code: EngineErrorCode, detail: str = "") -> EnginePolicyRejection:
+    # Log only the bounded enum, never ``detail``: details can contain target/provider input.
+    obs_logger.log(
+        service="control-plane",
+        event="operation_error",
+        level="WARNING",
+        request_id="-",
+        code=f"ZAP_ACTIVE_POLICY_{code.value}",
+    )
     return EnginePolicyRejection(
         EngineError(engine=SecurityEngine.ZAP, code=code, detail=detail[:200])
     )
@@ -170,6 +179,13 @@ def build_zap_active_job(
         environment=environment.value,
         target_ref=target_ref,
         manifest=manifest,
+    )
+    obs_logger.log(
+        service="control-plane",
+        event="security_check",
+        level="DEBUG" if countersign.valid else "ERROR",
+        request_id="-",
+        code=f"ZAP_ACTIVE_COUNTERSIGN_{countersign.code}",
     )
     if not countersign.valid:
         raise _reject(EngineErrorCode.UNKNOWN_TEMPLATE_OR_SCAN_CONFIG, countersign.code)

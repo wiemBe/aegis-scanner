@@ -23,7 +23,7 @@ from aegis.readiness import (
     ReadinessReport,
     evaluate_readiness,
 )
-from aegis.settings import OPENROUTER_QWEN_MODEL, Settings
+from aegis.settings import OPENROUTER_APPROVED_MODELS, OPENROUTER_QWEN_MODEL, Settings
 from aegis.storage import ScanStore
 
 _PLACEHOLDER_CREDENTIAL = "placeholder-not-a-real-credential-000000"
@@ -254,7 +254,7 @@ def _openrouter_settings(**overrides: Any) -> Settings:
         "ai_provider": "openrouter",
         "ai_base_url": "https://openrouter.ai",
         "ai_model": OPENROUTER_QWEN_MODEL,
-        "ai_allowed_models": OPENROUTER_QWEN_MODEL,
+        "ai_allowed_models": ",".join(sorted(OPENROUTER_APPROVED_MODELS)),
     }
     values.update(overrides)
     return Settings(**values)
@@ -285,7 +285,7 @@ def test_coherent_openrouter_configuration_is_ready(tmp_path: Path) -> None:
     [
         _openrouter_settings(ai_model="qwen/qwen3-27b", ai_allowed_models="qwen/qwen3-27b"),
         _openrouter_settings(
-            ai_allowed_models=f"{OPENROUTER_QWEN_MODEL},openrouter/auto",
+            ai_allowed_models=OPENROUTER_QWEN_MODEL,
         ),
         _openrouter_settings(ai_base_url="http://openrouter.ai"),
         _openrouter_settings(ai_base_url="https://example.invalid"),

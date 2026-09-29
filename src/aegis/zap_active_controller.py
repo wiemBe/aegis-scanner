@@ -38,6 +38,7 @@ from aegis.engine.zap_active import (
     ZapActiveEngineJob,
     build_zap_active_job,
 )
+from aegis.observability import logger as obs_logger
 from aegis.safety import SafetyController
 from aegis.settings import Settings
 from aegis.zap_active_lease import (
@@ -186,12 +187,20 @@ class ZapActiveController:
         return self._lease_store
 
     def countersign(self) -> CountersignStatus:
-        return verify_countersign(
+        status = verify_countersign(
             capability_id=ACTIVE_CAPABILITY_ID,
             profile_id=ACTIVE_PROFILE_ID,
             environment=EngineEnvironment.SYNTHETIC_LAB.value,
             target_ref="synthetic-zap-active-vulnerable",
         )
+        obs_logger.log(
+            service="control-plane",
+            event="security_check",
+            level="DEBUG" if status.valid else "ERROR",
+            request_id="-",
+            code=f"ZAP_ACTIVE_COUNTERSIGN_{status.code}",
+        )
+        return status
 
     def config(self) -> dict[str, Any]:
         manifest = load_manifest()
@@ -263,6 +272,14 @@ class ZapActiveController:
             blockers.append("ADMISSION_UNREACHABLE")
         if attestation is not None and not attestation.guard.reachable:
             blockers.append("SCOPE_GUARD_UNREACHABLE")
+        for blocker in blockers:
+            obs_logger.log(
+                service="control-plane",
+                event="security_check",
+                level="WARNING",
+                request_id="-",
+                code=f"ZAP_ACTIVE_PREFLIGHT_{blocker}",
+            )
         return {
             "ready": not blockers,
             "blockers": blockers,

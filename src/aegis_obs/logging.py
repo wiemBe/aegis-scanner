@@ -55,12 +55,16 @@ _REQUIRED_RECORD_KEYS: Final = frozenset(
 )
 
 # The closed set of levels and events. Anything else is coerced to a safe default.
-_LEVELS: Final = frozenset({"INFO", "WARNING", "ERROR"})
+_LEVELS: Final = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
 _EVENTS: Final = frozenset(
     {
         "http_request",
         "http_error",
         "startup",
+        "debug_step",
+        "security_check",
+        "background_error",
+        "operation_error",
         "drain_started",
         "drain_completed",
         "drain_timeout",

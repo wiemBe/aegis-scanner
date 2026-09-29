@@ -10,6 +10,17 @@ BEAST_PROFILE_ID = "BEAST_ADVERSARY_SANDBOX_V1"
 BEAST_CONTRACT_VERSION = 1
 BEAST_MAX_LEASE_SECONDS = 900
 
+# Server-owned binding between the operator-facing TOOLBOX assessment profiles (console catalog)
+# and the disposable-sandbox scenario each one authorizes. A lease issued under one of these
+# profiles is narrowed to exactly its bound scenario, so create_run rejects any other scenario
+# server-side — the browser can never widen the scenario it picked in the assessment wizard.
+TOOLBOX_PROFILE_SCENARIOS: dict[str, str] = {
+    "OUTSIDE_IN_WEB_DISCOVERY_V1": "endpoint_discovery",
+    "TOOLBOX_INFORMATION_EXPOSURE_V1": "information_exposure",
+    "TOOLBOX_BOLA_READONLY_V1": "bola_readonly",
+    "SQLMAP_AUTHORIZED_WEB_V1": "safe_injection",
+}
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -93,9 +104,9 @@ class BeastPreflight(StrictModel):
     resources: ResourceEnvelope
     automatic_expiry_seconds: int = Field(le=BEAST_MAX_LEASE_SECONDS)
     emergency_stop: str
-    technical_subtitle: str = "Disposable AI Adversary Sandbox"
+    technical_subtitle: str = "Autonomous assessment toolbox"
     boundary_description: str = (
-        "Unrestricted attack logic inside a strictly bounded execution environment."
+        "Tool execution inside a controller-bounded disposable environment."
     )
 
 
@@ -105,6 +116,9 @@ class LeaseRequest(StrictModel):
     target_ref: str
     profile_id: Literal["BEAST_ADVERSARY_SANDBOX_V1"]
     confirmation: str = Field(max_length=180)
+    # Optional operator-facing TOOLBOX profile (e.g. OUTSIDE_IN_WEB_DISCOVERY_V1). When present,
+    # the controller narrows the lease to that profile's bound scenario (TOOLBOX_PROFILE_SCENARIOS).
+    operator_profile_id: str | None = Field(default=None, max_length=100)
     requested_resources: ResourceEnvelope | None = None
 
 
@@ -113,6 +127,7 @@ class BeastLease(StrictModel):
     operator_id: str
     target_ref: str
     profile_id: str
+    operator_profile_id: str | None = None
     capability_set: list[str]
     resources: ResourceEnvelope
     state: LeaseState
@@ -260,6 +275,7 @@ class BeastRun(StrictModel):
     state: RunState
     model: str
     profile_id: str = BEAST_PROFILE_ID
+    operator_profile_id: str | None = None
     resources: ResourceEnvelope = Field(default_factory=ResourceEnvelope)
     created_at: datetime
     lease_expires_at: datetime | None = None

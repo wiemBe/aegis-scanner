@@ -36,6 +36,9 @@ services:
     stop_grace_period: 15s
     environment:
       SHUTDOWN_GRACE_SECONDS: "10"
+      # Verbose diagnostics remain structured and secret-free; raw Uvicorn access logging stays
+      # disabled so query strings, credentials and request bodies can never enter the log stream.
+      DEBUG_LOGGING: ${AEGIS_DEBUG_LOGGING:-true}
 
   lab-api:
     build: .
@@ -61,6 +64,12 @@ services:
 networks:
   security-lab:
     internal: true
+    # Deterministic across core/full/provider overlays. Without an explicit subnet Compose treats
+    # the full-stack engine overlay as a different network definition and tries to recreate it from
+    # Docker Desktop's finite automatic address pool during provider switches.
+    ipam:
+      config:
+        - subnet: 10.213.47.0/24
 
 volumes:
   aegis-data:

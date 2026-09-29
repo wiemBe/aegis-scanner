@@ -49,6 +49,7 @@ export type TargetEntry = {
   type: string
   target_type: TargetType
   environment: string
+  owner?: string | null
   description: string
   supported_profile_ids: string[]
   // Onboarding metadata. Seeded synthetic targets and operator-onboarded company targets share this
@@ -59,8 +60,12 @@ export type TargetEntry = {
   origin_source?: string
   authorization_reference: string
   authorized_scope: string[]
+  origins?: string[]
+  addresses?: string[]
+  wildcard_subdomains?: string[]
   allowed_path_prefixes: string[]
   excluded_path_prefixes: string[]
+  openapi_url?: string | null
   credential_reference: string | null
   last_assessment_at: string | null
 }
@@ -121,6 +126,8 @@ export type AssessmentProfile = {
   unavailable_reason: string
   capabilities: ProfileCapability[]
   isolation_boundary: string
+  execution_mode?: 'STANDARD' | 'NETWORK_RUNNER'
+  tools?: string[]
 }
 
 export type Finding = {
@@ -193,8 +200,47 @@ export type Health = Record<string, unknown> | null
 export type ConsoleConfig = {
   console_version: string
   operational_engines: string[]
-  beast?: { enabled?: boolean }
   zap_active?: { enabled?: boolean }
+}
+
+export type AiModelCatalog = {
+  provider: string
+  current_model: string
+  models: string[]
+  runtime_switching: boolean
+}
+
+export type AiBalance = {
+  provider: string
+  state: 'AVAILABLE' | 'UNAVAILABLE' | 'UNSUPPORTED'
+  available: boolean | null
+  balances: Array<{
+    currency: 'USD' | 'CNY'
+    remaining: string
+    granted?: string
+    topped_up?: string
+  }>
+  total_credits?: string
+  total_usage?: string
+  key_limit?: string | null
+  limit_reset?: string | null
+  code?: string
+  checked_at: string
+}
+
+export type SyntheticAiTestResult = {
+  test_id: string
+  status: 'PASS' | 'FAIL'
+  code: string
+  provider: string
+  model: string
+  decision_type: string | null
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number }
+  fixture_state: 'DESTROYED'
+  cleanup_verified: boolean
+  docker_resources_created: 0
+  started_at: string
+  completed_at: string
 }
 
 // BEAST disposable adversary sandbox (Phase 1.4 / 1.4-B). Deliberately gated: the browser can only
@@ -208,8 +254,30 @@ export type BeastConfig = {
   required_model: string
   synthetic_lab_only: boolean
   target_refs: string[]
+  tools: BeastTool[]
   technical_subtitle: string
   boundary_description: string
+}
+
+export type BeastTool = {
+  name: string
+  category: string
+  purpose: string
+  source: string
+}
+
+export type ToolboxToolHealth = BeastTool & {
+  status: 'READY' | 'MISSING' | 'ERROR' | 'UNAVAILABLE'
+  detail: string
+}
+
+export type ToolboxHealth = {
+  state: 'READY' | 'DEGRADED' | 'UNAVAILABLE'
+  checked_at: string
+  reason: string
+  ready?: number
+  total?: number
+  tools: ToolboxToolHealth[]
 }
 
 export type BeastResourceEnvelope = {
@@ -325,7 +393,10 @@ const jsonHeaders = { Accept: 'application/json' }
 
 export async function getJSON<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: jsonHeaders })
-  if (!response.ok) throw new Error(`Request failed (${response.status})`)
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(problem.detail ?? `Request failed (${response.status})`)
+  }
   return response.json() as Promise<T>
 }
 
@@ -342,8 +413,34 @@ export async function postJSON<T>(path: string, body: Record<string, unknown>): 
   return response.json() as Promise<T>
 }
 
+export async function putJSON<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const response = await fetch(path, {
+    method: 'PUT',
+    headers: { ...jsonHeaders, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(problem.detail ?? `Request failed (${response.status})`)
+  }
+  return response.json() as Promise<T>
+}
+
+export async function deleteJSON(path: string): Promise<void> {
+  const response = await fetch(path, { method: 'DELETE', headers: jsonHeaders })
+  if (!response.ok) {
+    const problem = (await response.json().catch(() => ({}))) as { detail?: string }
+    throw new Error(problem.detail ?? `Request failed (${response.status})`)
+  }
+}
+
 export const consoleApi = {
   config: () => getJSON<ConsoleConfig>('/api/console/config'),
+  aiModels: () => getJSON<AiModelCatalog>('/api/console/ai/models'),
+  aiBalance: () => getJSON<AiBalance>('/api/console/ai/balance'),
+  selectAiModel: (model: string) =>
+    postJSON<AiModelCatalog>('/api/console/ai/select', { model }),
+  testAi: () => postJSON<SyntheticAiTestResult>('/api/console/ai/test', {}),
   runs: () => getJSON<{ items: Run[]; count: number }>('/api/console/runs?limit=50'),
   run: (id: string) => getJSON<RunDetail>(`/api/console/runs/${encodeURIComponent(id)}`),
   findings: () => getJSON<{ items: Finding[] }>('/api/console/findings'),
@@ -351,20 +448,32 @@ export const consoleApi = {
     getJSON<{ items: TargetEntry[]; custom_target_entry: boolean }>('/api/console/targets'),
   profiles: () => getJSON<{ items: AssessmentProfile[] }>('/api/console/profiles'),
   health: () => getJSON<Health>('/api/console/health'),
+  toolboxHealth: () => getJSON<ToolboxHealth>('/api/console/toolbox/health'),
   // Onboarding an authorized company target. The controller normalizes, validates and persists it;
   // the browser only submits a typed, bounded scope.
   previewTarget: (body: TargetCreate) =>
     postJSON<ScopePreview>('/api/console/targets/preview', body as Record<string, unknown>),
   createTarget: (body: TargetCreate) =>
     postJSON<TargetEntry>('/api/console/targets', body as Record<string, unknown>),
+  // Edit an operator-onboarded target's scope in place (synthetic/seeded targets are not editable
+  // and the controller returns 404). Re-validated and re-normalized exactly like creation.
+  updateTarget: (ref: string, body: TargetCreate) =>
+    putJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}`, body as Record<string, unknown>),
+  deleteTarget: (ref: string) =>
+    deleteJSON(`/api/console/targets/${encodeURIComponent(ref)}`),
   disableTarget: (ref: string) =>
     postJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}/disable`, {}),
   enableTarget: (ref: string) =>
     postJSON<TargetEntry>(`/api/console/targets/${encodeURIComponent(ref)}/enable`, {}),
   // Typed assessment creation. It references a stable inventory target id; the controller enforces
   // that target's stored scope and fails closed on anything outside it.
-  startAssessment: (body: { target_id: string; profile_id: string }) =>
-    postJSON<{ run_id: string; target_id: string; profile_id: string; status: string }>(
+  startAssessment: (body: {
+    target_id: string
+    profile_id: string
+    request_budget: number
+    max_duration_minutes: number
+  }) =>
+    postJSON<{ run_id: string; target_id: string; profile_id: string; status: string; request_budget: number; time_budget_ms: number }>(
       '/api/console/assessments',
       body,
     ),
@@ -377,7 +486,11 @@ export const consoleApi = {
     actor_type: 'OPERATOR'
     target_ref: string
     profile_id: string
+    // Optional operator-facing TOOLBOX profile id (e.g. OUTSIDE_IN_WEB_DISCOVERY_V1). When set,
+    // the server narrows the lease to that profile's bound scenario.
+    operator_profile_id?: string
     confirmation: string
+    requested_resources?: BeastResourceEnvelope
   }) => postJSON<BeastLease>('/api/beast/leases', body),
   beastCreateRun: (body: { lease_id: string; scenario_id: string }) =>
     postJSON<BeastRunView>('/api/beast/runs', body),

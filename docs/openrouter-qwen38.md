@@ -1,9 +1,11 @@
-# OpenRouter + Qwen3.8 27B deployment
+# OpenRouter reviewed model deployment
 
-This is an explicit public-egress profile for Aegis. It uses the exact OpenRouter model ID
-`qwen/qwen3.8-27b`; aliases, `:free` variants, router-selected models and additional allowlist
-entries fail startup. The control plane never receives the API key. Only `llm-gateway` can read the
-key file, and it reaches only a CONNECT proxy whose sole allowed destination is
+This is an explicit public-egress profile for Aegis. Its exact reviewed catalog contains
+`qwen/qwen3.8-27b`, `deepseek/deepseek-v4-flash` and four synchronous GLM 5.3 routes
+(`z-ai/glm-5.3`, `z-ai/glm-5.3-flash`, `z-ai/glm-5.3-flashx`, `z-ai/glm-5.3-prime`);
+asynchronous `:batch` routes, aliases, `:free` variants, router-selected
+models and additional allowlist entries fail startup. The control plane never receives the API key. Only `llm-gateway` can read the
+untracked `.env.gateway` credential file, and it reaches only a CONNECT proxy whose sole allowed destination is
 `openrouter.ai:443`.
 
 Each request uses strict `json_schema` output plus these OpenRouter provider preferences:
@@ -20,22 +22,19 @@ Local Pydantic validation remains authoritative and fails closed on malformed ou
 model identity, redirect, truncation, unexpected content type, oversized response or token-budget
 breach. A hosted routed model has no content digest and Aegis records no deterministic seed claim.
 
-## 1. Create the key file
+## 1. Configure the gateway credential
 
 Do not put the key in `.env`, Compose YAML, a command argument, chat, Git or an extension manifest.
-On Fedora/RHEL, create a private file without echoing the value:
+Edit the existing `OPENROUTER_API_KEY=` line in the ignored `.env.gateway` file and keep the file
+private:
 
 ```bash
-install -d -m 0700 "$HOME/.config/aegis-ai"
-umask 077
-read -rsp 'OpenRouter API key: ' AEGIS_OPENROUTER_KEY_INPUT
-printf '%s' "$AEGIS_OPENROUTER_KEY_INPUT" > "$HOME/.config/aegis-ai/openrouter-api-key"
-unset AEGIS_OPENROUTER_KEY_INPUT
-chmod 0600 "$HOME/.config/aegis-ai/openrouter-api-key"
+chmod 0600 .env.gateway
+# OPENROUTER_API_KEY=<paste the key into this existing line using your editor>
 ```
 
-The Compose mount uses the SELinux `Z` relabel option. Use a dedicated copy of the key file because
-that label is private to this container workload.
+Compose loads this file only into `llm-gateway`; the control plane, toolbox and proxy do not receive
+it.
 
 ## 2. Configure prompts, agents and tools
 
@@ -58,7 +57,6 @@ python -c 'from aegis.extensions import load_extension_pack; load_extension_pack
 ## 3. Development smoke deployment
 
 ```bash
-export OPENROUTER_API_KEY_SOURCE="$HOME/.config/aegis-ai/openrouter-api-key"
 export AEGIS_EXTENSION_MANIFEST_SOURCE="$PWD/deploy/extensions/manifest.json"
 
 docker compose -f docker-compose.yml \
@@ -77,7 +75,7 @@ docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
 The health endpoint proves process/config readiness; it intentionally does not spend OpenRouter
 credits. Before accepting traffic, run the one authorized provider-only smoke call from a container
 attached to the `planner-rpc` network. It sends a single target-free planner request through the
-gateway and fails closed unless the deployed provider is `openrouter` on the exact pinned model:
+gateway and fails closed unless the deployed provider is `openrouter` on a reviewed model:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.openrouter.yml \
@@ -97,7 +95,6 @@ not tags. `AEGIS_IMAGE` is the same application image for the control plane, tar
 export AEGIS_IMAGE='registry.example.com/aegis@sha256:<64-lowercase-hex>'
 export AEGIS_EGRESS_PROXY_IMAGE='registry.example.com/squid@sha256:<64-lowercase-hex>'
 export AEGIS_DASHBOARD_IMAGE='registry.example.com/nginx@sha256:<64-lowercase-hex>'
-export OPENROUTER_API_KEY_SOURCE="$HOME/.config/aegis-ai/openrouter-api-key"
 export AEGIS_EXTENSION_MANIFEST_SOURCE=/opt/aegis/config/extensions.json
 
 docker compose -p aegis-ai-openrouter \

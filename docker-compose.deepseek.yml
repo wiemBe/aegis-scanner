@@ -26,6 +26,7 @@ services:
   control-plane:
     environment:
       AI_PROVIDER: internal_openai_compatible
+      DEBUG_LOGGING: ${AEGIS_DEBUG_LOGGING:-true}
       AI_MODEL: ${AI_MODEL:-deepseek-v4-pro}
       AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-deepseek-v4-pro}
       LLM_GATEWAY_URL: http://llm-gateway:8080
@@ -53,6 +54,7 @@ services:
         required: false
     environment:
       AI_PROVIDER: internal_openai_compatible
+      DEBUG_LOGGING: ${AEGIS_DEBUG_LOGGING:-true}
       AI_MODEL: ${AI_MODEL:-deepseek-v4-pro}
       AI_ALLOWED_MODELS: ${AI_ALLOWED_MODELS:-deepseek-v4-pro}
       AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -15,8 +16,14 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegis import run_ledger, scm_verifier, zap_verifier
-from aegis.beast.contracts import BeastRunRequest, LeaseRequest
+from aegis.beast.contracts import (
+    TOOLBOX_PROFILE_SCENARIOS,
+    BeastRun,
+    BeastRunRequest,
+    LeaseRequest,
+)
 from aegis.beast.controller import BeastController, BeastRejected
+from aegis.beast.inventory import target as beast_target
 from aegis.beast.store import BeastStore
 from aegis.console_catalog import (
     ProfileAvailability,
@@ -63,7 +70,7 @@ from aegis.operator import (
     zap_summary,
 )
 from aegis.operator_session import OperatorSessionStore
-from aegis.planner import build_planner
+from aegis.planner import GatewayPlanner, build_planner
 from aegis.process_lifecycle import ProcessLifecycle, ProcessState, ServiceDraining
 from aegis.readiness import ReadinessReport, evaluate_readiness
 from aegis.safety import SafetyController
@@ -168,26 +175,51 @@ class StreamConnections:
 streams = StreamConnections()
 
 
+def _debug_step(code: str) -> None:
+    """Emit one bounded, secret-free controller checkpoint when diagnostic tracing is enabled."""
+
+    if settings.debug_logging:
+        obs_logger.log(
+            service="control-plane",
+            event="debug_step",
+            level="DEBUG",
+            request_id="-",
+            code=code,
+        )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Replace Uvicorn's raw access log (which can expose paths/query strings) with our bounded,
     # secret-free structured request log. Defence in depth alongside `--no-access-log` in Compose.
     disable_uvicorn_access_log()
+    _debug_step("startup.lifecycle.begin")
     process_lifecycle.start()
+    _debug_step("startup.persistence.scan_store")
     store.initialize()
+    _debug_step("startup.persistence.toolbox_store")
     beast_store.initialize()
+    _debug_step("startup.persistence.multi_agent_store")
     multi_agent_store.initialize()
+    _debug_step("startup.persistence.benchmark_store")
     benchmark_store.initialize()
+    _debug_step("startup.persistence.staging_ledger")
     staging_ledger.initialize()
+    _debug_step("startup.persistence.report_queue")
     report_agent_queue.initialize()
+    _debug_step("startup.persistence.lifecycle_ledger")
     lifecycle_ledger.initialize()
+    _debug_step("startup.persistence.target_inventory")
     target_store.initialize()
     process_lifecycle.mark_serving()
+    _debug_step("startup.lifecycle.serving")
     obs_logger.log(service="control-plane", event="startup", level="INFO", request_id="-")
     try:
         yield
     finally:
+        _debug_step("shutdown.lifecycle.drain_begin")
         await process_lifecycle.drain()
+        _debug_step("shutdown.lifecycle.drain_complete")
 
 
 app = FastAPI(title=settings.app_name, version="0.2.0", lifespan=lifespan)
@@ -393,20 +425,26 @@ def _console_events(
 
 @app.get("/api/console/config")
 async def console_config() -> dict[str, object]:
+    if settings.ai_model.lower().startswith("deepseek"):
+        planner_badge = "DEEPSEEK"
+    elif settings.ai_provider == "ollama":
+        planner_badge = "LOCAL LLM"
+    else:
+        planner_badge = settings.mode_label.replace("_", " ")
     return {
         "console_version": "1.0.0",
         "planner_contract_version": PLANNER_CONTRACT_VERSION,
         "execution_policy_version": EXECUTION_POLICY_VERSION,
-        "scope_badges": ["SYNTHETIC LAB", "LOCAL LLM", "READ-ONLY", "AUTHORIZED TARGET"],
+        "scope_badges": ["SYNTHETIC LAB", planner_badge, "READ-ONLY", "AUTHORIZED TARGET"],
         "screenshots_enabled": screenshot_store.enabled,
         "operational_engines": [Engine.AEGIS_NATIVE]
         + ([Engine.NUCLEI] if service.nuclei.enabled else [])
-        + ([Engine.ZAP] if service.zap.enabled else []),
+        + ([Engine.ZAP] if service.zap.enabled else [])
+        + (["TOOLBOX"] if settings.beast_enabled else []),
         "engine_contract": [item.value for item in Engine],
         "actor_contract": [item.value for item in ActorType],
         "engine_kernel_version": ENGINE_KERNEL_VERSION,
         "engine_catalog": catalog_projection(),
-        "beast": beast.config(),
         # Active-scan configuration is operator-session protected; this public summary deliberately
         # carries only availability and never the activation ceremony or target details.
         "zap_active": {"enabled": zap_active.enabled},
@@ -778,16 +816,117 @@ async def beast_restore_target(target_ref: str, request: EmergencyStopRequest) -
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
+# --- Disposable-toolbox run projection into the normal console surfaces --------------------------
+#
+# A toolbox run lives in its own store with its own transcript; these read-only projections surface
+# it in the same Runs list/detail the operator uses for every other assessment, without inventing
+# scan-store findings: the toolbox verifier conclusion stays in the run record and transcript.
+
+_TOOLBOX_STATE_TO_CONSOLE: dict[str, str] = {
+    "QUEUED": "QUEUED",
+    "RUNNING": "RUNNING",
+    "VERIFIED": "FAIL",
+    "PASS": "PASS",
+    "REVIEW_REQUIRED": "REVIEW",
+    "INCOMPLETE": "INCOMPLETE",
+    "STOPPED": "REVIEW",
+}
+
+
+def _toolbox_target_name(target_ref: str) -> str:
+    try:
+        return beast_target(target_ref).name
+    except ValueError:
+        return target_ref
+
+
+def _toolbox_run_projection(run: BeastRun) -> dict[str, object]:
+    confirmed = run.state.value == "VERIFIED"
+    verifier_status = None
+    if isinstance(run.verifier_conclusion, dict):
+        verifier_status = run.verifier_conclusion.get("status")
+    reported_tokens = 0
+    for call in run.model_calls:
+        usage = call.get("usage") if isinstance(call, dict) else None
+        if isinstance(usage, dict):
+            total = usage.get(
+                "total_tokens",
+                int(usage.get("input_tokens", 0)) + int(usage.get("output_tokens", 0)),
+            )
+            reported_tokens += int(total)
+    return {
+        "id": run.run_id,
+        "status": _TOOLBOX_STATE_TO_CONSOLE.get(run.state.value, "REVIEW"),
+        "target_name": _toolbox_target_name(run.target_ref),
+        "scope": "Disposable toolbox lab / authorized base path (read-only)",
+        "planner": "AI adversary (disposable toolbox)",
+        "mode": "TOOLBOX",
+        "model": run.model,
+        "variant": run.operator_profile_id or f"TOOLBOX/{run.scenario_id}",
+        "scenario": run.scenario_id,
+        "created_at": run.created_at.isoformat(),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "planner_contract_version": PLANNER_CONTRACT_VERSION,
+        "execution_policy_version": EXECUTION_POLICY_VERSION,
+        "usage": {
+            "requests": len(run.commands),
+            "model_calls": len(run.model_calls),
+            "reserved_tokens": 0,
+            "reported_tokens": reported_tokens,
+        },
+        "budgets": {
+            "target_requests": run.resources.max_target_connections,
+            "model_calls": run.resources.max_commands,
+            "token_reservations": 0,
+        },
+        "candidate_counts": {"generated": 0, "validated": 0, "rejected": 0},
+        "safety_rejections": 0,
+        "finding_count": 1 if confirmed else 0,
+        "finding_ids": [],
+        "retest_of": None,
+        "linked_retests": [],
+        "verification": verifier_status,
+        "terminal_reason": run.stop_reason,
+        "engine": "TOOLBOX",
+        "adapter_version": None,
+        "tool_reported_count": 0,
+        "verifier_confirmed_count": 1 if confirmed else 0,
+        "toolbox": True,
+    }
+
+
+def _toolbox_runs(limit: int) -> list[BeastRun]:
+    """Read toolbox runs fail-soft: an uninitialized store projects as no runs, never a 5xx."""
+
+    try:
+        return beast_store.list_runs(limit)
+    except sqlite3.OperationalError:
+        return []
+
+
+def _toolbox_run(run_id: str) -> BeastRun | None:
+    try:
+        return beast_store.get_run(run_id)
+    except sqlite3.OperationalError:
+        return None
+
+
 @app.get("/api/console/runs")
 async def console_runs(limit: int = Query(default=50, ge=1, le=100)) -> dict[str, object]:
     scans = store.list_all(limit)
-    return {
-        "items": [
-            _scan_projection(scan, [item.id for item in _linked_retests(scans, scan.id)])
-            for scan in scans
-        ],
-        "count": len(scans),
-    }
+    items: list[dict[str, object]] = [
+        _scan_projection(scan, [item.id for item in _linked_retests(scans, scan.id)])
+        for scan in scans
+    ]
+    # Disposable-toolbox assessments surface in the same list; their transcript stays in the
+    # toolbox store and opens through the run-detail toolbox branch.
+    toolbox_items = [_toolbox_run_projection(run) for run in _toolbox_runs(limit)]
+    merged = sorted(
+        items + toolbox_items,
+        key=lambda item: str(item.get("created_at", "")),
+        reverse=True,
+    )[:limit]
+    return {"items": merged, "count": len(merged)}
 
 
 @app.get("/api/console/runs.csv")
@@ -809,6 +948,23 @@ async def console_runs_csv() -> Response:
 async def console_run(scan_id: str) -> dict[str, object]:
     scan = store.get(scan_id)
     if scan is None:
+        toolbox = _toolbox_run(scan_id)
+        if toolbox is not None:
+            # A disposable-toolbox assessment: the normal run projection plus the raw toolbox
+            # record + audit events the transcript panel renders. No scan-store records are
+            # fabricated — the verifier conclusion stays in the run record itself.
+            return {
+                "run": _toolbox_run_projection(toolbox),
+                "events": [],
+                "evidence": [],
+                "screenshot_artifacts": [],
+                "lifecycle": [],
+                "execution_policy": {},
+                "toolbox": {
+                    "run": toolbox.model_dump(mode="json"),
+                    "events": beast_store.events(scan_id),
+                },
+            }
         raise HTTPException(status_code=404, detail="Run not found")
     scans = store.list_all()
     retests = _linked_retests(scans, scan.id)
@@ -1244,12 +1400,48 @@ def _resolve_target(target_id: str) -> dict[str, object] | None:
 async def _profile_availability() -> dict[str, ProfileAvailability]:
     """The single source of truth for whether each catalog profile can execute right now."""
 
+    _debug_step("profiles.preflight.begin")
     if service.nuclei.enabled:
         await service.nuclei.attest()
+        _debug_step("profiles.preflight.nuclei_attested")
     if service.zap.enabled:
         await service.zap.attest()
+        _debug_step("profiles.preflight.zap_attested")
     nuclei_ok = service.nuclei.enabled and service.nuclei.health().authorized
     zap_ok = service.zap.enabled and service.zap.health().authorized
+    toolbox = await beast.toolbox_health()
+    _debug_step("profiles.preflight.toolbox_checked")
+    toolbox_tools = {
+        str(item.get("name")): str(item.get("status"))
+        for item in toolbox.get("tools", [])
+        if isinstance(item, dict)
+    }
+    toolbox_eligibility_reason = ""
+    if not settings.beast_enabled:
+        toolbox_eligibility_reason = "The disposable toolbox is not enabled in this deployment."
+    elif settings.ai_provider not in {
+        "ollama",
+        "internal_openai_compatible",
+        "deepseek",
+        "openrouter",
+    }:
+        toolbox_eligibility_reason = (
+            "Toolbox assessments require a supported local or hosted provider."
+        )
+    # No fixed-model gate: the toolbox runs on the model the operator selected in the console. The
+    # gateway's reviewed allowlist governs what can be selected, and every BEAST decision is
+    # identity-checked against that live selection at run time.
+
+    def toolbox_profile(*required: str) -> ProfileAvailability:
+        if toolbox_eligibility_reason:
+            return {"available": False, "reason": toolbox_eligibility_reason}
+        missing = [name for name in required if toolbox_tools.get(name) != "READY"]
+        if missing:
+            return {
+                "available": False,
+                "reason": f"Tool self-check failed: {', '.join(missing)}.",
+            }
+        return {"available": True, "reason": ""}
 
     def engine_reason(enabled: bool, authorized: bool, enable_flag: str) -> ProfileAvailability:
         if not enabled:
@@ -1264,7 +1456,7 @@ async def _profile_availability() -> dict[str, ProfileAvailability]:
             }
         return {"available": True, "reason": ""}
 
-    return {
+    result: dict[str, ProfileAvailability] = {
         "aegis-native-bola-synthetic": {"available": True, "reason": ""},
         "NUCLEI_LAB_SAFE_HTTP_V1": engine_reason(service.nuclei.enabled, nuclei_ok, "Nuclei"),
         "ZAP_LAB_PASSIVE_OPENAPI_V1": engine_reason(service.zap.enabled, zap_ok, "ZAP"),
@@ -1279,7 +1471,20 @@ async def _profile_availability() -> dict[str, ProfileAvailability]:
                 ),
             }
         ),
+        "OUTSIDE_IN_WEB_DISCOVERY_V1": toolbox_profile("ffuf", "gobuster"),
+        "TOOLBOX_INFORMATION_EXPOSURE_V1": toolbox_profile("curl", "nuclei"),
+        "TOOLBOX_BOLA_READONLY_V1": toolbox_profile("curl", "httpie"),
+        "SQLMAP_AUTHORIZED_WEB_V1": toolbox_profile("sqlmap"),
+        "IP_NETWORK_ASSESSMENT_V1": {
+            "available": False,
+            "reason": (
+                "The signed-lease network runner is not enabled in this deployment. The profile "
+                "is visible so authorized IP/CIDR targets no longer appear to have no assessment."
+            ),
+        },
     }
+    _debug_step("profiles.preflight.complete")
+    return result
 
 
 @app.get("/api/console/targets")
@@ -1294,6 +1499,13 @@ async def console_targets() -> dict[str, object]:
         # Custom entry now happens through the typed onboarding endpoint, not free-text scan input.
         "custom_target_entry": True,
     }
+
+
+@app.get("/api/console/toolbox/health")
+async def console_toolbox_health() -> dict[str, object]:
+    """Live fixed-command probes for tools available to normal assessment profiles."""
+
+    return await beast.toolbox_health()
 
 
 @app.post("/api/console/targets/preview")
@@ -1330,11 +1542,21 @@ async def console_update_target(target_id: str, request: TargetCreate) -> dict[s
     if target_store.get(target_id) is None:
         raise HTTPException(status_code=404, detail="Target not found")
     try:
-        record = target_store.update_scope(target_id, request)
+        record = target_store.update_scope(target_id, request, operator_id="local-operator")
     except TargetValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.code) from None
     assert record is not None
     return record.projection()
+
+
+@app.delete("/api/console/targets/{target_id}", status_code=204)
+async def console_delete_target(target_id: str) -> Response:
+    """Delete an operator-onboarded target; seeded catalog targets are immutable."""
+
+    record = target_store.delete(target_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+    return Response(status_code=204)
 
 
 @app.post("/api/console/targets/{target_id}/disable")
@@ -1357,6 +1579,165 @@ class AssessmentCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target_id: str = Field(min_length=3, max_length=80)
     profile_id: str = Field(min_length=3, max_length=100)
+    request_budget: int | None = Field(default=None, ge=1, le=100_000, strict=True)
+    max_duration_minutes: float | None = Field(
+        default=None,
+        gt=0,
+        le=1_440,
+        allow_inf_nan=False,
+        strict=True,
+    )
+
+
+def _profiles_with_effective_limits(
+    availability: dict[str, ProfileAvailability],
+) -> list[dict[str, object]]:
+    """Project deploy-time ceilings so the browser never advertises a limit we would reject."""
+
+    items = profile_directory(availability)
+    for profile in items:
+        if profile.get("engine") == "TOOLBOX":
+            continue
+        capabilities = profile.get("capabilities")
+        if not isinstance(capabilities, list):
+            continue
+        for capability in capabilities:
+            if not isinstance(capability, dict):
+                continue
+            capability["request_budget"] = min(
+                int(capability.get("request_budget", 0)), settings.max_requests_per_scan
+            )
+            capability["time_budget_ms"] = min(
+                int(capability.get("time_budget_ms", 0)),
+                round(settings.scan_timeout_seconds * 1000),
+            )
+    return items
+
+
+class AiModelSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+
+
+def _ai_change_blocker() -> str | None:
+    """Do not change model identity underneath work that already reserved provider budgets."""
+
+    if process_lifecycle.in_flight:
+        return "ASSESSMENT_IN_PROGRESS"
+    if beast_store.active_runs():
+        return "TOOLBOX_ASSESSMENT_IN_PROGRESS"
+    if zap_active.session.state in {"ARMED", "RUNNING"}:
+        return "ZAP_ACTIVE_SESSION_IN_PROGRESS"
+    return None
+
+
+async def _gateway_control_request(
+    method: str,
+    path: str,
+    *,
+    payload: dict[str, object] | None = None,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object]:
+    """Call a fixed internal gateway control route and return a bounded JSON object."""
+
+    url = settings.llm_gateway_url.rstrip("/") + path
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds, follow_redirects=False, trust_env=False
+        ) as client:
+            response = await client.request(method, url, json=payload)
+        if response.status_code != 200 or len(response.content) > 65_536:
+            raise HTTPException(status_code=409, detail="GATEWAY_CONTROL_REJECTED")
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("gateway response is not an object")
+        return body
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=503, detail="AI_GATEWAY_UNAVAILABLE") from None
+
+
+@app.get("/api/console/ai/models")
+async def console_ai_models() -> dict[str, object]:
+    if not isinstance(planner, GatewayPlanner):
+        return {
+            "provider": "demo",
+            "current_model": "demo-heuristic",
+            "models": ["demo-heuristic"],
+            "runtime_switching": False,
+        }
+    return await _gateway_control_request("GET", "/v1/models")
+
+
+@app.get("/api/console/ai/balance")
+async def console_ai_balance() -> dict[str, object]:
+    if not isinstance(planner, GatewayPlanner):
+        return {
+            "provider": "demo",
+            "state": "UNSUPPORTED",
+            "available": None,
+            "balances": [],
+            "checked_at": datetime.now(UTC).isoformat(),
+        }
+    return await _gateway_control_request("GET", "/v1/billing/balance")
+
+
+@app.post("/api/console/ai/select")
+async def console_ai_select(request: AiModelSelection) -> dict[str, object]:
+    if not isinstance(planner, GatewayPlanner):
+        raise HTTPException(status_code=409, detail="LIVE_AI_GATEWAY_NOT_CONFIGURED")
+    blocker = _ai_change_blocker()
+    if blocker is not None:
+        raise HTTPException(status_code=409, detail=blocker)
+    body = await _gateway_control_request(
+        "POST", "/v1/models/select", payload=request.model_dump(mode="json")
+    )
+    current = body.get("current_model")
+    models = body.get("models")
+    if current != request.model or not isinstance(models, list) or current not in models:
+        raise HTTPException(status_code=502, detail="GATEWAY_MODEL_SELECTION_MISMATCH")
+    # The planner performs its own exact response-model check. Update it only after the gateway
+    # acknowledged the same allowlisted id; credentials and provider URLs never enter this process.
+    planner.model = request.model
+    settings.ai_model = request.model
+    obs_logger.log(
+        service="control-plane",
+        event="security_check",
+        level="INFO",
+        request_id="-",
+        code="AI_MODEL_SELECTION_APPLIED",
+    )
+    return body
+
+
+@app.post("/api/console/ai/test")
+async def console_ai_test() -> dict[str, object]:
+    if not isinstance(planner, GatewayPlanner):
+        raise HTTPException(status_code=409, detail="LIVE_AI_GATEWAY_NOT_CONFIGURED")
+    blocker = _ai_change_blocker()
+    if blocker is not None:
+        raise HTTPException(status_code=409, detail=blocker)
+    body = await _gateway_control_request(
+        "POST",
+        "/v1/synthetic-test",
+        payload={},
+        timeout_seconds=settings.model_timeout_seconds + 10,
+    )
+    if body.get("model") != planner.model or body.get("cleanup_verified") is not True:
+        raise HTTPException(status_code=502, detail="SYNTHETIC_AI_TEST_INVALID_RESULT")
+    obs_logger.log(
+        service="control-plane",
+        event="security_check",
+        level="INFO" if body.get("status") == "PASS" else "ERROR",
+        request_id="-",
+        code=(
+            "SYNTHETIC_AI_TEST_PASSED"
+            if body.get("status") == "PASS"
+            else "SYNTHETIC_AI_TEST_FAILED"
+        ),
+    )
+    return body
 
 
 def _record_run_ledger(scan_id: str, target: dict[str, object], profile_id: str) -> None:
@@ -1371,9 +1752,10 @@ def _record_run_ledger(scan_id: str, target: dict[str, object], profile_id: str)
     except Exception:  # noqa: BLE001 - a ledger write must never break or fail a run
         obs_logger.log(
             service="control-plane",
-            event="run_ledger_write_failed",
-            level="WARN",
+            event="operation_error",
+            level="ERROR",
             request_id="-",
+            code="RUN_LEDGER_WRITE_FAILED",
         )
 
 
@@ -1401,6 +1783,15 @@ async def console_create_assessment(request: AssessmentCreate) -> dict[str, obje
     supported_profiles = target.get("supported_profile_ids", [])
     if not isinstance(supported_profiles, list) or request.profile_id not in supported_profiles:
         raise HTTPException(status_code=409, detail="PROFILE_INCOMPATIBLE_WITH_TARGET")
+    if request.profile_id in TOOLBOX_PROFILE_SCENARIOS:
+        # Operator-facing TOOLBOX profiles start from the assessment wizard's toolbox step: the
+        # disposable-sandbox ceremony (server preflight, typed confirmation phrase, single-use
+        # lease) is the operator authorization this endpoint cannot replace or bypass. Fail
+        # closed with the exact reason instead of the generic executor error, regardless of
+        # whether the toolbox happens to be healthy right now.
+        raise HTTPException(
+            status_code=409, detail="TOOLBOX_PROFILE_STARTS_FROM_TOOLBOX_STEP"
+        )
     availability = await _profile_availability()
     state = availability.get(request.profile_id, {"available": False, "reason": "UNKNOWN_PROFILE"})
     if not state["available"]:
@@ -1408,13 +1799,45 @@ async def console_create_assessment(request: AssessmentCreate) -> dict[str, obje
         # target's engine profiles are unavailable, so no real company scan is ever started here.
         raise HTTPException(status_code=409, detail="PROFILE_UNAVAILABLE_FOR_DEPLOYMENT")
 
+    profile = next(
+        (
+            item
+            for item in _profiles_with_effective_limits(availability)
+            if item.get("profile_id") == request.profile_id
+        ),
+        None,
+    )
+    capabilities = profile.get("capabilities", []) if isinstance(profile, dict) else []
+    primary = capabilities[0] if isinstance(capabilities, list) and capabilities else None
+    if not isinstance(primary, dict):
+        raise HTTPException(status_code=409, detail="PROFILE_LIMITS_UNAVAILABLE")
+    policy_requests = min(int(primary["request_budget"]), settings.max_requests_per_scan)
+    policy_time_ms = min(
+        int(primary["time_budget_ms"]), round(settings.scan_timeout_seconds * 1000)
+    )
+    requested_time_ms = (
+        round(request.max_duration_minutes * 60_000)
+        if request.max_duration_minutes is not None
+        else policy_time_ms
+    )
+    requested_requests = request.request_budget or policy_requests
+    if requested_requests > policy_requests:
+        raise HTTPException(status_code=422, detail="REQUEST_BUDGET_EXCEEDS_POLICY")
+    if requested_time_ms > policy_time_ms:
+        raise HTTPException(status_code=422, detail="DURATION_EXCEEDS_POLICY")
+
     if (
         request.target_id == "synthetic-bank-api"
         and request.profile_id == "aegis-native-bola-synthetic"
     ):
         try:
             result = process_lifecycle.create_and_submit(
-                create=lambda: service.create(ScanCreate()),
+                create=lambda: service.create(
+                    ScanCreate(
+                        request_budget=requested_requests,
+                        time_budget_ms=requested_time_ms,
+                    )
+                ),
                 work_id=lambda scan: scan.id,
                 work_factory=lambda scan: _run_and_record(scan.id, target, request.profile_id),
                 on_timeout=lambda scan: service.mark_shutdown_timeout(scan.id),
@@ -1426,6 +1849,8 @@ async def console_create_assessment(request: AssessmentCreate) -> dict[str, obje
             "target_id": request.target_id,
             "profile_id": request.profile_id,
             "status": result.status.value,
+            "request_budget": requested_requests,
+            "time_budget_ms": requested_time_ms,
         }
     # A supported, available, but non-native combination (e.g. a range target with an enabled engine
     # adapter). Not reachable in the default deployment; fail closed rather than guess an executor.
@@ -1439,7 +1864,7 @@ async def console_profiles() -> dict[str, object]:
     returned unavailable with a precise operator-readable reason (never a clickable fake option)."""
 
     return {
-        "items": profile_directory(await _profile_availability()),
+        "items": _profiles_with_effective_limits(await _profile_availability()),
         "provenance_policy": (
             "Profiles are backed by the controller-owned engine capability catalog. Engine and "
             "tool results are unconfirmed until the independent Aegis verifier promotes them."

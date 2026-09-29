@@ -368,7 +368,11 @@ def test_compose_topology_and_runner_hardening_are_fail_closed() -> None:
         assert service["cap_drop"] == ["ALL"]
         assert service["security_opt"] == ["no-new-privileges:true"]
         assert "ports" not in service and "volumes" not in service
-        assert service["environment"] == {}
+        # The runner<->guard control secret is the ONLY environment entry, and it is supplied by
+        # interpolation from the operator environment / .env — never a baked-in secret value. The
+        # guard refuses to boot without it; each process pops it from the environment at startup.
+        assert set(service["environment"]) == {"AEGIS_ZAP_GUARD_CONTROL_SECRET"}
+        assert service["environment"]["AEGIS_ZAP_GUARD_CONTROL_SECRET"].startswith("${")
         assert int(service["user"].split(":")[0]) >= 10000
         assert service["pids_limit"] and service["mem_limit"] and service["cpus"]
     assert runner["tmpfs"] == ["/work:size=256m,mode=0700,uid=10002,gid=10002,nosuid,nodev,noexec"]
